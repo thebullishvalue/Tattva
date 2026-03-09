@@ -576,7 +576,7 @@ def main():
                     st.error(f"Error: {e}")
                     return
         else:
-            default_url = "https://docs.google.com/spreadsheets/d/1po7z42n3dYIQGAvn0D1-a4pmyxpnGPQ13TrNi3DB5_c/edit?gid=1738251155#gid=1738251155"
+            default_url = "https://docs.google.com/spreadsheets/d/1po7z42n3dYIQGAvn0D1-a4pmyxpnGPQ13TrNi3DB5_c/edit?gid=1938234952#gid=1938234952"
             sheet_url = st.text_input("Sheet URL", value=default_url, label_visibility="collapsed")
             if st.button("🔄 LOAD DATA", type="primary"):
                 with st.spinner("Loading..."):

@@ -1,5 +1,5 @@
 /* ================================================================
-   Nishkarsh v1.2.0 — Obsidian Quant Terminal CSS
+   Tattva v2.0.0 — Obsidian Quant Terminal CSS
    Extracted to theme.css for maintainability
 
    Aesthetic: "Obsidian Quant" — Institutional Research Terminal
@@ -239,7 +239,7 @@ footer {
 }
 
 .premium-header h1::after {
-    content: "निष्कर्ष";
+    content: "तत्त्व";
     position: absolute;
     right: 0;
     top: 0;

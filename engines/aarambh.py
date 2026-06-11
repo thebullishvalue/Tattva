@@ -475,7 +475,7 @@ class FairValueEngine:
                 # `_ENET_ALPHA_KW` is {"n_alphas": 10} or {"alphas": 10} depending
                 # on the installed sklearn — keeps a cheap 10-point alpha path
                 # (the 100-point default is ~10× slower over the walk-forward).
-                enet = ElasticNetCV(l1_ratio=[0.5, 0.9, 1.0], **_ENET_ALPHA_KW, cv=2, max_iter=2000, tol=1e-2, selection="random", n_jobs=1)
+                enet = ElasticNetCV(l1_ratio=0.5, **_ENET_ALPHA_KW, cv=2, max_iter=2000, tol=1e-2, selection="random", n_jobs=1)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     enet.fit(X_feat, y_train, sample_weight=weights)

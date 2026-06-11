@@ -1,0 +1,345 @@
+"""
+Tattva v2.0.0 — Unified data fetcher: yfinance macro / commodity / OHLCV universe.
+तत्त्व (Tattva) — "Principle / Essence"
+
+Each external call is wrapped with:
+  1. **Two-tier cache** (memory + disk, TTL + versioned keys) — `data/cache.py`
+  2. **Circuit breaker** (CLOSED → OPEN → HALF_OPEN per service) — `data/circuit_breaker.py`
+  3. **Retry-with-backoff** (1s → 2s → 4s) for transient failures
+  4. **Stale-fallback** — if a fetch fails AND the circuit is open, the last-good
+     snapshot is returned so the UI keeps working through API outages.
+
+Macro data is sourced from Sanket's Global Macro bond-ETF universe via yfinance
+(replaces the broken Stooq direct-yield endpoints, which started returning HTML
+error pages instead of CSV in late 2025).
+"""
+
+from __future__ import annotations
+
+import logging
+
+import pandas as pd
+import yfinance as yf
+
+from core.config import (
+    GLOBAL_MACRO_MAP,
+    MACRO_SYMBOLS_YF,
+    COMMODITY_TARGETS,
+)
+from data.schema import UnifiedDataset
+from data.cache import ohlcv_cache, macro_cache
+from data.circuit_breaker import (
+    yfinance_circuit,
+    CircuitBreakerError,
+    RetryWithBackoff,
+)
+
+log = logging.getLogger(__name__)
+
+
+# ─── Constituent OHLCV (yfinance) ────────────────────────────────────────────
+
+@RetryWithBackoff(max_retries=2, initial_delay=1.5, backoff_factor=2.0)
+def _yfinance_batch_download(
+    symbols_tuple: tuple[str, ...],
+    start_yf: str,
+    end_yf: str,
+) -> pd.DataFrame:
+    """Single raw yfinance batch call — wrapped with retry."""
+    raw = yf.download(
+        list(symbols_tuple),
+        start=start_yf,
+        end=end_yf,
+        progress=False,
+        auto_adjust=True,
+        group_by="ticker",
+    )
+    if raw is None or (hasattr(raw, "empty") and raw.empty):
+        raise ValueError("Empty yfinance batch response")
+    return raw
+
+
+def fetch_constituent_ohlcv(
+    symbols: list[str],
+    start_date: pd.Timestamp | str,
+    end_date: pd.Timestamp | str,
+) -> dict[str, pd.DataFrame]:
+    """Batch-download OHLCV for Nifty 50 constituents via yfinance."""
+    start_yf = str(pd.Timestamp(start_date).date())
+    end_yf = str(pd.Timestamp(end_date).date() + pd.Timedelta(days=1))
+    # Sorted tuple → deterministic cache key regardless of input order.
+    sym_key = tuple(sorted(symbols))
+
+    cached = ohlcv_cache.get(sym_key, start_yf, end_yf)
+    if cached is not None:
+        return cached
+
+    try:
+        raw = yfinance_circuit.call(
+            _yfinance_batch_download, sym_key, start_yf, end_yf
+        )
+    except CircuitBreakerError as e:
+        stale = ohlcv_cache.get_stale(sym_key, start_yf, end_yf)
+        if stale is not None:
+            log.warning("yfinance circuit open, serving stale OHLCV")
+            return stale
+        log.error("yfinance unavailable, no stale snapshot: %s", e)
+        return {}
+    except Exception as e:
+        log.error("yfinance batch download failed: %s", e)
+        stale = ohlcv_cache.get_stale(sym_key, start_yf, end_yf)
+        return stale if stale is not None else {}
+
+    result: dict[str, pd.DataFrame] = {}
+    if isinstance(raw, pd.DataFrame) and isinstance(raw.columns, pd.MultiIndex):
+        for sym in symbols:
+            try:
+                sub = raw.xs(sym, level=0, axis=1)
+                close_col = sub.get(
+                    "Close", sub.iloc[:, 0] if len(sub.columns) else pd.Series()
+                )
+                if not sub.empty and not close_col.isnull().all():
+                    if isinstance(sub.columns, pd.MultiIndex):
+                        sub.columns = [c[0] for c in sub.columns]
+                    result[sym] = sub
+            except KeyError:
+                pass
+
+    if result:
+        ohlcv_cache.put(sym_key, start_yf, end_yf, value=result)
+    return result
+
+
+# ─── Macro data (yfinance Global Macro universe + commodities/FX) ───────────
+
+
+def _fetch_macro_live_uncached(start_str: str, end_str: str) -> pd.DataFrame:
+    """Single yfinance batch for the full macro universe (Sanket-style).
+
+    Combines Sanket's Global Macro bond ETFs (proxy for global yield dynamics)
+    with the existing commodity + FX symbols. One batch call, one circuit hit.
+    """
+    tickers = tuple(sorted(set(GLOBAL_MACRO_MAP.values()) | set(MACRO_SYMBOLS_YF.values())))
+    if not tickers:
+        return pd.DataFrame()
+
+    try:
+        yf_raw = yfinance_circuit.call(
+            _yfinance_batch_download_macro, tickers, start_str, end_str
+        )
+    except CircuitBreakerError as e:
+        log.warning("yfinance macro fetch blocked by circuit: %s", e)
+        return pd.DataFrame()
+    except Exception as e:
+        log.warning("Yahoo Finance macro fetch failed: %s", e)
+        return pd.DataFrame()
+
+    if yf_raw is None or yf_raw.empty:
+        return pd.DataFrame()
+
+    if isinstance(yf_raw.columns, pd.MultiIndex):
+        if "Close" in yf_raw.columns.get_level_values(0):
+            combined = yf_raw["Close"]
+        elif "Adj Close" in yf_raw.columns.get_level_values(0):
+            combined = yf_raw["Adj Close"]
+        else:
+            combined = yf_raw
+    else:
+        combined = yf_raw
+
+    if combined.index.tz is not None:
+        combined.index = combined.index.tz_localize(None)
+    combined = combined.sort_index()
+
+    if not combined.empty:
+        combined = combined.ffill()
+    return combined
+
+
+@RetryWithBackoff(max_retries=2, initial_delay=1.5, backoff_factor=2.0)
+def _yfinance_batch_download_macro(
+    tickers_tuple: tuple[str, ...], start: str, end: str
+) -> pd.DataFrame:
+    """Macro yfinance batch fetch — separated to allow distinct retry budget.
+
+    Uses ``auto_adjust=True`` and ``threads=True`` (matching Sanket's
+    ``fetch_batch_data``) so the macro universe is pulled in parallel by
+    yfinance's internal pool.
+    """
+    raw = yf.download(
+        list(tickers_tuple),
+        start=start,
+        end=end,
+        progress=False,
+        auto_adjust=True,
+        threads=True,
+    )
+    if raw is None or (hasattr(raw, "empty") and raw.empty):
+        raise ValueError("Empty yfinance macro response")
+    return raw
+
+
+def fetch_macro_live(
+    start_date: pd.Timestamp | str,
+    end_date: pd.Timestamp | str,
+) -> pd.DataFrame:
+    """Fetch macro indicators with cache + rate-limit + circuit + stale fallback."""
+    start_str = str(pd.Timestamp(start_date).date())
+    end_str = str(pd.Timestamp(end_date).date() + pd.Timedelta(days=1))
+
+    cached = macro_cache.get(start_str, end_str)
+    if cached is not None:
+        return cached
+
+    try:
+        combined = _fetch_macro_live_uncached(start_str, end_str)
+    except Exception as e:
+        log.error("Macro fetch raised unexpectedly: %s", e)
+        combined = pd.DataFrame()
+
+    if not combined.empty:
+        macro_cache.put(start_str, end_str, value=combined)
+        return combined
+
+    # Nothing came back this run — try a stale snapshot before returning empty.
+    stale = macro_cache.get_stale(start_str, end_str)
+    if stale is not None:
+        log.warning("Macro fetch empty; serving last-good snapshot")
+        return stale
+    return combined
+
+
+# ─── Commodity model dataset (Aarambh matrix from yfinance) ──────────────────
+
+
+def fetch_commodity_dataset(
+    start_date: pd.Timestamp | str,
+    end_date: pd.Timestamp | str,
+) -> tuple[pd.DataFrame | None, str | None]:
+    """Build the Aarambh model matrix from the full yfinance macro universe.
+
+    Wraps :func:`fetch_macro_live`, restricts the Close frame to the combined
+    ``GLOBAL_MACRO_MAP`` (bond/rates/equity/risk/real-asset ETFs) +
+    ``MACRO_SYMBOLS_YF`` (commodities + FX) universe, renames yfinance tickers
+    to friendly names (Gold / Silver / Copper / US 10-Year Yield / VIX / …),
+    and exposes the DatetimeIndex as a ``DATE`` column. The result has the same
+    shape contract the Streamlit app expects from the old Google Sheet: numeric
+    predictor columns + a date column, ready to feed the walk-forward engine.
+
+    Returns ``(df, None)`` on success or ``(None, error_message)`` on failure.
+    """
+    macro_df = fetch_macro_live(start_date, end_date)
+    if macro_df is None or macro_df.empty:
+        return None, "No macro/commodity data returned from yfinance."
+
+    # ticker → friendly name (inverse of the combined friendly → ticker maps).
+    name_to_ticker = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF}
+    ticker_to_name = {ticker: name for name, ticker in name_to_ticker.items()}
+    present = [t for t in ticker_to_name if t in macro_df.columns]
+    if not present:
+        return None, "Macro/commodity symbols missing from yfinance response."
+
+    renamed = macro_df[present].rename(columns=ticker_to_name)
+
+    # Drop columns yfinance returned empty / near-empty: failed or delisted
+    # tickers (e.g. BUNL.L) come back as all-NaN. Such a column survives the
+    # app's ffill()+bfill() still all-NaN and would wipe every row at the
+    # subsequent dropna() step. Require ≥20% real coverage; always retain the
+    # commodity targets regardless.
+    coverage = renamed.notna().mean()
+    keep = [c for c in renamed.columns if coverage[c] >= 0.20]
+    for tgt in COMMODITY_TARGETS:
+        if tgt in renamed.columns and tgt not in keep:
+            keep.append(tgt)
+    if not keep:
+        return None, "All macro/commodity columns were empty."
+
+    df = renamed[keep].copy()
+    df.insert(0, "DATE", pd.to_datetime(df.index))
+    df = df.reset_index(drop=True)
+    return df, None
+
+
+# ─── Unified dataset builder ─────────────────────────────────────────────────
+
+
+def build_unified_dataset(
+    aarambh_df: pd.DataFrame,
+    target_col: str = "NIFTY50_PE",
+    feature_cols: list[str] | None = None,
+    date_col: str | None = None,
+    constituents_ohlcv: dict[str, pd.DataFrame] | None = None,
+    macro_df: pd.DataFrame | None = None,
+) -> UnifiedDataset:
+    """Build a ``UnifiedDataset`` by merging all data sources.
+
+    Parameters
+    ----------
+    aarambh_df : pd.DataFrame
+        Raw Google Sheet data.
+    target_col : str
+        Column name for the Nifty 50 PE target variable.
+    feature_cols : list[str] | None
+        Predictor column names.
+    date_col : str | None
+        Date column name in the sheet.
+    constituents_ohlcv : dict[str, pd.DataFrame] | None
+        Per-constituent OHLCV data.
+    macro_df : pd.DataFrame | None
+        Combined macro indicators.
+
+    Returns
+    -------
+    UnifiedDataset
+        Unified dataset with aligned date indices.
+    """
+    if feature_cols is None:
+        feature_cols = [
+            c for c in aarambh_df.columns
+            if c != target_col and c != date_col
+        ]
+
+    cols = [target_col] + feature_cols
+    if date_col and date_col in aarambh_df.columns:
+        cols.append(date_col)
+    valid_cols = [c for c in cols if c in aarambh_df.columns]
+    data = aarambh_df[valid_cols].copy()
+
+    if date_col and date_col in data.columns:
+        data[date_col] = pd.to_datetime(data[date_col], errors="coerce", dayfirst=True)
+        data = data.dropna(subset=[date_col]).sort_values(date_col)
+
+    for col in [target_col] + feature_cols:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    numeric_cols = [target_col] + feature_cols
+    data[numeric_cols] = data[numeric_cols].ffill().bfill()
+    data = data.dropna(subset=numeric_cols).reset_index(drop=True)
+
+    if date_col and date_col in data.columns:
+        date_index = pd.DatetimeIndex(data[date_col])
+    else:
+        date_index = pd.DatetimeIndex(
+            pd.date_range(end=pd.Timestamp.today(), periods=len(data), freq="B")
+        )
+
+    nifty50_pe = data[target_col].values
+    predictors = data[feature_cols].copy()
+
+    macro_aligned = (
+        macro_df.reindex(date_index).ffill()
+        if macro_df is not None and not macro_df.empty
+        else pd.DataFrame()
+    )
+
+    if constituents_ohlcv is None:
+        constituents_ohlcv = {}
+
+    return UnifiedDataset(
+        date_index=date_index,
+        nifty50_pe=nifty50_pe,
+        aarambh_predictors=predictors,
+        constituent_ohlcv=constituents_ohlcv,
+        macro_df=macro_aligned,
+        trading_days=list(date_index),
+    )

@@ -16,8 +16,13 @@ statsmodels>=0.14.0
 # Self-Calibration / Intelligence Mode (Optuna TPE optimizer)
 optuna>=3.5.0
 
-# Data Sources (yfinance pulls requests transitively)
+# Data Sources
 yfinance>=0.2.31
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+openpyxl>=3.1.0
+html5lib>=1.1
 
 # Terminal Support
 colorama>=0.4.6

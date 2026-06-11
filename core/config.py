@@ -14,7 +14,7 @@ COMPANY = "@thebullishvalue"
 # ─── Aarambh Engine Defaults ─────────────────────────────────────────────────
 
 LOOKBACK_WINDOWS = (5, 10, 20, 50, 100)
-MIN_TRAIN_SIZE = 50
+MIN_TRAIN_SIZE = 252
 MAX_TRAIN_SIZE = 1250
 REFIT_INTERVAL = 10
 RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0)

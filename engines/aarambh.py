@@ -68,6 +68,19 @@ from analytics.utils import (
 )
 
 
+# Ensemble fit failures repeat on every walk-forward window; log each distinct
+# (model, error) only once per process so a systematic issue — e.g. a sklearn
+# API change — doesn't flood the terminal with hundreds of identical lines.
+_ENSEMBLE_WARNED: set[str] = set()
+
+
+def _warn_once(model: str, e: Exception) -> None:
+    key = f"{model}:{type(e).__name__}:{e}"
+    if key not in _ENSEMBLE_WARNED:
+        _ENSEMBLE_WARNED.add(key)
+        logging.warning("%s fit failed (further repeats suppressed): %s", model, e)
+
+
 class FairValueEngine:
     """Walk-forward fair value engine with multi-lookback breadth analytics.
 
@@ -428,7 +441,7 @@ class FairValueEngine:
                     X_feat = reducer.fit_transform(X_scaled)
                     models["reducer"] = reducer
                 except Exception as e:
-                    logging.warning("PCA reduce failed at t=%d: %s", t, e)
+                    _warn_once("PCA-reduce", e)
                     reducer, X_feat = None, X_scaled
 
             try:
@@ -436,7 +449,7 @@ class FairValueEngine:
                 ridge.fit(X_feat, y_train, sample_weight=weights)
                 models["ridge"] = ridge
             except Exception as e:
-                logging.warning("Ridge fit failed at t=%d: %s", t, e)
+                _warn_once("Ridge", e)
 
             try:
                 huber = HuberRegressor(epsilon=HUBER_EPSILON, max_iter=HUBER_MAX_ITER, tol=1e-3)
@@ -445,16 +458,19 @@ class FairValueEngine:
                     huber.fit(X_feat, y_train, sample_weight=weights)
                 models["huber"] = huber
             except Exception as e:
-                logging.warning("Huber fit failed at t=%d: %s", t, e)
+                _warn_once("Huber", e)
 
             try:
-                enet = ElasticNetCV(l1_ratio=[0.5, 0.9, 1.0], alphas=[0.01, 0.1, 1.0, 10.0, 100.0], cv=2, max_iter=2000, tol=1e-2, selection="random", n_jobs=1)
+                # NOTE: `n_alphas` was removed from ElasticNetCV in newer sklearn
+                # (it's an error there, deprecated→removed). Omit it and rely on
+                # the path defaults so this works across sklearn versions.
+                enet = ElasticNetCV(l1_ratio=[0.5, 0.9, 1.0], cv=2, max_iter=2000, tol=1e-2, selection="random", n_jobs=1)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     enet.fit(X_feat, y_train, sample_weight=weights)
                 models["elasticnet"] = enet
             except Exception as e:
-                logging.warning("ElasticNet fit failed at t=%d: %s", t, e)
+                _warn_once("ElasticNet", e)
 
             try:
                 if reducer is not None:
@@ -473,7 +489,7 @@ class FairValueEngine:
                     ols.fit(X_pca, y_train, sample_weight=weights)
                     models["ols"] = ols
             except Exception as e:
-                logging.warning("PCA/OLS fit failed at t=%d: %s", t, e)
+                _warn_once("PCA/OLS", e)
 
         return models, scaler, valid_cols
 

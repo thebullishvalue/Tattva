@@ -73,6 +73,21 @@ from core.logger_config import console, generate_run_id, Colors
 from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS
 
 
+# ─── Per-config result cache ─────────────────────────────────────────────────
+# The full result of an analysis is the set of session-state keys below. We
+# snapshot them per cache_key so revisiting a previously-computed config (e.g.
+# the user switches Gold → Silver → Gold) restores instantly instead of
+# recomputing the whole 5-phase pipeline. Bounded (LRU) to cap memory.
+_BUNDLE_KEYS = (
+    "engine", "aarambh_ts", "nirnay_daily", "nirnay_constituent_dfs",
+    "convergence_df", "divergence_events", "nishkarsh_result", "last_agreement",
+    "nishkarsh_conv_normalized", "wf_results",
+    "intelligence_active_weights", "intelligence_active_thresholds",
+    "intelligence_active_profile",
+)
+_RESULTS_CACHE_MAX = 3  # keep the last N configs (≈ the 3 commodities)
+
+
 # ─── UI Rendering helpers ────────────────────────────────────────────────────
 
 def _render_header() -> None:
@@ -533,6 +548,7 @@ def main():
                 st.session_state.pop("aarambh_engine", None)
                 st.session_state.pop("aarambh_fit_key", None)
                 st.session_state.pop("wf_results", None)
+                st.session_state.pop("results_cache", None)  # drop all cached configs
                 st.session_state.pop("run_analysis", None)
                 st.session_state.pop("nishkarsh_result", None)
                 st.rerun()
@@ -624,6 +640,18 @@ def main():
     y = np.nan_to_num(_fwd.loc[_valid].to_numpy(), nan=0.0)
     cache_key = f"fwd{FWD_HORIZON}m{FWD_MOM_K}|{active_target}|{'|'.join(sorted(active_features))}|{len(data)}"
     if st.session_state.get("engine_cache") != cache_key:
+        # ── Restore from the per-config result cache if this exact config was
+        # already computed this session (e.g. the user switched commodities and
+        # came back) — full reuse, no recompute. ─────────────────────────────
+        _rcache = st.session_state.setdefault("results_cache", {})
+        if cache_key in _rcache:
+            for _bk, _bv in _rcache[cache_key].items():
+                st.session_state[_bk] = _bv
+            _rcache[cache_key] = _rcache.pop(cache_key)  # mark most-recently-used
+            st.session_state["engine_cache"] = cache_key
+            console.header("TATTVA — Cached Result Restored", f"v{VERSION}")
+            console.success(f"Restored {active_target} from session cache — no recompute")
+            st.rerun()
         if "engine" in st.session_state:
             del st.session_state["engine"]
 
@@ -1144,6 +1172,15 @@ def main():
         console._write(f"  {Colors.BOLD}{Colors.GREEN}Analysis Complete{Colors.RESET}")
         console.line('═', 70)
         console._write()
+
+        # Snapshot this config's full result into the bounded per-config cache
+        # so revisiting it later (commodity switch-back, predictor toggle-back)
+        # restores instantly. LRU-evict to keep memory bounded.
+        _rcache = st.session_state.setdefault("results_cache", {})
+        _rcache.pop(cache_key, None)
+        _rcache[cache_key] = {bk: st.session_state.get(bk) for bk in _BUNDLE_KEYS}
+        while len(_rcache) > _RESULTS_CACHE_MAX:
+            _rcache.pop(next(iter(_rcache)))
 
         progress_bar(progress_container, 100, "Analysis Complete", f"Convergence: {display_signal}")
         time.sleep(0.25)

@@ -355,8 +355,9 @@ def _spearman_ic(x: np.ndarray, y: np.ndarray) -> float:
     """Spearman rank correlation. Returns NaN on degenerate input."""
     if len(x) < 5 or len(x) != len(y):
         return float("nan")
-    rx = pd.Series(x).rank().to_numpy(dtype=np.float64, copy=True)
-    ry = pd.Series(y).rank().to_numpy(dtype=np.float64, copy=True)
+    from scipy.stats import rankdata
+    rx = rankdata(x).astype(np.float64)
+    ry = rankdata(y).astype(np.float64)
     rx -= rx.mean()
     ry -= ry.mean()
     denom = np.sqrt((rx * rx).sum() * (ry * ry).sum())
@@ -501,9 +502,9 @@ def walk_forward_ic(
     horizons: tuple[int, ...] = HOLD_HORIZONS,
     n_splits: int = 6,
     min_train_frac: float = 0.45,
-    n_trials: int = 20,
+    n_trials: int = 10,
     l2_alpha: float = 0.10,
-    n_cv_folds: int = 4,
+    n_cv_folds: int = 3,
 ) -> list[dict]:
     """Expanding-window walk-forward: re-calibrate on each expanding train block,
     measure IC on the NEXT purged test block. Every test IC is genuinely

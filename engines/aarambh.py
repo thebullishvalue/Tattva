@@ -344,7 +344,11 @@ class FairValueEngine:
 
         decay_rate = np.log(2) / 252.0
         global_weights = np.exp(-decay_rate * np.arange(MAX_TRAIN_SIZE - 1, -1, -1))
-        dynamic_refit = int(np.clip(n // 200, 2, 5))
+        # Refit cadence: the ensemble is re-fit every `dynamic_refit` rows and
+        # predicts that chunk. With ~100+ predictors → PCA, each refit carries
+        # real per-`.fit()` overhead, so refitting every ~10 rows (vs 5) roughly
+        # halves the walk-forward cost while a slow-moving forecast barely moves.
+        dynamic_refit = int(np.clip(n // 200, 2, 10))
 
         last_models: dict = {"ridge": None, "huber": None, "ols": None, "elasticnet": None, "pca_wls": None}
         valid_cols = np.ones(X.shape[1], dtype=bool)

@@ -448,7 +448,7 @@ class FairValueEngine:
                 logging.warning("Huber fit failed at t=%d: %s", t, e)
 
             try:
-                enet = ElasticNetCV(l1_ratio=[0.5, 0.9, 1.0], n_alphas=10, cv=2, max_iter=2000, tol=1e-2, selection="random", n_jobs=1)
+                enet = ElasticNetCV(l1_ratio=[0.5, 0.9, 1.0], alphas=[0.01, 0.1, 1.0, 10.0, 100.0], cv=2, max_iter=2000, tol=1e-2, selection="random", n_jobs=1)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     enet.fit(X_feat, y_train, sample_weight=weights)

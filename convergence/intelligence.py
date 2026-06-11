@@ -502,9 +502,9 @@ def walk_forward_ic(
     horizons: tuple[int, ...] = HOLD_HORIZONS,
     n_splits: int = 6,
     min_train_frac: float = 0.45,
-    n_trials: int = 10,
+    n_trials: int = 20,
     l2_alpha: float = 0.10,
-    n_cv_folds: int = 3,
+    n_cv_folds: int = 4,
 ) -> list[dict]:
     """Expanding-window walk-forward: re-calibrate on each expanding train block,
     measure IC on the NEXT purged test block. Every test IC is genuinely

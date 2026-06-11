@@ -46,13 +46,24 @@ except ImportError:
     _HAS_STATSMODELS = False
 
 try:
+    import inspect as _inspect
     from sklearn.decomposition import PCA
     from sklearn.linear_model import ElasticNetCV, HuberRegressor, LinearRegression, RidgeCV
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     from sklearn.preprocessing import StandardScaler
     _HAS_SKLEARN = True
+    # ElasticNetCV's alpha-count kwarg was renamed across sklearn versions
+    # (`n_alphas` → an int passed as `alphas`). Detect once so we keep the cheap
+    # 10-point alpha path on BOTH old and new sklearn — the default 100-alpha
+    # path is ~10× slower fit across hundreds of walk-forward windows.
+    _ENET_ALPHA_KW = (
+        {"n_alphas": 10}
+        if "n_alphas" in _inspect.signature(ElasticNetCV.__init__).parameters
+        else {"alphas": 10}
+    )
 except ImportError:
     _HAS_SKLEARN = False
+    _ENET_ALPHA_KW = {}
 
 # Math imports from package
 from analytics.ou_process import ornstein_uhlenbeck_estimate, andrews_median_unbiased_ar1
@@ -461,10 +472,10 @@ class FairValueEngine:
                 _warn_once("Huber", e)
 
             try:
-                # NOTE: `n_alphas` was removed from ElasticNetCV in newer sklearn
-                # (it's an error there, deprecated→removed). Omit it and rely on
-                # the path defaults so this works across sklearn versions.
-                enet = ElasticNetCV(l1_ratio=[0.5, 0.9, 1.0], cv=2, max_iter=2000, tol=1e-2, selection="random", n_jobs=1)
+                # `_ENET_ALPHA_KW` is {"n_alphas": 10} or {"alphas": 10} depending
+                # on the installed sklearn — keeps a cheap 10-point alpha path
+                # (the 100-point default is ~10× slower over the walk-forward).
+                enet = ElasticNetCV(l1_ratio=[0.5, 0.9, 1.0], **_ENET_ALPHA_KW, cv=2, max_iter=2000, tol=1e-2, selection="random", n_jobs=1)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     enet.fit(X_feat, y_train, sample_weight=weights)

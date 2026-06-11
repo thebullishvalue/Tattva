@@ -52,18 +52,8 @@ try:
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     from sklearn.preprocessing import StandardScaler
     _HAS_SKLEARN = True
-    # ElasticNetCV's alpha-count kwarg was renamed across sklearn versions
-    # (`n_alphas` → an int passed as `alphas`). Detect once so we keep the cheap
-    # 10-point alpha path on BOTH old and new sklearn — the default 100-alpha
-    # path is ~10× slower fit across hundreds of walk-forward windows.
-    _ENET_ALPHA_KW = (
-        {"n_alphas": 10}
-        if "n_alphas" in _inspect.signature(ElasticNetCV.__init__).parameters
-        else {"alphas": 10}
-    )
 except ImportError:
     _HAS_SKLEARN = False
-    _ENET_ALPHA_KW = {}
 
 # Math imports from package
 from analytics.ou_process import ornstein_uhlenbeck_estimate, andrews_median_unbiased_ar1
@@ -344,11 +334,9 @@ class FairValueEngine:
 
         decay_rate = np.log(2) / 252.0
         global_weights = np.exp(-decay_rate * np.arange(MAX_TRAIN_SIZE - 1, -1, -1))
-        # Refit cadence: the ensemble is re-fit every `dynamic_refit` rows and
-        # predicts that chunk. With ~100+ predictors → PCA, each refit carries
-        # real per-`.fit()` overhead, so refitting every ~10 rows (vs 5) roughly
-        # halves the walk-forward cost while a slow-moving forecast barely moves.
-        dynamic_refit = int(np.clip(n // 200, 2, 10))
+        # We use the configured REFIT_INTERVAL (e.g. 21 days / 1 month)
+        # which drastically speeds up the walk-forward vs refitting every few days.
+        dynamic_refit = max(1, int(REFIT_INTERVAL))
 
         last_models: dict = {"ridge": None, "huber": None, "ols": None, "elasticnet": None, "pca_wls": None}
         valid_cols = np.ones(X.shape[1], dtype=bool)
@@ -476,10 +464,7 @@ class FairValueEngine:
                 _warn_once("Huber", e)
 
             try:
-                # `_ENET_ALPHA_KW` is {"n_alphas": 10} or {"alphas": 10} depending
-                # on the installed sklearn — keeps a cheap 10-point alpha path
-                # (the 100-point default is ~10× slower over the walk-forward).
-                enet = ElasticNetCV(l1_ratio=0.5, **_ENET_ALPHA_KW, cv=2, max_iter=2000, tol=1e-2, selection="random", n_jobs=1)
+                enet = ElasticNetCV(l1_ratio=0.5, alphas=[0.1, 1.0, 10.0], cv=2, max_iter=1000, tol=1e-2, selection="random", n_jobs=1)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     enet.fit(X_feat, y_train, sample_weight=weights)

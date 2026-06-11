@@ -530,6 +530,9 @@ def main():
                 st.session_state.pop("data", None)
                 st.session_state.pop("engine", None)
                 st.session_state.pop("engine_cache", None)
+                st.session_state.pop("aarambh_engine", None)
+                st.session_state.pop("aarambh_fit_key", None)
+                st.session_state.pop("wf_results", None)
                 st.session_state.pop("run_analysis", None)
                 st.session_state.pop("nishkarsh_result", None)
                 st.rerun()
@@ -700,13 +703,26 @@ def main():
         console.item("Lookback Windows", f"{LOOKBACK_WINDOWS}")
 
         console.section("Walk-Forward Regression")
-        engine = FairValueEngine()
-        engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
-
-        # Carry the raw price LEVEL on the engine output (returns-space modeling
-        # otherwise leaves only return-scale columns). Used by the Aarambh tab
-        # for price display and by the Intelligence tuner for forward returns.
-        engine.ts_data["Price"] = data[active_target].values
+        # Reuse an already-fit Aarambh engine for this exact config if a prior
+        # (possibly interrupted) execution in THIS session already produced one.
+        # `engine_cache` is only set at the end of Phase 5, so a Streamlit rerun
+        # mid-pipeline (yfinance retry, cloud reconnect, stray interaction) would
+        # otherwise re-enter this block and re-run the expensive walk-forward.
+        # Keyed by cache_key → identical inputs → identical fit, so reuse is safe.
+        if (st.session_state.get("aarambh_fit_key") == cache_key
+                and isinstance(st.session_state.get("aarambh_engine"), FairValueEngine)):
+            engine = st.session_state["aarambh_engine"]
+            console.item("Walk-Forward", "reused cached fit (resumed run)")
+            progress_bar(progress_container, 40, "Aarambh Engine Reused", "Cached walk-forward fit")
+        else:
+            engine = FairValueEngine()
+            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
+            # Carry the raw price LEVEL on the engine output (returns-space
+            # modeling otherwise leaves only return-scale columns). Used by the
+            # Aarambh tab for price display and by the Intelligence tuner.
+            engine.ts_data["Price"] = data[active_target].values
+            st.session_state["aarambh_engine"] = engine
+            st.session_state["aarambh_fit_key"] = cache_key
 
         sig = engine.get_current_signal()
         stats = engine.get_model_stats()

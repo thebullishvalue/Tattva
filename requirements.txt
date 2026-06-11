@@ -1,8 +1,23 @@
-streamlit>=1.28.0 
-pandas>=2.0.0 
-numpy>=1.24.0 
-scipy>=1.10.0 
-patsy>=0.5.3 
-plotly>=5.18.0 
-statsmodels>=0.14.0 
-pytz>=2023.3
+# Tattva v2.0.0 — Unified Commodity Convergence Analysis System
+# @thebullishvalue Product
+
+# Core Framework
+streamlit>=1.30.0
+pandas>=2.1.0
+numpy>=1.24.0
+plotly>=5.18.0
+numba
+
+# Scientific Computing
+scipy>=1.11.0
+scikit-learn>=1.4.0
+statsmodels>=0.14.0
+
+# Self-Calibration / Intelligence Mode (Optuna TPE optimizer)
+optuna>=3.5.0
+
+# Data Sources (yfinance pulls requests transitively)
+yfinance>=0.2.31
+
+# Terminal Support
+colorama>=0.4.6

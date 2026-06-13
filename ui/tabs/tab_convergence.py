@@ -224,13 +224,13 @@ def render_convergence_tab(ts_filtered=None):
     # Convergence color mapping
     avg_colors, avg_sizes = [], []
     for v in norm_avg:
-        if v < -0.5:
+        if v < -0.40:
             avg_colors.append(EMERALD); avg_sizes.append(8)
-        elif v <= -0.3:
+        elif v <= -0.25:
             avg_colors.append("rgba(52,211,153,1.0)"); avg_sizes.append(6)
-        elif v > 0.5:
+        elif v > 0.40:
             avg_colors.append(ROSE); avg_sizes.append(8)
-        elif v >= 0.3:
+        elif v >= 0.25:
             avg_colors.append("rgba(251,113,133,1.0)"); avg_sizes.append(6)
         else:
             avg_colors.append("rgba(148,163,184,0.95)"); avg_sizes.append(5)

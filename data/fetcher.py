@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Unified data fetcher: yfinance macro / commodity / OHLCV universe.
+Tattva — Unified data fetcher: yfinance macro / commodity / OHLCV universe.
 तत्त्व (Tattva) — "Principle / Essence"
 
 Each external call is wrapped with:
@@ -29,7 +29,6 @@ from core.config import (
     INDEX_TARGETS_MAP,
     ALL_TARGETS,
 )
-from data.schema import UnifiedDataset
 from data.cache import ohlcv_cache, macro_cache
 from data.circuit_breaker import (
     yfinance_circuit,
@@ -67,7 +66,7 @@ def fetch_constituent_ohlcv(
     start_date: pd.Timestamp | str,
     end_date: pd.Timestamp | str,
 ) -> dict[str, pd.DataFrame]:
-    """Batch-download OHLCV for Nifty 50 constituents via yfinance."""
+    """Batch-download OHLCV for an index/basket's constituents via yfinance."""
     start_yf = str(pd.Timestamp(start_date).date())
     end_yf = str(pd.Timestamp(end_date).date() + pd.Timedelta(days=1))
     # Sorted tuple → deterministic cache key regardless of input order.
@@ -290,9 +289,9 @@ def fetch_commodity_dataset(
     ``GLOBAL_MACRO_MAP`` (bond/rates/equity/risk/real-asset ETFs) +
     ``MACRO_SYMBOLS_YF`` (commodities + FX) universe, renames yfinance tickers
     to friendly names (Gold / Silver / Copper / US 10-Year Yield / VIX / …),
-    and exposes the DatetimeIndex as a ``DATE`` column. The result has the same
-    shape contract the Streamlit app expects from the old Google Sheet: numeric
-    predictor columns + a date column, ready to feed the walk-forward engine.
+    and exposes the DatetimeIndex as a ``DATE`` column. The result is the model
+    matrix the Streamlit app feeds the walk-forward engine: numeric predictor
+    columns + a date column.
 
     Returns ``(df, None)`` on success or ``(None, error_message)`` on failure.
     """
@@ -326,88 +325,3 @@ def fetch_commodity_dataset(
     df.insert(0, "DATE", pd.to_datetime(df.index))
     df = df.reset_index(drop=True)
     return df, None
-
-
-# ─── Unified dataset builder ─────────────────────────────────────────────────
-
-
-def build_unified_dataset(
-    aarambh_df: pd.DataFrame,
-    target_col: str = "NIFTY50_PE",
-    feature_cols: list[str] | None = None,
-    date_col: str | None = None,
-    constituents_ohlcv: dict[str, pd.DataFrame] | None = None,
-    macro_df: pd.DataFrame | None = None,
-) -> UnifiedDataset:
-    """Build a ``UnifiedDataset`` by merging all data sources.
-
-    Parameters
-    ----------
-    aarambh_df : pd.DataFrame
-        Raw Google Sheet data.
-    target_col : str
-        Column name for the Nifty 50 PE target variable.
-    feature_cols : list[str] | None
-        Predictor column names.
-    date_col : str | None
-        Date column name in the sheet.
-    constituents_ohlcv : dict[str, pd.DataFrame] | None
-        Per-constituent OHLCV data.
-    macro_df : pd.DataFrame | None
-        Combined macro indicators.
-
-    Returns
-    -------
-    UnifiedDataset
-        Unified dataset with aligned date indices.
-    """
-    if feature_cols is None:
-        feature_cols = [
-            c for c in aarambh_df.columns
-            if c != target_col and c != date_col
-        ]
-
-    cols = [target_col] + feature_cols
-    if date_col and date_col in aarambh_df.columns:
-        cols.append(date_col)
-    valid_cols = [c for c in cols if c in aarambh_df.columns]
-    data = aarambh_df[valid_cols].copy()
-
-    if date_col and date_col in data.columns:
-        data[date_col] = pd.to_datetime(data[date_col], errors="coerce", dayfirst=True)
-        data = data.dropna(subset=[date_col]).sort_values(date_col)
-
-    for col in [target_col] + feature_cols:
-        data[col] = pd.to_numeric(data[col], errors="coerce")
-
-    numeric_cols = [target_col] + feature_cols
-    data[numeric_cols] = data[numeric_cols].ffill().bfill()
-    data = data.dropna(subset=numeric_cols).reset_index(drop=True)
-
-    if date_col and date_col in data.columns:
-        date_index = pd.DatetimeIndex(data[date_col])
-    else:
-        date_index = pd.DatetimeIndex(
-            pd.date_range(end=pd.Timestamp.today(), periods=len(data), freq="B")
-        )
-
-    nifty50_pe = data[target_col].values
-    predictors = data[feature_cols].copy()
-
-    macro_aligned = (
-        macro_df.reindex(date_index).ffill()
-        if macro_df is not None and not macro_df.empty
-        else pd.DataFrame()
-    )
-
-    if constituents_ohlcv is None:
-        constituents_ohlcv = {}
-
-    return UnifiedDataset(
-        date_index=date_index,
-        nifty50_pe=nifty50_pe,
-        aarambh_predictors=predictors,
-        constituent_ohlcv=constituents_ohlcv,
-        macro_df=macro_aligned,
-        trading_days=list(date_index),
-    )

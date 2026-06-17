@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Commodity basket resolution for the Nirnay engine.
+Tattva — Commodity basket resolution for the Nirnay engine.
 तत्त्व (Tattva) — "Principle / Essence"
 
 DATA — Resolves the per-commodity Nirnay basket (ETFs + miners) for the active

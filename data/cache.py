@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — TTL-based memory and disk cache for data fetching.
+Tattva — TTL-based memory and disk cache for data fetching.
 तत्त्व (Tattva) — "Principle / Essence"
 
 A two-tier (memory + disk) cache with TTL expiry, versioned keys, and a

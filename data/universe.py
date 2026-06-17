@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Index target universe + constituent resolution.
+Tattva — Index target universe + constituent resolution.
 तत्त्व (Tattva) — "Principle / Essence"
 
 Adds equity-INDEX targets (India sectoral/broad, US benchmarks, India sector-ETF

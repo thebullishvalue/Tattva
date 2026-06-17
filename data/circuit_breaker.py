@@ -1,10 +1,10 @@
 """
-Tattva v2.0.0 — Circuit Breaker + Retry-with-Backoff fault tolerance.
+Tattva — Circuit Breaker + Retry-with-Backoff fault tolerance.
 तत्त्व (Tattva) — "Principle / Essence"
 
-Fault-tolerance primitives for external service calls (yfinance, Google Sheets,
-Stooq). Adapted from Pragyam's circuit_breaker.py, using stdlib logging instead
-of Pragyam's logger_config.
+Fault-tolerance primitives for external service calls (yfinance, NSE/Wikipedia
+constituent scrapes). Adapted from Pragyam's circuit_breaker.py, using stdlib
+logging instead of Pragyam's logger_config.
 
 State machine:
     CLOSED → OPEN: when failure_count >= failure_threshold

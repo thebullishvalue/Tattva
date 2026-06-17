@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Shared normalization math for the Unified Convergence Signal.
+Tattva — Shared normalization math for the Unified Convergence Signal.
 तत्त्व (Tattva) — "Principle / Essence"
 
 Single source of truth for the math behind the Convergence Analysis cards and

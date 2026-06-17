@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — UnifiedConvictionModel: DDM filtering on convergence scores.
+Tattva — UnifiedConvictionModel: DDM filtering on convergence scores.
 तत्त्व (Tattva) — "Principle / Essence"
 
 CONVERGENCE — Adaptive-weighted composite of 4 dimensions: Direction, Breadth, Magnitude, Regime — with DDM.

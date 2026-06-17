@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Intelligence Mode: self-calibrating convergence profile.
+Tattva — Intelligence Mode: self-calibrating convergence profile.
 तत्त्व (Tattva) — "Principle / Essence"
 
 A Bayesian (Optuna TPE) optimizer that learns per-universe optimal values
@@ -252,9 +252,7 @@ def _build_calibration_frame(
         agreement sub-scores (already in [0, 1])
       - convergence_score: legacy signed composite (used for sign anchor)
       - Ret_{h}b for h in horizons: forward log-returns of the target
-        column (typically NIFTY50_PE from the Aarambh sheet, used as a
-        return proxy — PE expansion/compression correlates with price
-        moves since earnings are slow-moving)
+        column (the active target's price level — commodity/FX/index)
 
     Returns an empty frame if any input is missing.
     """

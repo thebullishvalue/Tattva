@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — CrossValidator: Cross-referencing Aarambha and Nirnay outputs.
+Tattva — CrossValidator: Cross-referencing Aarambha and Nirnay outputs.
 तत्त्व (Tattva) — "Principle / Essence"
 
 CONVERGENCE — Adaptive-weighted composite of 4 dimensions: Direction, Breadth, Magnitude, Regime — with DDM.

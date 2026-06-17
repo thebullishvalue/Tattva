@@ -10,6 +10,20 @@ Usage:
 
 from __future__ import annotations
 
+import os
+
+# ── BLAS thread pinning (MUST run before numpy/sklearn import) ────────────────
+# The walk-forward fits hundreds of small models sequentially. On Streamlit
+# Community Cloud the container is throttled to ~1 shared vCPU but the host
+# reports many logical CPUs, so OpenBLAS/MKL spawn one thread per reported core
+# and thrash — turning each tiny PCA/Ridge solve into a thread-contention storm
+# (the #1 reason the walk-forward is far slower on cloud than locally). One
+# thread per process is strictly faster for many-small-matrix workloads here.
+# os.environ.setdefault → respects any explicit override from the environment.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 import json
 import logging
 import sys

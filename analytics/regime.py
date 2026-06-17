@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Regime detection: Kalman Filter, HMM, GARCH, CUSUM.
+Tattva — Regime detection: Kalman Filter, HMM, GARCH, CUSUM.
 तत्त्व (Tattva) — "Principle / Essence"
 
 ANALYTICS — Multi-model regime classification for constituent-level analysis.

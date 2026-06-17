@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Structural break detection via Bai-Perron multiple breakpoint test.
+Tattva — Structural break detection via Bai-Perron multiple breakpoint test.
 तत्त्व (Tattva) — "Principle / Essence"
 
 ANALYTICS — Identifies regime shifts in time series data.

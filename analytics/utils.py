@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Math utilities: pure mathematical functions.
+Tattva — Math utilities: pure mathematical functions.
 तत्त्व (Tattva) — "Principle / Essence"
 
 ANALYTICS — Stateless, side-effect free functions operating on NumPy arrays and pandas structures.

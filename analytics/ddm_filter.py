@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Drift-Diffusion Model (DDM) filter with mean-reverting variance.
+Tattva — Drift-Diffusion Model (DDM) filter with mean-reverting variance.
 तत्त्व (Tattva) — "Principle / Essence"
 
 ANALYTICS — Bounded signal filtering with confidence bands via stochastic DDM.

@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Conformal prediction z-scores with fat-tail adjustment.
+Tattva — Conformal prediction z-scores with fat-tail adjustment.
 तत्त्व (Tattva) — "Principle / Essence"
 
 ANALYTICS — Conformal prediction bounds for walk-forward regression residuals.

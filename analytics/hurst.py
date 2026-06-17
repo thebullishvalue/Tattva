@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Hurst exponent via Detrended Fluctuation Analysis (DFA).
+Tattva — Hurst exponent via Detrended Fluctuation Analysis (DFA).
 तत्त्व (Tattva) — "Principle / Essence"
 
 ANALYTICS — Measures long-term memory and mean-reversion in time series.

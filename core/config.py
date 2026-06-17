@@ -59,14 +59,26 @@ HUBER_MAX_ITER = 500
 #     individual model; pairs with OLS for the best ensemble. It is the dominant
 #     cost (~80% of the walk-forward, up to 12s on USD/INR).
 # Two sensible baskets:
-#   • ("ridge", "ols")  — DEFAULT. ~8× faster walk-forward (USD/INR engine fit
-#     ~3.5s vs ~16s with Huber). IC is within one std-error of every other
-#     basket across all 5 targets / both train regimes, so skill is preserved.
-#   • ("ols", "huber")  — highest measured IC + adds fat-tail robustness, at the
-#     cost of Huber dominating runtime (up to ~12s on USD/INR alone). Switch to
-#     this if you value tail robustness over walk-forward speed.
+#   • ("ols", "huber")  — DEFAULT. Highest measured OOS rank-IC and the most
+#     robust worst-target, plus fat-tail robustness. Cost: Huber dominates the
+#     walk-forward (up to ~12s on USD/INR alone).
+#   • ("ridge", "ols")  — SPEED basket. ~8× faster walk-forward (USD/INR engine
+#     fit ~3.5s vs ~16s with Huber), but lowest skill of every basket tested.
+#     Switch to this if walk-forward latency matters more than skill.
 # (ols is always fit internally regardless — it powers feature-impact attribution.)
-ENSEMBLE_MODELS = ("ridge", "ols")
+#
+# 2026-06-17 re-study (offline, cached 9y/129-ticker macro snapshot, 6 targets:
+# Cotton/USD-INR/Nifty 50/Gold/Silver/Copper; metric = OOS Spearman IC of the
+# 10d-forward forecast, n≈825/target). Mean IC | worst-target IC:
+#     ols+huber           0.202 | 0.097   ← best on both → new DEFAULT
+#     ridge+ols+huber+enet 0.199 | 0.094
+#     elasticnet+ols      0.198 | 0.092
+#     ridge+ols+huber     0.197 | 0.094
+#     ols (baseline)      0.196 | 0.091
+#     ridge+ols           0.192 | 0.088   ← prior default, ranked last
+# Spread is within ~1 SE (≈0.035), so the win is consistent-direction, not large;
+# elasticnet stays out (no lift over the simpler baskets). Reproduce: ensemble_study.py.
+ENSEMBLE_MODELS = ("ols", "huber")
 OU_PROJECTION_DAYS = 90
 MIN_DATA_POINTS = 1500
 

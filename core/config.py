@@ -14,12 +14,59 @@ COMPANY = "@thebullishvalue"
 # ─── Aarambh Engine Defaults ─────────────────────────────────────────────────
 
 LOOKBACK_WINDOWS = (5, 10, 20, 50, 100)
-MIN_TRAIN_SIZE = 252
-MAX_TRAIN_SIZE = 1250
-REFIT_INTERVAL = 10
+# ── Walk-forward windowing ───────────────────────────────────────────────────
+# Chosen by backtest on the real macro universe, all 5 targets, scored by rank IC
+# of the forecast vs realized forward return (holdout = fixed last 504 pts so the
+# comparison is apples-to-apples; full-OOS shown too). The OLD (1500/2000/10) was
+# the WEAKEST point tested.
+#   • MIN_TRAIN_SIZE — where OOS forecasting begins. Late-forecast skill is
+#     independent of it (the window is MAX-capped regardless), so a large value
+#     only wastes history: MIN=1500 left just 776 OOS rows — starving the
+#     Intelligence calibration + walk-forward IC — for NO recent-skill gain.
+#     MIN=500 yields ~1786 OOS rows and the best full-OOS IC; first fit stays
+#     well-conditioned (»20 PCA components).
+#   • MAX_TRAIN_SIZE — training-window cap. 750 matched/beat 2000 on IC across
+#     targets (regimes shift → a ~3y window is more adaptive) and is cheaper per
+#     fit. Large windows buy nothing with ~9y of data.
+#   • REFIT_INTERVAL — refit cadence; the dominant skill lever (forecast horizon
+#     is 10d, so a stale model decays as its 20d-momentum signal turns over).
+#     Measured avg holdout IC (ridge+ols): 10→0.072, 7→0.147, 5→0.194, 3→0.259,
+#     monotone & consistent across all 5 targets. Cost ∝ 1/REFIT (more chunks).
+#     5 = chosen sweet spot (~2.7× current IC at ~2× walk-forward cost); raise to
+#     7/10 to favour speed, drop to 3 for max skill (~2× the cost of 5).
+MIN_TRAIN_SIZE = 500
+MAX_TRAIN_SIZE = 750
+REFIT_INTERVAL = 5
 RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0)
 HUBER_EPSILON = 1.35
 HUBER_MAX_ITER = 500
+
+# ── Walk-forward ensemble members ────────────────────────────────────────────
+# Which models the FairValueEngine fits per walk-forward window and averages.
+# Chosen by backtest on the full real macro universe across all 5 targets, scored
+# by rank IC of the forecast vs realized forward returns (the system's skill
+# metric; forecast R² is ~0 by design and not used). Findings:
+#   • "elasticnet" — DROPPED. ~0 IC standalone, NEGATIVE on Silver/Cotton/
+#     USD-INR. L1 sparsity on already-orthogonal PCA components discards signal,
+#     and it dragged the old 4-model ensemble down. Never re-add it.
+#   • "ridge"      — DROPPED from the default. On PCA(20) it is ~identical to OLS
+#     (corr ≈ 0.99; L2 barely matters with 20 orthogonal components), so it only
+#     double-counts. (ols, huber) scored HIGHER than (ridge, ols, huber) in both
+#     backtests. Still selectable as a regularization safety net.
+#   • "ols"        — anchor. Strong IC, ~free, and REQUIRED for the feature-
+#     impact attribution, so it is always fit regardless of this tuple.
+#   • "huber"      — robust (down-weights fat-tail/shock days) and the top
+#     individual model; pairs with OLS for the best ensemble. It is the dominant
+#     cost (~80% of the walk-forward, up to 12s on USD/INR).
+# Two sensible baskets:
+#   • ("ridge", "ols")  — DEFAULT. ~8× faster walk-forward (USD/INR engine fit
+#     ~3.5s vs ~16s with Huber). IC is within one std-error of every other
+#     basket across all 5 targets / both train regimes, so skill is preserved.
+#   • ("ols", "huber")  — highest measured IC + adds fat-tail robustness, at the
+#     cost of Huber dominating runtime (up to ~12s on USD/INR alone). Switch to
+#     this if you value tail robustness over walk-forward speed.
+# (ols is always fit internally regardless — it powers feature-impact attribution.)
+ENSEMBLE_MODELS = ("ridge", "ols")
 OU_PROJECTION_DAYS = 90
 MIN_DATA_POINTS = 1500
 
@@ -259,6 +306,8 @@ COMMODITY_TARGETS = {
     "Gold": "GC=F",
     "Silver": "SI=F",
     "Copper": "HG=F",
+    "Cotton": "CT=F",
+    "USD/INR": "INR=X",
 }
 
 # Per-target basket of related instruments fed to the Nirnay regime engine in
@@ -286,6 +335,54 @@ COMMODITY_BASKETS = {
         "FCX", "SCCO", "TECK", "ERO", "HBM",
         "IVN.TO", "CS.TO", "TGB", "NEXA",       # copper-pure miners
     ],
+    # Cotton has no pure-play single-name equities (the only cotton-pure
+    # instrument, BAL, is a spot proxy that duplicates the Aarambh target).
+    # So the basket is a HYBRID cross-section of the ag economy: agribusiness
+    # processors / traders / input suppliers (bottom-up company "votes") plus a
+    # few sibling softs/grains futures for complex breadth. Reframe: Nirnay here
+    # reads the agricultural complex's regime, not "cotton miners".
+    "Cotton": [
+        "ADM", "BG", "NTR", "MOS", "CF",        # grain traders / fertilizer
+        "CTVA", "FMC", "DE", "AGCO", "ANDE",    # seeds/chem / equipment / grain
+        "ZC=F", "ZS=F", "SB=F",                 # corn / soy / sugar (ag complex)
+    ],
+    # USD/INR is FX — no producer equities exist. The basket is a CO-DIRECTIONAL
+    # dollar-strength complex (rises when the rupee weakens, like USD/INR):
+    # UUP (long-USD ETF, the only volume-bearing member) + a spread of USD/Asia
+    # crosses. The =X pairs carry no yfinance volume, so Nirnay's MSF runs its
+    # flow/microstructure components ~neutral (~2/3 strength); the momentum and
+    # trend components (price-based) are unaffected. polarity = +1 (see below).
+    "USD/INR": [
+        "UUP",                                  # long USD (volume-bearing anchor)
+        "IDR=X", "PHP=X", "THB=X",              # USD/IDR, USD/PHP, USD/THB
+        "KRW=X", "SGD=X", "TWD=X",              # USD/KRW, USD/SGD, USD/TWD
+    ],
+}
+
+# ─── Target metadata: polarity + archetype ───────────────────────────────────
+# Nirnay assumes its basket is POSITIVELY co-directional with the target (miners
+# rise when the metal rises). For inverse baskets (e.g. India-equity proxies vs
+# USD/INR) set polarity = -1 and the aggregate breadth is flipped to the
+# target's orientation before convergence (see engines/nirnay.apply_polarity).
+# Default (missing key) = +1. All current targets use co-directional baskets.
+TARGET_POLARITY = {
+    "Gold": +1,
+    "Silver": +1,
+    "Copper": +1,
+    "Cotton": +1,
+    "USD/INR": +1,   # dollar-strength complex is co-directional with USD/INR
+}
+
+# Basket archetype — documentation / UI labeling only (no computational effect):
+#   producer = single-name equities levered to the target (metals)
+#   hybrid   = agribusiness equities + sibling futures (ag commodities)
+#   proxy    = cross-asset ETFs / FX pairs expressing the same macro driver (FX)
+TARGET_ARCHETYPE = {
+    "Gold": "producer",
+    "Silver": "producer",
+    "Copper": "producer",
+    "Cotton": "hybrid",
+    "USD/INR": "proxy",
 }
 
 # Predictors that quasi-replicate a target and must be excluded from Aarambh
@@ -295,6 +392,12 @@ COMMODITY_BASKETS = {
 TARGET_EXCLUDED_PREDICTORS = {
     "Gold":   ["Precious Metals Basket (GLTR)"],
     "Silver": ["Precious Metals Basket (GLTR)"],
+    # DBA (Agriculture ETF) holds cotton + softs/grains → it would let the
+    # regression "explain" cotton with a basket containing cotton.
+    "Cotton": ["Agriculture (DBA)"],
+    # The other INR crosses are quasi-replicas of USD/INR (all priced in INR).
+    # Dollar Index is kept — it is a legitimate driver, not a replica.
+    "USD/INR": ["EUR/INR", "GBP/INR", "JPY/INR"],
 }
 
 # ─── Chart Theme ─────────────────────────────────────────────────────────────

@@ -123,6 +123,22 @@ _SNAPSHOTS: dict[str, list[str]] = {
         "GS", "HD", "HON", "IBM", "JNJ", "JPM", "KO", "MCD", "MRK", "MSFT",
         "NKE", "NVDA", "PG", "SHW", "TRV", "UNH", "V", "VZ", "WMT", "MMM",
     ],
+    # S&P 500 / Nasdaq 100 are uncapped (~500 / ~100 names); the snapshot only
+    # needs to cover the stride-cap (40), so the ~40 largest-weight names suffice.
+    "S&P 500": [
+        "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "AVGO", "TSLA",
+        "BRK-B", "JPM", "LLY", "V", "XOM", "UNH", "MA", "COST", "HD", "PG",
+        "JNJ", "WMT", "NFLX", "ABBV", "BAC", "CRM", "ORCL", "CVX", "KO", "AMD",
+        "PEP", "TMO", "LIN", "ADBE", "MRK", "CSCO", "ACN", "MCD", "WFC", "ABT",
+        "GE",
+    ],
+    "Nasdaq 100": [
+        "AAPL", "MSFT", "NVDA", "AMZN", "AVGO", "META", "GOOGL", "GOOG", "TSLA",
+        "COST", "NFLX", "AMD", "PEP", "ADBE", "CSCO", "TMUS", "INTC", "QCOM",
+        "INTU", "TXN", "AMGN", "AMAT", "ISRG", "BKNG", "HON", "CMCSA", "ADP",
+        "VRTX", "GILD", "MU", "LRCX", "REGN", "PANW", "ADI", "MELI", "KLAC",
+        "SBUX", "MDLZ", "SNPS", "CDNS",
+    ],
     "Nifty Bank": [
         "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "AXISBANK.NS", "KOTAKBANK.NS",
         "INDUSINDBK.NS", "BANKBARODA.NS", "PNB.NS", "AUBANK.NS", "FEDERALBNK.NS",

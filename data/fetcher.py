@@ -25,6 +25,8 @@ from core.config import (
     GLOBAL_MACRO_MAP,
     MACRO_SYMBOLS_YF,
     COMMODITY_TARGETS,
+    INDEX_TARGETS_MAP,
+    ALL_TARGETS,
 )
 from data.schema import UnifiedDataset
 from data.cache import ohlcv_cache, macro_cache
@@ -119,7 +121,11 @@ def _fetch_macro_live_uncached(start_str: str, end_str: str) -> pd.DataFrame:
     Combines Sanket's Global Macro bond ETFs (proxy for global yield dynamics)
     with the existing commodity + FX symbols. One batch call, one circuit hit.
     """
-    tickers = tuple(sorted(set(GLOBAL_MACRO_MAP.values()) | set(MACRO_SYMBOLS_YF.values())))
+    tickers = tuple(sorted(
+        set(GLOBAL_MACRO_MAP.values())
+        | set(MACRO_SYMBOLS_YF.values())
+        | set(INDEX_TARGETS_MAP.values())  # index price levels (Aarambh targets)
+    ))
     if not tickers:
         return pd.DataFrame()
 
@@ -233,7 +239,7 @@ def fetch_commodity_dataset(
         return None, "No macro/commodity data returned from yfinance."
 
     # ticker → friendly name (inverse of the combined friendly → ticker maps).
-    name_to_ticker = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF}
+    name_to_ticker = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF, **INDEX_TARGETS_MAP}
     ticker_to_name = {ticker: name for name, ticker in name_to_ticker.items()}
     present = [t for t in ticker_to_name if t in macro_df.columns]
     if not present:
@@ -248,7 +254,7 @@ def fetch_commodity_dataset(
     # commodity targets regardless.
     coverage = renamed.notna().mean()
     keep = [c for c in renamed.columns if coverage[c] >= 0.20]
-    for tgt in COMMODITY_TARGETS:
+    for tgt in ALL_TARGETS:  # always retain every target column (commodity/FX/index)
         if tgt in renamed.columns and tgt not in keep:
             keep.append(tgt)
     if not keep:

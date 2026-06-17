@@ -522,3 +522,46 @@ def aggregate_constituent_timeseries(
     out["avg_mmr_osc"] = means["_mmr"]
     out.index.name = "Date"
     return out
+
+
+# ─── Basket polarity ─────────────────────────────────────────────────────────
+
+
+def apply_polarity(nirnay_daily: pd.DataFrame, polarity: int = 1) -> pd.DataFrame:
+    """Re-orient aggregate basket breadth to the TARGET's direction.
+
+    Nirnay assumes the basket is positively co-directional with the target
+    (miners rise when the metal rises). For an INVERSE basket — e.g. India-risk
+    equities vs USD/INR, where rupee weakness (USD/INR up) sends those equities
+    *down* — ``polarity = -1`` flips the aggregate so the breadth, regime split,
+    signal counts, and average oscillators read in the target's frame before
+    they reach the Convergence layer and the Nirnay tab.
+
+    A no-op for ``polarity >= 0`` (all current targets), so existing behaviour is
+    byte-for-byte unchanged. Per-constituent frames are left instrument-native
+    (an individual proxy's own oversold reading is about that instrument).
+    """
+    if polarity is None or polarity >= 0 or nirnay_daily is None or nirnay_daily.empty:
+        return nirnay_daily
+
+    out = nirnay_daily.copy()
+    # Bullish-for-target ↔ bearish-for-target column pairs.
+    pair_swaps = [
+        ("Oversold", "Overbought"),
+        ("Oversold_Pct", "Overbought_Pct"),
+        ("Regime_Bull", "Regime_Bear"),
+        ("Regime_Bull_Pct", "Regime_Bear_Pct"),
+        ("Buy_Signals", "Sell_Signals"),
+        ("Bull_Div", "Bear_Div"),
+        ("avg_hmm_bull", "avg_hmm_bear"),
+    ]
+    for a, b in pair_swaps:
+        if a in out.columns and b in out.columns:
+            out[a], out[b] = out[b].copy(), out[a].copy()
+
+    # Signed oscillators simply negate.
+    for c in ("Avg_Signal", "Signal_Sum", "avg_msf_osc", "avg_mmr_osc"):
+        if c in out.columns:
+            out[c] = -out[c]
+
+    return out

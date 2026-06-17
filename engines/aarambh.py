@@ -27,6 +27,7 @@ from core.config import (
     RIDGE_ALPHAS,
     HUBER_EPSILON,
     HUBER_MAX_ITER,
+    ENSEMBLE_MODELS,
     OU_PROJECTION_DAYS,
     CONVICTION_STRONG,
     CONVICTION_MODERATE,
@@ -447,30 +448,38 @@ class FairValueEngine:
                     _warn_once("PCA-reduce", e)
                     reducer, X_feat = None, X_scaled
 
-            try:
-                ridge = RidgeCV(alphas=list(RIDGE_ALPHAS), cv=None)
-                ridge.fit(X_feat, y_train, sample_weight=weights)
-                models["ridge"] = ridge
-            except Exception as e:
-                _warn_once("Ridge", e)
+            # Ensemble members are selected via config.ENSEMBLE_MODELS. The
+            # PCA-OLS member (below) is ALWAYS fit — it both anchors the ensemble
+            # and powers the feature-impact attribution. ElasticNet is excluded
+            # by default (backtested as ~0/negative IC on PCA components); Huber
+            # is the dominant cost and optional. See core/config.ENSEMBLE_MODELS.
+            if "ridge" in ENSEMBLE_MODELS:
+                try:
+                    ridge = RidgeCV(alphas=list(RIDGE_ALPHAS), cv=None)
+                    ridge.fit(X_feat, y_train, sample_weight=weights)
+                    models["ridge"] = ridge
+                except Exception as e:
+                    _warn_once("Ridge", e)
 
-            try:
-                huber = HuberRegressor(epsilon=HUBER_EPSILON, max_iter=HUBER_MAX_ITER, tol=1e-3)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    huber.fit(X_feat, y_train, sample_weight=weights)
-                models["huber"] = huber
-            except Exception as e:
-                _warn_once("Huber", e)
+            if "huber" in ENSEMBLE_MODELS:
+                try:
+                    huber = HuberRegressor(epsilon=HUBER_EPSILON, max_iter=HUBER_MAX_ITER, tol=1e-3)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        huber.fit(X_feat, y_train, sample_weight=weights)
+                    models["huber"] = huber
+                except Exception as e:
+                    _warn_once("Huber", e)
 
-            try:
-                enet = ElasticNetCV(l1_ratio=0.5, alphas=[0.1, 1.0, 10.0], cv=2, max_iter=1000, tol=1e-2, selection="random", n_jobs=1)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    enet.fit(X_feat, y_train, sample_weight=weights)
-                models["elasticnet"] = enet
-            except Exception as e:
-                _warn_once("ElasticNet", e)
+            if "elasticnet" in ENSEMBLE_MODELS:
+                try:
+                    enet = ElasticNetCV(l1_ratio=0.5, alphas=[0.1, 1.0, 10.0], cv=2, max_iter=1000, tol=1e-2, selection="random", n_jobs=1)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        enet.fit(X_feat, y_train, sample_weight=weights)
+                    models["elasticnet"] = enet
+                except Exception as e:
+                    _warn_once("ElasticNet", e)
 
             try:
                 if reducer is not None:

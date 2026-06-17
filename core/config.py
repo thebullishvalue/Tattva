@@ -66,7 +66,7 @@ HUBER_MAX_ITER = 500
 #     cost of Huber dominating runtime (up to ~12s on USD/INR alone). Switch to
 #     this if you value tail robustness over walk-forward speed.
 # (ols is always fit internally regardless — it powers feature-impact attribution.)
-ENSEMBLE_MODELS = ("ols", "huber")
+ENSEMBLE_MODELS = ("ridge", "ols")
 OU_PROJECTION_DAYS = 90
 MIN_DATA_POINTS = 1500
 

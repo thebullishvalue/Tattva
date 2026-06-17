@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Shared CSS, chart theming, and color constants for the UI layer.
+Tattva — Shared CSS, chart theming, and color constants for the UI layer.
 तत्त्व (Tattva) — "Principle / Essence"
 
 UI — "Obsidian Quant" Institutional Research Terminal design language.
@@ -34,11 +34,10 @@ from core.config import (
     COLOR_AMBER,
     COLOR_PURPLE,
     COLOR_MUTED,
+    VERSION,        # single source of truth (re-exported for app.py imports)
+    PRODUCT_NAME,
+    COMPANY,
 )
-
-VERSION = "2.0.0"
-PRODUCT_NAME = "Tattva"
-COMPANY = "@thebullishvalue"
 
 # Path to external CSS file
 CSS_PATH = Path(__file__).parent / "theme.css"

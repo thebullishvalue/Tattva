@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Reusable UI components: metric cards, signal badges, headers, section headers.
+Tattva — Reusable UI components: metric cards, signal badges, headers, section headers.
 तत्त्व (Tattva) — "Principle / Essence"
 
 UI — Obsidian Quant Terminal design language.

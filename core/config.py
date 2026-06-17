@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Configuration constants, thresholds, column mappings, and shared defaults.
+Tattva — Configuration constants, thresholds, column mappings, and shared defaults.
 तत्त्व (Tattva) — "Principle / Essence"
 
 CORE — Merged from both Aarambh (correl.py) and Nirnay (nirnay_core.py) monoliths.
@@ -7,8 +7,10 @@ CORE — Merged from both Aarambh (correl.py) and Nirnay (nirnay_core.py) monoli
 
 # ─── Version / Product ───────────────────────────────────────────────────────
 
-VERSION = "2.0.0"
-PRODUCT_NAME = "TATTVA"
+# Single source of truth for the app version — ui/theme.py imports these (do not
+# redefine elsewhere; past drift between config and theme is why this is centralized).
+VERSION = "2.1.0"
+PRODUCT_NAME = "Tattva"
 COMPANY = "@thebullishvalue"
 
 # ─── Aarambh Engine Defaults ─────────────────────────────────────────────────
@@ -96,17 +98,6 @@ STALENESS_DAYS = 3
 
 # Timeframe filter mapping (trading days)
 TIMEFRAME_TRADING_DAYS = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504}
-
-# Default predictors for NIFTY50 use case
-DEFAULT_PREDICTORS = (
-    "AD_RATIO", "COUNT", "REL_AD_RATIO", "REL_BREADTH",
-    "IN10Y", "IN02Y", "IN30Y", "INIRYY", "REPO",
-    "US02Y", "US10Y", "US30Y", "NIFTY50_DY", "NIFTY50_PB",
-)
-
-# Google Sheets URL (should be set via secrets or environment variable)
-# This is only a placeholder for type hints
-DEFAULT_SHEET_URL = ""
 
 # DDM parameters (calibrated for daily conviction series)
 DDM_LEAK_RATE = 0.08

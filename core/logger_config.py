@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Logger configuration: direct console output system.
+Tattva — Logger configuration: direct console output system.
 तत्त्व (Tattva) — "Principle / Essence"
 
 CORE — Bypasses Python logging, writes colored output to stdout for clean terminal analysis pipeline.

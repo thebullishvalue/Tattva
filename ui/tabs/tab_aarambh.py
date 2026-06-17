@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Aarambh tab: Price & idiosyncratic-spread plots, conviction, breadth, model quality.
+Tattva — Aarambh tab: Price & idiosyncratic-spread plots, conviction, breadth, model quality.
 तत्त्व (Tattva) — "Principle / Essence"
 
 UI — AARAMBH engine visualization: ensemble regression outputs with conformal bounds.

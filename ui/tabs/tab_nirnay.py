@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Nirnay tab: Constituent regime intelligence, zone distribution, signals, HMM.
+Tattva — Nirnay tab: Constituent regime intelligence, zone distribution, signals, HMM.
 तत्त्व (Tattva) — "Principle / Essence"
 
 UI — NIRNAY engine visualization: per-constituent MSF + MMR with regime classification.

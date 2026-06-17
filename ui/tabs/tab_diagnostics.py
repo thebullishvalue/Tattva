@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Diagnostics tab: ML diagnostics from both engines.
+Tattva — Diagnostics tab: ML diagnostics from both engines.
 तत्त्व (Tattva) — "Principle / Essence"
 
 UI — Model quality assessment: feature importance, residuals, walk-forward performance.

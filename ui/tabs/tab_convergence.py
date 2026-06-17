@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Convergence tab: Unified signal with timeframe filtering.
+Tattva — Convergence tab: Unified signal with timeframe filtering.
 तत्त्व (Tattva) — "Principle / Essence"
 
 UI — Cross-system convergence visualization: conviction scores with DDM filtering.

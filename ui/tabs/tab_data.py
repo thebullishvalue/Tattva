@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Data tab: Merged data table + CSV export with search and filtering.
+Tattva — Data tab: Merged data table + CSV export with search and filtering.
 तत्त्व (Tattva) — "Principle / Essence"
 
 UI — Raw data inspection: unified dataset viewer with export capability.

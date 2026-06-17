@@ -351,19 +351,136 @@ def _classify(values: np.ndarray, thresholds: dict[str, float]) -> np.ndarray:
     return out
 
 
+from scipy.stats import rankdata  # module-level: avoid a re-import on every call
+
+
+def _centered_rank(a: np.ndarray) -> np.ndarray:
+    """Average-method ranks, mean-centered (matches scipy rankdata default)."""
+    r = rankdata(a).astype(np.float64)
+    r -= r.mean()
+    return r
+
+
 def _spearman_ic(x: np.ndarray, y: np.ndarray) -> float:
     """Spearman rank correlation. Returns NaN on degenerate input."""
     if len(x) < 5 or len(x) != len(y):
         return float("nan")
-    from scipy.stats import rankdata
-    rx = rankdata(x).astype(np.float64)
-    ry = rankdata(y).astype(np.float64)
-    rx -= rx.mean()
-    ry -= ry.mean()
+    rx = _centered_rank(x)
+    ry = _centered_rank(y)
     denom = np.sqrt((rx * rx).sum() * (ry * ry).sum())
     if denom < 1e-12:
         return float("nan")
     return float((rx * ry).sum() / denom)
+
+
+# Bin-monotonicity reference ranks (constant): index order [2,1,0,-1,-2].
+_BIN_IDX = np.array([2, 1, 0, -1, -2], dtype=np.float64)
+_BIN_IDX_R = _centered_rank(_BIN_IDX)
+_BIN_IDX_SS = float((_BIN_IDX_R * _BIN_IDX_R).sum())
+
+
+class _PreparedFrame:
+    """Pre-extracted, partially pre-ranked view of a scoring frame.
+
+    Everything that does NOT depend on (weights, thresholds) is computed once
+    here: the dim matrix, consensus direction, and each horizon's forward
+    returns together with their mean-centered ranks. Across an Optuna study the
+    return ranks are reused for every trial instead of being recomputed — the
+    single biggest cost in the calibration objective. Scores are bit-identical
+    to ``_score_frame`` (same rankdata, same formulas)."""
+
+    __slots__ = ("n", "M", "cons", "ret_arrays", "ret_ranks", "ret_ss")
+
+    def __init__(self, frame: pd.DataFrame, horizons: tuple[int, ...]) -> None:
+        self.n = len(frame)
+        self.M = np.column_stack([
+            frame["dim_direction"].to_numpy(dtype=np.float64),
+            frame["dim_breadth"].to_numpy(dtype=np.float64),
+            frame["dim_magnitude"].to_numpy(dtype=np.float64),
+            frame["dim_regime"].to_numpy(dtype=np.float64),
+        ]) if self.n else np.empty((0, 4))
+        self.cons = (frame["consensus_direction"].to_numpy(dtype=np.float64)
+                     if "consensus_direction" in frame.columns else None)
+        self.ret_arrays: dict[int, np.ndarray] = {}
+        self.ret_ranks: dict[int, np.ndarray] = {}
+        self.ret_ss: dict[int, float] = {}
+        for h in horizons:
+            col = f"Ret_{h}b"
+            if col not in frame.columns:
+                continue
+            r = frame[col].to_numpy(dtype=np.float64)
+            self.ret_arrays[h] = r
+            if self.n >= 5:
+                rr = _centered_rank(r)
+                self.ret_ranks[h] = rr
+                self.ret_ss[h] = float((rr * rr).sum())
+
+    def composite(self, w: dict[str, float]) -> np.ndarray:
+        weights = _normalize_weights(w)
+        agreement = (self.M @ weights) * 2.0 - weights.sum()
+        if self.cons is not None:
+            return -self.cons * (agreement + 1.0) / 2.0
+        return agreement
+
+
+def _score_prepared(
+    prep: "_PreparedFrame",
+    weights: dict[str, float],
+    thresholds: dict[str, float],
+    horizons: tuple[int, ...],
+) -> tuple[float, float]:
+    """Exact equivalent of ``_score_frame`` operating on a ``_PreparedFrame``."""
+    if prep.n == 0:
+        return float("nan"), -1e6
+    composite = prep.composite(weights)
+    bins = _classify(composite, thresholds)
+
+    horizon_ics: list[float] = []
+    rx = None
+    ss_rx = 0.0
+    if prep.n >= 5:
+        rx = _centered_rank(composite)
+        ss_rx = float((rx * rx).sum())
+    for h in horizons:
+        if h not in prep.ret_ranks or rx is None:
+            continue
+        ry = prep.ret_ranks[h]
+        denom = np.sqrt(ss_rx * prep.ret_ss[h])
+        if denom < 1e-12:
+            continue
+        ic = float((rx * ry).sum() / denom)
+        horizon_ics.append(-ic)
+    if not horizon_ics:
+        return float("nan"), -1e6
+    mean_ic = float(np.mean(horizon_ics))
+
+    bin_quality = 0.0
+    n_used = 0
+    for h in horizons:
+        if h not in prep.ret_arrays:
+            continue
+        rets = prep.ret_arrays[h]
+        means = []
+        for b in (-2, -1, 0, +1, +2):
+            mask = bins == b
+            if mask.sum() >= 3:
+                means.append(rets[mask].mean())
+            else:
+                means.append(np.nan)
+        means_arr = np.array(means)
+        if np.isnan(means_arr).any():
+            continue
+        ry = _centered_rank(means_arr)
+        denom = np.sqrt(_BIN_IDX_SS * float((ry * ry).sum()))
+        if denom < 1e-12:
+            continue
+        bin_quality += float((_BIN_IDX_R * ry).sum() / denom)
+        n_used += 1
+    if n_used:
+        bin_quality /= n_used
+
+    score = mean_ic + 0.25 * bin_quality
+    return mean_ic, score
 
 
 def _score_frame(
@@ -459,14 +576,23 @@ def _optimize_frame(
     if not _OPTUNA_AVAILABLE or len(train) < 60:
         return DEFAULT_WEIGHTS.copy(), DEFAULT_THRESHOLDS.copy()
 
+    # Pre-rank the fold returns ONCE (constant across all trials).
+    n = len(train)
+    if n < n_cv_folds * 10:
+        _folds = [_PreparedFrame(train, horizons)]
+        _single = True
+    else:
+        _edges = np.linspace(0, n, n_cv_folds + 1).astype(int)
+        _folds = [_PreparedFrame(train.iloc[_edges[i]:_edges[i + 1]], horizons)
+                  for i in range(n_cv_folds)]
+        _single = False
+
     def _cv_score(w: dict, t: dict) -> float:
-        n = len(train)
-        if n < n_cv_folds * 10:
-            return _score_frame(train, w, t, horizons)[1]
-        edges = np.linspace(0, n, n_cv_folds + 1).astype(int)
+        if _single:
+            return _score_prepared(_folds[0], w, t, horizons)[1]
         scores = []
-        for i in range(n_cv_folds):
-            _, sc = _score_frame(train.iloc[edges[i]:edges[i + 1]], w, t, horizons)
+        for fold in _folds:
+            _, sc = _score_prepared(fold, w, t, horizons)
             if not np.isnan(sc):
                 scores.append(sc)
         return float(np.mean(scores) - 0.5 * np.std(scores)) if scores else -1e6
@@ -650,12 +776,30 @@ class ConvergenceTuner:
         time blocks stops the optimiser from exploiting one slice's noise — a
         param set must work across the whole history to score well.
         """
+        # Hot path: the optimiser scores ``self.opt_frame`` thousands of times.
+        # Pre-rank its fold returns once and reuse (bit-identical to _score_frame).
+        if frame is self.opt_frame:
+            folds, single = self._opt_folds()
+            if single:
+                return _score_prepared(folds[0], w, t, self.horizons)
+            ics: list[float] = []
+            scores: list[float] = []
+            for fold in folds:
+                ic, sc = _score_prepared(fold, w, t, self.horizons)
+                if not np.isnan(sc):
+                    ics.append(ic)
+                    scores.append(sc)
+            if not scores:
+                return float("nan"), -1e6
+            return float(np.mean(ics)), float(np.mean(scores) - 0.5 * np.std(scores))
+
+        # Generic fallback (arbitrary frames): original per-call path.
         n = len(frame)
         if n < self.n_cv_folds * 10:
             return _score_frame(frame, w, t, self.horizons)
         edges = np.linspace(0, n, self.n_cv_folds + 1).astype(int)
-        ics: list[float] = []
-        scores: list[float] = []
+        ics = []
+        scores = []
         for i in range(self.n_cv_folds):
             sub = frame.iloc[edges[i]:edges[i + 1]]
             ic, sc = _score_frame(sub, w, t, self.horizons)
@@ -665,6 +809,25 @@ class ConvergenceTuner:
         if not scores:
             return float("nan"), -1e6
         return float(np.mean(ics)), float(np.mean(scores) - 0.5 * np.std(scores))
+
+    def _opt_folds(self):
+        """Lazily build & cache the prepared CV folds for ``opt_frame``."""
+        cached = getattr(self, "_opt_folds_cache", None)
+        if cached is not None:
+            return cached
+        frame = self.opt_frame
+        n = len(frame)
+        if n < self.n_cv_folds * 10:
+            folds = ([_PreparedFrame(frame, self.horizons)], True)
+        else:
+            edges = np.linspace(0, n, self.n_cv_folds + 1).astype(int)
+            folds = (
+                [_PreparedFrame(frame.iloc[edges[i]:edges[i + 1]], self.horizons)
+                 for i in range(self.n_cv_folds)],
+                False,
+            )
+        self._opt_folds_cache = folds
+        return folds
 
     def _objective(self, trial: "optuna.Trial") -> float:
         w, t = self._suggest_params(trial)

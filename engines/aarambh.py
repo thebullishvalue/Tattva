@@ -1,8 +1,10 @@
 """
-Tattva v2.0.0 — FairValueEngine: Walk-forward ensemble regression for commodity fair value.
+Tattva — FairValueEngine: walk-forward ensemble regression for forward-return forecasting.
 तत्त्व (Tattva) — "Principle / Essence"
 
-AARAMBH — Walk-forward ensemble regression on Nifty 50 PE ratio with conformal z-scores and DDM filtering.
+AARAMBH — Walk-forward ensemble that forecasts the target's forward return from
+trailing macro momentum (any target: commodity, FX, or equity index), with causal
+PCA, conformal z-scores, and DDM filtering. Out-of-sample skill is graded by rank IC.
 
 Imports math primitives from analytics.* instead of inline definitions.
 No Streamlit dependency.
@@ -99,7 +101,8 @@ class FairValueEngine:
     """Walk-forward fair value engine with multi-lookback breadth analytics.
 
     Pipeline:
-        1. Expanding-window ensemble regression (Ridge + Huber + ElasticNet + WLS)
+        1. Expanding-window ensemble regression on causal-PCA components
+           (configurable members via config.ENSEMBLE_MODELS; default PCA-OLS + Huber)
         2. Multi-lookback conformal z-score computation and zone classification
         3. Breadth aggregation and raw conviction scoring
         4. Drift-Diffusion filtering of conviction with mean-reverting variance

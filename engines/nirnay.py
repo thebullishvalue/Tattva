@@ -1,5 +1,5 @@
 """
-Tattva v2.0.0 — Nirnay Engine: Per-instrument MSF + MMR with regime intelligence.
+Tattva — Nirnay Engine: Per-instrument MSF + MMR with regime intelligence.
 तत्त्व (Tattva) — "Principle / Essence"
 
 NIRNAY — Per-constituent MSF + MMR analysis with HMM/GARCH/CUSUM regime intelligence aggregation.

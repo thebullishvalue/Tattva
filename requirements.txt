@@ -10,7 +10,7 @@ numba
 
 # Scientific Computing
 scipy>=1.11.0
-scikit-learn>=1.4.0
+scikit-learn>=1.5.0  # 1.5+ enables PCA svd_solver="covariance_eigh" (exact, ~2x faster walk-forward)
 statsmodels>=0.14.0
 
 # Self-Calibration / Intelligence Mode (Optuna TPE optimizer)

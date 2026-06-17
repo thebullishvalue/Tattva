@@ -24,6 +24,16 @@ for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
+# ── Numba cache OUTSIDE the app tree (MUST run before numba is imported) ──────
+# @njit(cache=True) kernels write .nbc/.nbi artifacts. If those land in the app
+# directory (default: <module>/__pycache__), Streamlit's file watcher treats each
+# write as a source change and reruns the script — restarting the whole pipeline
+# mid-compile. Point Numba's cache at the home cache dir (writable, NOT watched).
+os.environ.setdefault(
+    "NUMBA_CACHE_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "tattva", "numba"),
+)
+
 import json
 import logging
 import sys

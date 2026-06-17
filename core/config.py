@@ -286,7 +286,7 @@ MACRO_SYMBOLS_YF = {
     "Platinum": "PL=F",
     # Commodities - Energy
     "Crude Oil": "CL=F",
-    "Brent Crude": "BZ=F",
+    "UKOIL": "BZ=F",        # Brent crude (front-month) — "UKOIL" per the target naming
     "Natural Gas": "NG=F",
     # Commodities - Agriculture
     "Corn": "ZC=F",
@@ -307,6 +307,7 @@ COMMODITY_TARGETS = {
     "Silver": "SI=F",
     "Copper": "HG=F",
     "Cotton": "CT=F",
+    "UKOIL": "BZ=F",
     "USD/INR": "INR=X",
 }
 
@@ -357,6 +358,14 @@ COMMODITY_BASKETS = {
         "IDR=X", "PHP=X", "THB=X",              # USD/IDR, USD/PHP, USD/THB
         "KRW=X", "SGD=X", "TWD=X",              # USD/KRW, USD/SGD, USD/TWD
     ],
+    # UKOIL = Brent crude. Co-directional producer cross-section: integrated
+    # majors + E&P + oilfield services. NO energy-sector ETFs (XLE) or oil-price
+    # proxies (USO) — those double-count or duplicate the target.
+    "UKOIL": [
+        "XOM", "CVX", "COP", "BP", "SHEL", "TTE", "EQNR",   # integrated majors
+        "EOG", "OXY", "DVN", "FANG", "HES", "CTRA",         # E&P producers
+        "SLB", "HAL", "BKR",                                # oilfield services
+    ],
 }
 
 # ─── Target metadata: polarity + archetype ───────────────────────────────────
@@ -370,6 +379,7 @@ TARGET_POLARITY = {
     "Silver": +1,
     "Copper": +1,
     "Cotton": +1,
+    "UKOIL": +1,     # oil producers are co-directional with crude
     "USD/INR": +1,   # dollar-strength complex is co-directional with USD/INR
 }
 
@@ -382,6 +392,7 @@ TARGET_ARCHETYPE = {
     "Silver": "producer",
     "Copper": "producer",
     "Cotton": "hybrid",
+    "UKOIL": "producer",
     "USD/INR": "proxy",
 }
 
@@ -398,7 +409,47 @@ TARGET_EXCLUDED_PREDICTORS = {
     # The other INR crosses are quasi-replicas of USD/INR (all priced in INR).
     # Dollar Index is kept — it is a legitimate driver, not a replica.
     "USD/INR": ["EUR/INR", "GBP/INR", "JPY/INR"],
+    # WTI is ~the same barrel as Brent; the broad commodity indices + energy
+    # sector ETF are crude-dominated → all would let crude "explain" itself.
+    "UKOIL": ["Crude Oil", "Broad Commodity Index (DBC)",
+              "Commodity Index (GSG)", "US Energy Sector"],
 }
+
+# ─── Index targets (equity indices: India sectoral/broad, US, sector-ETF) ─────
+# The Aarambh target is the index price; the Nirnay basket is the index's own
+# constituents (resolved live + cached in data/universe.py). Their price tickers
+# are merged into the fetched universe so the index level is an available column.
+from data.universe import INDEX_TARGETS, INDEX_TARGETS_MAP  # noqa: E402
+
+# Equity-index ETFs already in the macro pool that would replicate an index
+# target (so they are excluded from that target's predictor set).
+_US_INDEX_ETFS = ["US Large Cap (S&P 500)", "US Nasdaq 100",
+                  "US Small Cap (Russell 2000)", "Global Equity (ACWI)"]
+_INDIA_INDEX_ETFS = ["India Equity"]
+
+_INDEX_NAMES = list(INDEX_TARGETS.keys())
+for _name, _meta in INDEX_TARGETS.items():
+    TARGET_POLARITY.setdefault(_name, +1)
+    TARGET_ARCHETYPE.setdefault(_name, "index")
+    # An index must not be "explained" by sibling equity indices → exclude every
+    # other index column, plus the same-market broad ETFs, from its predictors.
+    _excl = [n for n in _INDEX_NAMES if n != _name]
+    if _meta["kind"] in ("india", "etf"):
+        _excl = _excl + _INDIA_INDEX_ETFS
+    elif _meta["kind"] == "us":
+        _excl = _excl + _US_INDEX_ETFS
+    TARGET_EXCLUDED_PREDICTORS[_name] = _excl
+
+# Full target catalogue (commodities/FX + indices) → friendly name : yf ticker.
+ALL_TARGETS = {**COMMODITY_TARGETS, **INDEX_TARGETS_MAP}
+
+# Sidebar grouping — ordered category → target names.
+TARGET_CATEGORIES: dict[str, list[str]] = {
+    "Commodities": ["Gold", "Silver", "Copper", "UKOIL", "Cotton"],
+    "Currency (FX)": ["USD/INR"],
+}
+for _name, _meta in INDEX_TARGETS.items():
+    TARGET_CATEGORIES.setdefault(_meta["category"], []).append(_name)
 
 # ─── Chart Theme ─────────────────────────────────────────────────────────────
 

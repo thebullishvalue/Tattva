@@ -76,6 +76,22 @@ INDEX_TARGETS: dict[str, dict] = {
     "Nifty Pharma":  {"ticker": "^CNXPHARMA","kind": "india", "nse": "ind_niftypharmalist.csv", "category": "India Indices"},
     "Nifty Metal":   {"ticker": "^CNXMETAL", "kind": "india", "nse": "ind_niftymetallist.csv",  "category": "India Indices"},
     "Nifty Energy":  {"ticker": "^CNXENERGY","kind": "india", "nse": "ind_niftyenergylist.csv", "category": "India Indices"},
+    # broad-market
+    "Nifty 100":          {"ticker": "^CNX100",    "kind": "india", "nse": "ind_nifty100list.csv",          "category": "India Indices"},
+    "Nifty Midcap 50":    {"ticker": "^NSEMDCP50", "kind": "india", "nse": "ind_niftymidcap50list.csv",     "category": "India Indices"},
+    "Nifty Smallcap 100": {"ticker": "^CNXSC",     "kind": "india", "nse": "ind_niftysmallcap100list.csv",  "category": "India Indices"},
+    # additional sectoral / thematic
+    "Nifty Fin Services": {"ticker": "NIFTY_FIN_SERVICE.NS", "kind": "india", "nse": "ind_niftyfinancelist.csv",     "category": "India Indices"},
+    "Nifty Pvt Bank":     {"ticker": "NIFTY_PVT_BANK.NS",    "kind": "india", "nse": "ind_nifty_privatebanklist.csv", "category": "India Indices"},
+    "Nifty PSU Bank":     {"ticker": "^CNXPSUBANK", "kind": "india", "nse": "ind_niftypsubanklist.csv",      "category": "India Indices"},
+    "Nifty Realty":       {"ticker": "^CNXREALTY",  "kind": "india", "nse": "ind_niftyrealtylist.csv",       "category": "India Indices"},
+    "Nifty Media":        {"ticker": "^CNXMEDIA",   "kind": "india", "nse": "ind_niftymedialist.csv",        "category": "India Indices"},
+    "Nifty Infra":        {"ticker": "^CNXINFRA",   "kind": "india", "nse": "ind_niftyinfralist.csv",        "category": "India Indices"},
+    "Nifty PSE":          {"ticker": "^CNXPSE",     "kind": "india", "nse": "ind_niftypselist.csv",          "category": "India Indices"},
+    "Nifty Consumption":  {"ticker": "^CNXCONSUM",  "kind": "india", "nse": "ind_niftyconsumptionlist.csv",  "category": "India Indices"},
+    "Nifty Commodities":  {"ticker": "^CNXCMDT",    "kind": "india", "nse": "ind_niftycommoditieslist.csv",  "category": "India Indices"},
+    "Nifty MNC":          {"ticker": "^CNXMNC",     "kind": "india", "nse": "ind_niftymnclist.csv",          "category": "India Indices"},
+    "Nifty Services":     {"ticker": "^CNXSERVICE", "kind": "india", "nse": "ind_niftyservicelist.csv",      "category": "India Indices"},
     # ── US — benchmark indices (constituents via Wikipedia) ──────────────────
     "S&P 500":       {"ticker": "^GSPC", "kind": "us", "wiki": "S&P 500",    "category": "US Indices"},
     "Nasdaq 100":    {"ticker": "^NDX",  "kind": "us", "wiki": "NASDAQ 100", "category": "US Indices"},

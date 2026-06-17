@@ -100,7 +100,7 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -183,7 +183,7 @@ def _render_landing_page() -> None:
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
             AWAITING DATA
         </h4>
-        <p>Pick a <strong>Target</strong> (Gold · Silver · Copper · Cotton · USD/INR) in the <strong>Sidebar</strong>,<br>
+        <p>Pick an <strong>Asset Class → Target</strong> (Commodities · FX · India &amp; US Indices · Sector ETFs) in the <strong>Sidebar</strong>,<br>
            then execute <strong>Run Analysis</strong> to fetch the live yfinance data and initialize both engines.</p>
     </div>
     """, unsafe_allow_html=True)
@@ -429,18 +429,60 @@ def main():
             unsafe_allow_html=True,
         )
 
-        st.markdown('<div class="sidebar-title">Target</div>', unsafe_allow_html=True)
-        commodity_names = list(COMMODITY_TARGETS.keys())
-        prev_commodity = st.session_state.get("selected_commodity", commodity_names[0])
-        if prev_commodity not in commodity_names:
-            prev_commodity = commodity_names[0]
-        selected_commodity = st.selectbox(
-            "Target", commodity_names,
-            index=commodity_names.index(prev_commodity),
-            label_visibility="collapsed",
-            help="Aarambh fair-value target. Predictors are the commodity/FX universe; "
-                 "Nirnay runs on a basket of related ETFs & miners.",
+        # Two-level selection: Asset Class → Target. Keeps the growing target
+        # roster (commodities, FX, India & US indices, sector-ETF universe)
+        # logically grouped instead of one long flat list.
+        all_names = list(ALL_TARGETS.keys())
+        prev_commodity = st.session_state.get("selected_commodity", all_names[0])
+        if prev_commodity not in all_names:
+            prev_commodity = all_names[0]
+
+        _categories = list(TARGET_CATEGORIES.keys())
+        prev_cat = next(
+            (c for c, names in TARGET_CATEGORIES.items() if prev_commodity in names),
+            _categories[0],
         )
+        # Seed widget state BEFORE instantiation so the (options-changing) target
+        # selectbox never holds a value outside its current category — the classic
+        # Streamlit "key + dynamic options" pitfall. We drive both via session_state
+        # keys, not `index=`.
+        st.session_state.setdefault("target_category", prev_cat)
+        if st.session_state["target_category"] not in _categories:
+            st.session_state["target_category"] = prev_cat
+
+        st.markdown('<div class="sidebar-title">Asset Class</div>', unsafe_allow_html=True)
+        sel_cat = st.selectbox(
+            "Asset Class", _categories,
+            label_visibility="collapsed", key="target_category",
+            help="Choose an asset class, then a target within it.",
+        )
+        cat_targets = TARGET_CATEGORIES.get(sel_cat, all_names)
+
+        # Keep the target selection valid for the chosen category.
+        if st.session_state.get("target_select") not in cat_targets:
+            st.session_state["target_select"] = (
+                prev_commodity if prev_commodity in cat_targets else cat_targets[0]
+            )
+        st.markdown('<div class="sidebar-title" style="margin-top:0.5rem;">Target</div>', unsafe_allow_html=True)
+        selected_commodity = st.selectbox(
+            "Target", cat_targets,
+            label_visibility="collapsed", key="target_select",
+            help="Aarambh forecasts this target's forward return; Nirnay reads "
+                 "cross-sectional breadth across its basket (producers / "
+                 "constituents / sector ETFs).",
+        )
+        # Show the basket archetype as a subtle hint.
+        _arch = TARGET_ARCHETYPE.get(selected_commodity, "")
+        if _arch:
+            _arch_label = {"producer": "producer cross-section",
+                           "hybrid": "agribusiness + futures", "proxy": "cross-asset proxy",
+                           "index": "index constituents"}.get(_arch, _arch)
+            st.markdown(
+                f'<div style="font-family:var(--data);font-size:0.58rem;'
+                f'color:var(--ink-tertiary);text-transform:uppercase;letter-spacing:0.08em;'
+                f'margin:-0.2rem 0 0.3rem 0;">Nirnay basket · {_arch_label}</div>',
+                unsafe_allow_html=True,
+            )
 
         df = None
         has_data = "data" in st.session_state and "run_analysis" in st.session_state
@@ -502,7 +544,7 @@ def main():
 
         # Target is chosen once in the sidebar "Target Commodity" selector;
         # resolve it here for predictor configuration.
-        commodity_options = [c for c in COMMODITY_TARGETS if c in numeric_cols] or numeric_cols
+        commodity_options = [c for c in ALL_TARGETS if c in numeric_cols] or numeric_cols
         target_col = st.session_state.get("active_target", commodity_options[0])
         if target_col not in numeric_cols:
             target_col = commodity_options[0]

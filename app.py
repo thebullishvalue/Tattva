@@ -32,9 +32,15 @@ warnings.filterwarnings("ignore", category=UserWarning, module="yfinance")
 pd.options.mode.chained_assignment = None
 
 # ── Path setup ───────────────────────────────────────────────────────────────
+# Force PROJECT_ROOT to the FRONT of sys.path (ahead of site-packages) so the
+# project's own packages (analytics, core, data, …) always win over any
+# same-named package that happens to be installed in the environment. The
+# project dirs carry __init__.py so they resolve as regular packages.
 PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+_pr = str(PROJECT_ROOT)
+if _pr in sys.path:
+    sys.path.remove(_pr)
+sys.path.insert(0, _pr)
 
 # ── UI ───────────────────────────────────────────────────────────────────────
 from ui.theme import inject_css, VERSION, PRODUCT_NAME, COMPANY, progress_bar
@@ -61,7 +67,7 @@ from data.constituents import get_commodity_basket
 
 # ── Engines ──────────────────────────────────────────────────────────────────
 from engines.aarambh import FairValueEngine
-from engines.nirnay import run_full_analysis, aggregate_constituent_timeseries
+from engines.nirnay import run_full_analysis, aggregate_constituent_timeseries, apply_polarity
 
 # ── Convergence ──────────────────────────────────────────────────────────────
 from convergence.cross_validator import CrossValidator
@@ -70,7 +76,7 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -108,7 +114,7 @@ def _render_landing_page() -> None:
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
                 AARAMBH
             </h3>
-            <p>Walk-forward ensemble regression on the selected commodity (Gold / Silver / Copper) vs the macro/FX universe, with conformal z-scores and DDM filtering.</p>
+            <p>Walk-forward ensemble regression on the selected target (commodities & FX) vs the macro/FX universe, with conformal z-scores and DDM filtering.</p>
             <div class='spec'>
                 <span>Ensemble:</span> Ridge + Huber + ENet + WLS<br>
                 <span>Validation:</span> Walk-forward OOS<br>
@@ -153,7 +159,7 @@ def _render_landing_page() -> None:
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
             AWAITING DATA
         </h4>
-        <p>Pick a <strong>Target Commodity</strong> (Gold / Silver / Copper) in the <strong>Sidebar</strong>,<br>
+        <p>Pick a <strong>Target</strong> (Gold · Silver · Copper · Cotton · USD/INR) in the <strong>Sidebar</strong>,<br>
            then execute <strong>Run Analysis</strong> to fetch the live yfinance data and initialize both engines.</p>
     </div>
     """, unsafe_allow_html=True)
@@ -338,7 +344,11 @@ def _render_model_passport_sidebar(current_universe: str, current_index: str | N
     if saved_profile is not None:
         export_payload = saved_profile.to_dict()
         ts_slug = (saved_profile.timestamp or "").split(" ")[0] or "snapshot"
-        fname = f"tattva_profile_{_trim((saved_profile.selected_index or saved_profile.universe or 'profile').replace(' ', '_'), 30)}_{ts_slug}.json"
+        # Sanitize for a safe filename: spaces → "_", and "/" (e.g. "USD/INR")
+        # → "-" so it doesn't read as a path separator in the download.
+        _slug = (saved_profile.selected_index or saved_profile.universe or "profile")
+        _slug = _slug.replace(" ", "_").replace("/", "-")
+        fname = f"tattva_profile_{_trim(_slug, 30)}_{ts_slug}.json"
         st.download_button(
             "↓ Export Profile",
             data=json.dumps(export_payload, indent=2, default=str),
@@ -395,7 +405,7 @@ def main():
             unsafe_allow_html=True,
         )
 
-        st.markdown('<div class="sidebar-title">Target Commodity</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sidebar-title">Target</div>', unsafe_allow_html=True)
         commodity_names = list(COMMODITY_TARGETS.keys())
         prev_commodity = st.session_state.get("selected_commodity", commodity_names[0])
         if prev_commodity not in commodity_names:
@@ -816,6 +826,12 @@ def main():
             if nirnay_constituent_dfs:
                 console.section("Aggregation")
                 nirnay_daily = aggregate_constituent_timeseries(nirnay_constituent_dfs)
+                # Re-orient breadth to the target's direction for inverse baskets
+                # (no-op for co-directional baskets, i.e. all current targets).
+                _polarity = TARGET_POLARITY.get(active_target, 1)
+                if _polarity < 0:
+                    nirnay_daily = apply_polarity(nirnay_daily, _polarity)
+                    console.item("Polarity", f"{_polarity} (basket inverted to target)")
                 console.item("Trading Days", len(nirnay_daily))
                 if len(nirnay_daily) > 0:
                     last = nirnay_daily.iloc[-1]

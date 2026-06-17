@@ -1,4 +1,4 @@
-# Tattva v2.0.0 — Unified Commodity Convergence Analysis System
+# Tattva — Unified Convergence Analysis System
 # @thebullishvalue Product
 
 # Core Framework

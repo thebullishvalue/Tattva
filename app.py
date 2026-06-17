@@ -1,8 +1,10 @@
 """
-Tattva v2.0.0 — Main Streamlit entrypoint.
+Tattva — Main Streamlit entrypoint.
 तत्त्व (Tattva) — "Principle / Essence"
 
-TATTVA — Two systems. One conclusion. Commodity fair-value + basket regime intelligence unified by adaptive convergence.
+TATTVA — Two systems. One conclusion. A top-down macro forecast and a bottom-up
+basket regime read — across commodities, FX, and equity indices — unified by
+adaptive convergence.
 
 Usage:
     streamlit run app.py

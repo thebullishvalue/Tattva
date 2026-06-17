@@ -1,28 +1,31 @@
 # TATTVA — तत्त्व
 
-**Unified Commodity Convergence Engine** · v2.0.0 · *@thebullishvalue*
+**Unified Convergence Engine** · v2.1.0 · *@thebullishvalue*
 
 > *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality": the underlying
 > truth distilled from the convergence of evidence.
 
 Tattva is a research terminal that produces a single, calibrated directional
-signal for a commodity (**Gold, Silver, or Copper**) by converging two
-independent engines — a top-down macro **forecast** and a bottom-up **regime
-breadth** read — and grading its own out-of-sample edge as it goes.
+signal for a **target** — a commodity (Gold, Silver, Copper, Brent, Cotton), an
+FX pair (USD/INR), or an equity **index** (Indian broad & sectoral, US benchmarks,
+or an India sector-ETF universe) — by converging two independent engines: a
+top-down macro **forecast** and a bottom-up **regime breadth** read, grading its
+own out-of-sample edge as it goes.
 
-It runs entirely on free **yfinance** data. No API keys, no secrets, no database.
+It runs entirely on free **yfinance** data (plus NSE/Wikipedia for index
+constituents). No API keys, no secrets, no database.
 
 ---
 
 ## What it does
 
-For the selected commodity, Tattva runs a 5-phase pipeline and renders a Streamlit
+For the selected target, Tattva runs a 5-phase pipeline and renders a Streamlit
 terminal:
 
 | Engine | Question it answers | How |
 |---|---|---|
-| **AARAMBH** | *Is the macro setup pointing up or down?* | Walk-forward ensemble (Ridge + Huber + ElasticNet + PCA-OLS) **forecasting the forward 10-day return** from trailing macro momentum. |
-| **NIRNAY** | *What is the related complex doing bottom-up?* | Per-instrument MSF + MMR oscillators with HMM/GARCH/CUSUM regime detection across a basket of related miners/streamers, aggregated into breadth. |
+| **AARAMBH** | *Is the macro setup pointing up or down?* | Walk-forward ensemble (configurable via `ENSEMBLE_MODELS`; default **PCA-OLS + Huber**) **forecasting the forward 10-day return** from trailing macro momentum. |
+| **NIRNAY** | *What is the related complex doing bottom-up?* | Per-instrument MSF + MMR oscillators with HMM/GARCH/CUSUM regime detection across the target's basket (related miners/streamers for a commodity, or the index's own constituents), aggregated into breadth. |
 | **CONVERGENCE** | *Do the two agree, and how strongly?* | Adaptive-weighted, **directional** composite across Direction / Breadth / Magnitude / Regime, smoothed with a Drift-Diffusion filter. |
 | **INTELLIGENCE** | *Does the signal actually have edge?* | Optuna TPE calibration of the convergence weights/thresholds with a **purged k-fold CV objective** + held-out tail, plus an automatic **walk-forward IC** durability check. |
 
@@ -42,9 +45,10 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Then in the sidebar: pick a **Target Commodity** (Gold / Silver / Copper) and click
-**Run Analysis**. First run fetches ~9 years of history (cached afterwards) and runs
-the full pipeline; subsequent runs are fast.
+Then in the sidebar: pick a **Target** (a commodity, USD/INR, or an equity index)
+and click **Run Analysis**. First run fetches ~9 years of history (cached afterwards)
+and runs the full pipeline; subsequent runs are fast. Switching target re-runs the
+engines on the already-fetched macro universe (only the Nirnay basket re-pulls).
 
 No configuration is required — there are no secrets or environment variables to set.
 
@@ -53,7 +57,7 @@ No configuration is required — there are no secrets or environment variables t
 ## How the model works
 
 **Predictive, returns-based.** Aarambh does **not** regress price levels (which is a
-spurious regression). It forecasts the **forward 10-day log-return** of the commodity
+spurious regression). It forecasts the **forward 10-day log-return** of the target
 from **trailing 20-day momentum** of ~112 macro/FX/commodity series — a genuine
 ex-ante setup. The forecast drives a directional conviction; out-of-sample skill is
 measured by rank **IC**, not R² (a price forecast's magnitude R² is ~0 by nature; the
@@ -75,11 +79,14 @@ edge; a couple of spikes = a lucky regime.
 
 ## Data sources (all yfinance)
 
-- **Target & predictors:** the commodity front-month future plus the macro universe in
-  `core/config.py` — `GLOBAL_MACRO_MAP` (bond/rates/equity/risk/real-asset ETFs) +
-  `MACRO_SYMBOLS_YF` (commodities + FX).
+- **Target & predictors:** the target's price series (commodity future / FX / index
+  level) plus the macro universe in `core/config.py` — `GLOBAL_MACRO_MAP`
+  (bond/rates/equity/risk/real-asset ETFs) + `MACRO_SYMBOLS_YF` (commodities + FX).
+- **Index targets:** `INDEX_TARGETS` in `data/universe.py` (India broad/sectoral, US
+  benchmarks, India sector-ETF universe).
 - **Nirnay basket:** per-commodity miners/streamers in `COMMODITY_BASKETS`
-  (`core/config.py`).
+  (`core/config.py`); for an index target, the index's own constituents — resolved
+  live (NSE archive CSV / Wikipedia), cached 24 h, with a hardcoded-snapshot fallback.
 
 Every external call is wrapped in a two-tier cache (memory + disk), a per-service
 circuit breaker, retry-with-backoff, and a stale-snapshot fallback — so the UI keeps
@@ -91,16 +98,19 @@ working through transient yfinance outages.
 
 | What | Where |
 |---|---|
-| Target commodities | `COMMODITY_TARGETS` in `core/config.py` |
-| Nirnay baskets | `COMMODITY_BASKETS` in `core/config.py` |
+| Target commodities / FX | `COMMODITY_TARGETS` in `core/config.py` |
+| Index targets (India / US / ETF) | `INDEX_TARGETS` in `data/universe.py` |
+| Nirnay commodity baskets | `COMMODITY_BASKETS` in `core/config.py` |
 | Macro predictor universe | `GLOBAL_MACRO_MAP` + `MACRO_SYMBOLS_YF` |
+| Ensemble members | `ENSEMBLE_MODELS` in `core/config.py` (default `("ols", "huber")`) |
+| Constituent cap | `_DEFAULT_CAP` in `data/universe.py` (`0` = no cap, full index) |
 | Forecast horizon / momentum window | `FWD_HORIZON`, `FWD_MOM_K` in `app.py` |
 | PCA components | `n_pca_components` in the `engine.fit(...)` call (`app.py`) |
 | Walk-forward / train sizes | `core/config.py` (`MIN_TRAIN_SIZE`, `MAX_TRAIN_SIZE`, `MIN_DATA_POINTS`) |
 
 In-app: the sidebar **Model Configuration** lets you deselect predictors (the full
 universe is on by default). Calibrated profiles persist to
-`~/.cache/tattva/intelligence/profiles.json` (one per commodity).
+`~/.cache/tattva/intelligence/profiles.json` (one per target).
 
 ---
 
@@ -108,8 +118,9 @@ universe is on by default). Calibrated profiles persist to
 
 ```
 app.py                  Streamlit entrypoint + 5-phase orchestration
-core/                   config (universe, baskets, thresholds), logging
-data/                   yfinance fetchers, two-tier cache, circuit breakers
+core/                   config (macro universe, baskets, thresholds), logging
+data/                   yfinance fetchers, index catalogue + constituent
+                        resolution (universe), two-tier cache, circuit breakers
 engines/                aarambh (forecast), nirnay (regime breadth)
 analytics/              OU, Hurst/DFA, conformal, HMM/GARCH/CUSUM, breaks
 convergence/            cross-validator, conviction (DDM), divergence,

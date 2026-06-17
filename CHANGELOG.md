@@ -9,6 +9,56 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [2.1.0] — 2026-06-17 — *Multi-asset universe + robustness*
+
+Minor release. Broadens the target universe well beyond commodities, retunes the
+Aarambh ensemble from a study, hardens data fetching against rate limits, and
+removes dead code. Backward compatible — no data-format or cache changes.
+
+### Added
+- **Equity-index targets** alongside commodities/FX: India broad & sectoral
+  (Nifty 50/Next 50/100, Midcap 50, Smallcap 100, Bank, IT, Auto, FMCG, Pharma,
+  Metal, Energy, Fin Services, Pvt/PSU Bank, Realty, Media, Infra, PSE, Consumption,
+  Commodities, MNC, Services), US benchmarks (S&P 500, Nasdaq 100, Dow Jones), and an
+  India sector-ETF universe. Each is its own Aarambh target with the index's own
+  constituents as the Nirnay basket. (`INDEX_TARGETS` in `data/universe.py`.)
+- **Snapshot fallbacks for S&P 500 and Nasdaq 100** — previously only Dow Jones had one,
+  so the other two broke whenever the Wikipedia scrape was blocked.
+- `lxml` and `html5lib` pinned in `requirements.txt` (parsers for the constituent scrape;
+  `lxml` was previously only an implicit transitive dependency).
+
+### Changed
+- **Default ensemble `("ridge", "ols")` → `("ols", "huber")`.** An offline study across
+  all six headline targets (Cotton/USD-INR/Nifty 50/Gold/Silver/Copper), scored by OOS
+  rank-IC of the 10-day-forward forecast, found `ols+huber` best on both mean IC and
+  worst-target robustness; the old `ridge+ols` ranked last (Ridge ≈ OLS on PCA-20).
+- **No constituent cap by default** (`_DEFAULT_CAP` 40 → 0). Indices now use their full
+  constituent set — capping a "Nifty 50" to 40 dropped real members. Re-enable by setting
+  a positive cap.
+
+### Fixed
+- **Macro fetch column backfill.** yfinance rate-limits a few tickers per batch (e.g.
+  `GC=F`, `BUNL.L`); the partial frame bypassed the all-or-nothing stale fallback and got
+  cached, silently dropping a target column (Gold = `GC=F`) and failing the run with
+  "Need 1500+ data points." Missing/all-NaN columns are now refilled from the most recent
+  prior snapshot (scanning newest→oldest), re-healing the cache.
+
+### Removed
+- Dead code: `analytics/signals.py` (unused `MSFCalculator`/`MMRCalculator`, superseded by
+  Nirnay's functional `calculate_msf`/`calculate_mmr`), `data/schema.py` +
+  `build_unified_dataset` (uncalled Google-Sheet-era plumbing), and the unused
+  `DEFAULT_PREDICTORS` / `DEFAULT_SHEET_URL` config constants.
+
+### Docs
+- **Single source of truth for the version.** `VERSION`/`PRODUCT_NAME`/`COMPANY` now live
+  only in `core/config.py`; `ui/theme.py` re-exports them (ends the recurring config↔theme
+  drift). Removed the duplicated `vX.Y.Z` token from every module-header docstring.
+- README and docstrings corrected from "commodity-only" to the multi-asset reality, and
+  the ensemble description updated to the configurable default; stale Google-Sheet /
+  "Nifty 50 PE" references removed.
+
+---
+
 ## [2.0.0] — 2026-06-11 — *Tattva — Commodity Convergence*
 
 Major release. The system pivots from a Sheets-fed Nifty 50 PE valuation tool to

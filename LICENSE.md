@@ -1,7 +1,7 @@
 # LICENSE
 
-**TATTVA (तत्त्व) — Unified Commodity Convergence Engine**
-**Version 2.0.0**
+**TATTVA (तत्त्व) — Unified Convergence Engine**
+**Version 2.1.0**
 
 ---
 
@@ -89,6 +89,7 @@ to terminate this licence at any time for breach of terms.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 2.1.0 | 2026-06-17 | Multi-asset universe (India/US equity indices + FX alongside commodities), `ols+huber` ensemble default, uncapped constituents, macro-fetch backfill, dead-code/version cleanup |
 | 2.0.0 | 2026-06-11 | **Tattva** — Commodity pivot (Gold/Silver/Copper), predictive forecast engine, causal PCA, walk-forward validation; renamed from Nishkarsh |
 | 1.4.0 | 2026-05-27 | Self-Calibrating Convergence — Intelligence Mode as default + UI polish |
 | 1.3.0 | 2026-05-25 | Resilient Convergence — Smart data layer + Pragyam UI parity |
@@ -107,7 +108,7 @@ For licensing inquiries or permissions, contact:
 
 ---
 
-**Last Updated:** 2026-06-11
+**Last Updated:** 2026-06-17
 
 **By using this software, you acknowledge that you have read, understood, and
 agree to be bound by these terms and conditions.**

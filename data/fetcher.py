@@ -17,6 +17,7 @@ error pages instead of CSV in late 2025).
 from __future__ import annotations
 
 import logging
+import pickle
 
 import pandas as pd
 import yfinance as yf
@@ -115,6 +116,64 @@ def fetch_constituent_ohlcv(
 # ─── Macro data (yfinance Global Macro universe + commodities/FX) ───────────
 
 
+def _load_macro_snapshots_newest_first() -> list[pd.DataFrame]:
+    """Prior cached macro frames (ticker-columned), newest first, for column backfill."""
+    snaps: list[pd.DataFrame] = []
+    try:
+        paths = sorted(
+            macro_cache._disk_dir.glob("*.pkl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:  # noqa: BLE001
+        return snaps
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                val, _ = pickle.load(f)
+            if isinstance(val, pd.DataFrame) and not val.empty:
+                snaps.append(val)
+        except Exception:  # noqa: BLE001
+            continue
+    return snaps
+
+
+def _backfill_missing_columns(combined: pd.DataFrame, tickers: tuple[str, ...]) -> pd.DataFrame:
+    """Refill columns yfinance dropped/rate-limited (absent or all-NaN) from the most
+    recent prior snapshot that has them.
+
+    yfinance routinely rate-limits a handful of tickers per batch (e.g. GC=F, BUNL.L)
+    while the rest succeed. The partial frame is non-empty, so it bypasses the
+    all-or-nothing stale fallback and gets cached — silently dropping a TARGET column
+    (Gold = GC=F) and failing the walk-forward with "Need 1500+ data points". Backfilling
+    the missing columns keeps the frame complete (tail is at most ~1 day stale) and
+    re-heals the cache. Scans newest→oldest so it recovers even a previously-poisoned
+    snapshot.
+    """
+    if combined.empty:
+        return combined
+    missing = [t for t in tickers if t not in combined.columns or combined[t].isna().all()]
+    if not missing:
+        return combined
+
+    filled: list[str] = []
+    for snap in _load_macro_snapshots_newest_first():
+        if not missing:
+            break
+        snap_aligned = snap.reindex(combined.index).ffill().bfill()
+        for t in list(missing):
+            if t in snap_aligned.columns and not snap_aligned[t].isna().all():
+                combined[t] = snap_aligned[t]
+                filled.append(t)
+                missing.remove(t)
+
+    if filled:
+        log.warning("Macro backfill from snapshot for rate-limited/missing tickers: %s", filled)
+    if missing:
+        log.warning("Macro tickers still unavailable after backfill (no prior snapshot): %s", missing)
+    return combined
+
+
 def _fetch_macro_live_uncached(start_str: str, end_str: str) -> pd.DataFrame:
     """Single yfinance batch for the full macro universe (Sanket-style).
 
@@ -159,6 +218,9 @@ def _fetch_macro_live_uncached(start_str: str, end_str: str) -> pd.DataFrame:
 
     if not combined.empty:
         combined = combined.ffill()
+        # yfinance rate-limits a few tickers per batch; refill those columns from the
+        # last good snapshot so a partial response never drops a target (e.g. Gold=GC=F).
+        combined = _backfill_missing_columns(combined, tickers)
     return combined
 
 

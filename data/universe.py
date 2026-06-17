@@ -12,10 +12,11 @@ target:
 
 Constituent lists are resolved live (NSE archive CSV for India, Wikipedia for US),
 cached to disk (24 h), and fall back to a hardcoded snapshot for the headline
-indices so the app keeps working if a scrape is blocked. Large indices are
-**stride-sampled down to a cap** (default 50) — breadth from ~50 evenly-spaced
-constituents is representative, and it keeps the per-index Nirnay pass bounded
-(an uncapped S&P 500 would be ~135 s of constituent analysis).
+indices so the app keeps working if a scrape is blocked. By default the FULL
+constituent set is used (no cap) — capping an index drops real members and defeats
+its purpose. An optional stride-cap (``_DEFAULT_CAP``) can be re-enabled to bound
+the per-index Nirnay pass on the very large indices (e.g. an uncapped S&P 500 is
+~300 s of constituent analysis at ~0.6 s/name).
 
 Universe selection is adapted from the Sanket terminal (@thebullishvalue).
 """
@@ -35,12 +36,12 @@ log = logging.getLogger(__name__)
 # Constituent lists change slowly — cache a full day, serve stale on failure.
 _constituent_cache = Cache(ttl=86_400, version="v1", namespace="constituents")
 
-# Max Nirnay constituents per index (stride-sampled). Nirnay's MMR cost is
-# ~0.6 s/constituent against the full macro universe, so this directly bounds the
-# per-index pass (~24 s at 40). 40 names still gives 2.5%-granularity breadth.
-# Only the large indices hit it (Nifty 50/Next 50, S&P 500, Nasdaq 100); the
-# sectoral indices and Dow are already smaller.
-_DEFAULT_CAP = 40
+# Max Nirnay constituents per index (stride-sampled). 0 = NO CAP: every index uses
+# its FULL constituent set — capping a "Nifty 50" down to 40 drops real members and
+# defeats the index's purpose. Trade-off: Nirnay's MMR cost is ~0.6 s/constituent,
+# so the per-index pass scales with size (Nifty 50 ≈ 30 s, an uncapped S&P 500 ≈
+# 300 s / ~5 min). Raise this to a positive integer to re-impose an upper bound.
+_DEFAULT_CAP = 0
 
 _HTTP_HEADERS = {
     "User-Agent": (

@@ -192,35 +192,87 @@ def _render_landing_page() -> None:
 
 
 def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
-    """Render the hero Nishkarsh convergence signal card.
+    """Render the hero Tattva convergence signal card.
 
-    The conviction value now reflects the **normalized convergence** shown in
-    the Unified Signal plot \u2014 i.e. the average of the two systems' z-scored
-    (and clipped) signals, in ``[-1, +1]``. The signal classification and the
-    interpretation paragraph follow the same scale.
+    The headline reflects the **calibrated convergence model** \u2014 the adaptive-
+    weighted 4-dimension composite (Direction / Breadth / Magnitude / Regime),
+    DDM-smoothed, scaled to ``[-1, +1]``. This is the object the Intelligence
+    **Val IC** actually validates, so the headline is paired with an honest trust
+    read (Val IC + walk-forward durability) \u2014 conviction is never shown without
+    its reliability. Falls back to the normalized 50/50 consensus (the Unified
+    Signal plot's average line) when no calibrated DDM result exists, and to the
+    Aarambh-only signal when there is no convergence at all.
     """
-    if nishkarsh_norm:
-        conv = nishkarsh_norm["value"]
-        sig = nishkarsh_norm["signal"]
-        a_norm = nishkarsh_norm["aarambh_norm"]
-        n_norm = nishkarsh_norm["nirnay_norm"]
-        agreement_text = "Strong" if agreement > 0.7 else "Moderate" if agreement > 0.5 else "Weak"
-        explanation = (
-            f"Normalized convergence {conv:+.2f} ({sig}). "
-            f"Aarambh contribution: {a_norm:+.2f}; Nirnay contribution: {n_norm:+.2f}. "
-            f"Agreement: {agreement:.0%} ({agreement_text}). "
-            f"{'Both systems aligned.' if agreement > 0.6 else 'Mixed signals \u2014 wait for clearer convergence.'}"
-        )
+    calib       = st.session_state.get("nishkarsh_result")            # UnifiedConvictionResult | None
+    profile     = st.session_state.get("intelligence_active_profile")  # dict | None
+    wf          = st.session_state.get("wf_results")                   # list[dict] | None
+    div_events  = st.session_state.get("divergence_events")            # DataFrame | None
+    FWD_HORIZON = 10  # Aarambh forecast horizon (trading days) \u2014 for interpretation copy
+
+    # \u2500\u2500 Headline: calibrated model \u2192 normalized consensus \u2192 Aarambh-only \u2500\u2500
+    if calib is not None:
+        conv = float(calib.nishkarsh_conviction) / 100.0   # \u00b1100 \u2192 [-1,+1]
+        sig = calib.nishkarsh_signal
+        source = "Calibrated model" if profile else "Convergence model"
+    elif nishkarsh_norm:
+        conv = float(nishkarsh_norm["value"]); sig = nishkarsh_norm["signal"]
+        source = "System consensus (uncalibrated)"
     else:
-        conv = float(aarambh_signal.get("conviction_score", 0))
+        conv = float(aarambh_signal.get("conviction_score", 0)) / 100.0  # ±100 → [-1,+1]
         sig = aarambh_signal.get("signal", "HOLD")
-        explanation = f"Conviction: {conv:+.2f} ({sig})."
+        source = "Aarambh only (no basket convergence)"
+
+    # Normalized per-system reads (the plot's two component lines) \u2014 context.
+    a_norm = nishkarsh_norm.get("aarambh_norm") if nishkarsh_norm else None
+    n_norm = nishkarsh_norm.get("nirnay_norm") if nishkarsh_norm else None
+
+    # \u2500\u2500 Trust: Val IC (held-out) + walk-forward durability \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    val_ic = None
+    if profile and profile.get("val_ic") is not None:
+        try: val_ic = float(profile["val_ic"])
+        except (TypeError, ValueError): val_ic = None
+    wf_ics = [r["ic"] for r in wf if isinstance(r, dict) and r.get("ic") == r.get("ic")] if wf else []
+    wf_pos = (sum(1 for v in wf_ics if v > 0) / len(wf_ics)) if wf_ics else None
+
+    # \u2500\u2500 Interpretation copy \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    direction = "bullish" if "BUY" in sig else "bearish" if "SELL" in sig else "neutral"
+    agreement_text = "strong" if agreement > 0.7 else "moderate" if agreement > 0.5 else "weak"
+    n_div = int(len(div_events)) if div_events is not None and hasattr(div_events, "__len__") else 0
+
+    if val_ic is not None:
+        if val_ic <= 0:        trust = f"No validated edge (Val IC {val_ic:+.3f}) \u2014 treat as noise."
+        elif val_ic < 0.02:    trust = f"Marginal edge (Val IC {val_ic:+.3f})."
+        elif val_ic < 0.05:    trust = f"Modest validated edge (Val IC {val_ic:+.3f})."
+        else:                  trust = f"Solid validated edge (Val IC {val_ic:+.3f})."
+        if wf_pos is not None:
+            trust += f" Walk-forward: {wf_pos:.0%} of windows positive."
+    else:
+        trust = "Edge not yet calibrated (run Intelligence Mode for a Val IC)."
+
+    if sig == "HOLD":
+        lead = f"{source}: {conv:+.2f} \u2014 no directional edge right now."
+    else:
+        lead = (f"{source} reads **{direction}** ({sig}, {conv:+.2f}) over the next "
+                f"~{FWD_HORIZON} trading days.")
+    parts = [lead, trust]
+    if a_norm is not None and n_norm is not None:
+        aligned = (a_norm < 0) == (n_norm < 0)
+        parts.append(
+            f"Aarambh {a_norm:+.2f} / Nirnay {n_norm:+.2f} ({agreement:.0%} agreement, {agreement_text}"
+            + ("; aligned)." if aligned else "; split \u2014 engines disagree).")
+        )
+    if n_div:
+        parts.append(f"{n_div} divergence event(s) flagged \u2014 see Convergence tab.")
+    explanation = " ".join(parts)
 
     render_nishkarsh_signal_card(
         signal=sig,
         conviction=conv,
         agreement=agreement,
         explanation=explanation,
+        val_ic=val_ic,
+        wf_pos=wf_pos,
+        source=source,
     )
     section_gap()
 
@@ -1220,6 +1272,16 @@ def main():
         st.session_state["divergence_events"] = events
         st.session_state["nishkarsh_result"] = results[-1] if results else None
         st.session_state["last_agreement"] = convergence_df["agreement_ratio"].iloc[-1] if not convergence_df.empty else 0
+        # Full calibrated convergence series (DDM-filtered conviction, ±100 → [-1,+1])
+        # so the Unified Signal plot can overlay the model line the hero headline
+        # reflects — keeps card and plot on the same (calibrated) object.
+        if results:
+            st.session_state["calibrated_conv_series"] = pd.Series(
+                [r.nishkarsh_conviction / 100.0 for r in results],
+                index=convergence_df.index, name="CalibratedConvergence",
+            )
+        else:
+            st.session_state["calibrated_conv_series"] = None
 
         # Reuse the normalized convergence computed in the Conviction Model
         # section above — single source of truth from convergence/normalization.py,

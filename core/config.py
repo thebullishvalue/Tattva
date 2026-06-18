@@ -272,6 +272,50 @@ GLOBAL_MACRO_MAP = {
     # ── Dollar & Inflation ─────────────────────────────────────────────────
     "US Dollar Bullish (UUP)":           "UUP",
     "TIPS (Inflation-Protected, SCHP)":  "SCHP",
+    # ── FX Complex (currency factor — beyond UUP/DXY) ──────────────────────
+    "US Dollar Bearish (UDN)":           "UDN",
+    "USD Bullish Broad (USDU)":          "USDU",
+    "Euro (FXE)":                        "FXE",
+    "Japanese Yen (FXY)":                "FXY",
+    "British Pound (FXB)":               "FXB",
+    "Swiss Franc (FXF)":                 "FXF",
+    "Australian Dollar (FXA)":           "FXA",
+    "Canadian Dollar (FXC)":             "FXC",
+    "EM Currencies (CEW)":               "CEW",
+    # ── Real Estate / REITs (rate-sensitive real asset) ────────────────────
+    "US REITs (VNQ)":                    "VNQ",
+    "International REITs (VNQI)":         "VNQI",
+    "Global REITs (REET)":               "REET",
+    # ── Inflation Expectations (tradeable breakeven proxy) ─────────────────
+    "Inflation Expectations (RINF)":     "RINF",
+    # ── Equity Sectors (defensive/cyclical rotation — completes GICS) ──────
+    "US Utilities (XLU)":                "XLU",
+    "US Consumer Staples (XLP)":         "XLP",
+    "US Consumer Discretionary (XLY)":   "XLY",
+    "US Technology (XLK)":               "XLK",
+    "US Health Care (XLV)":              "XLV",
+    "US Real Estate Sector (XLRE)":      "XLRE",
+    "US Communication Services (XLC)":   "XLC",
+    "US Homebuilders (XHB)":             "XHB",
+    "US Transports (IYT)":               "IYT",
+    "Semiconductors (SMH)":              "SMH",
+    # ── Equity Style Factors (risk-appetite rotation) ──────────────────────
+    "US Value (VTV)":                    "VTV",
+    "US Growth (VUG)":                   "VUG",
+    "US Momentum (MTUM)":                "MTUM",
+    "US Low Volatility (USMV)":          "USMV",
+    "US High Beta (SPHB)":               "SPHB",
+    "US High Dividend (VYM)":            "VYM",
+    # ── Regional Equity Breadth (single-country) ───────────────────────────
+    "Japan Equity (EWJ)":                "EWJ",
+    "Eurozone Equity (EZU)":             "EZU",
+    "South Korea Equity (EWY)":          "EWY",
+    "Mexico Equity (EWW)":               "EWW",
+    "Taiwan Equity (EWT)":               "EWT",
+    "UK Equity (EWU)":                   "EWU",
+    # ── Real Assets / Thematic ─────────────────────────────────────────────
+    "Timber & Forestry (WOOD)":          "WOOD",
+    "Global Infrastructure (IGF)":       "IGF",
 }
 
 # Yahoo Finance macro symbols — commodities and FX, fetched alongside Global Macro.
@@ -312,6 +356,12 @@ COMMODITY_TARGETS = {
     "Cotton": "CT=F",
     "UKOIL": "BZ=F",
     "USD/INR": "INR=X",
+    # Jeera (NCDEX cumin) is NOT a yfinance symbol — its daily price is pulled
+    # from a published Google Sheet (data/sheets.py) and injected as a column in
+    # the Aarambh matrix. The value here is a non-yfinance sentinel ticker: it
+    # documents the source and is deliberately kept OUT of MACRO_SYMBOLS_YF /
+    # GLOBAL_MACRO_MAP so it is never sent to yf.download.
+    "Jeera": "JEERA.NCDEX",
 }
 
 # Per-target basket of related instruments fed to the Nirnay regime engine in
@@ -352,14 +402,29 @@ COMMODITY_BASKETS = {
     ],
     # USD/INR is FX — no producer equities exist. The basket is a CO-DIRECTIONAL
     # dollar-strength complex (rises when the rupee weakens, like USD/INR):
-    # UUP (long-USD ETF, the only volume-bearing member) + a spread of USD/Asia
-    # crosses. The =X pairs carry no yfinance volume, so Nirnay's MSF runs its
-    # flow/microstructure components ~neutral (~2/3 strength); the momentum and
-    # trend components (price-based) are unaffected. polarity = +1 (see below).
+    # volume-bearing long-USD ETFs + a spread of USD/Asia crosses. polarity = +1.
+    #
+    # DATA-BACKED CURATION (11y daily+weekly return-correlation study vs USD/INR;
+    # see CHANGELOG). This co-directional design beats the alternative on every
+    # axis: the equal-weight basket tracks USD/INR at daily r ≈ +0.354 / weekly
+    # +0.404 with LOW intra-basket redundancy (0.21 — genuinely independent
+    # votes). USD/Asia crosses are the strongest members (SGD/KRW/IDR/THB/PHP
+    # daily r +0.20..+0.36); USDU/UUP/DXY are weaker daily but strong weekly
+    # (+0.29..+0.31) AND volume-bearing, so Nirnay's MSF microstructure runs on
+    # real flow (the =X crosses carry no yfinance volume → those components run
+    # ~neutral, unaffecting the price-based momentum/trend). CNY=X adds the
+    # China/EM-Asia anchor INR co-moves with.
+    #
+    # REJECTED ALTERNATIVE — an INVERSE India/EM-equity basket (INDA/EPI/INDY/
+    # IBN/HDB/INFY…, polarity -1): daily signal is broken by US-calendar async
+    # (r ≈ +0.05), members are far more redundant (0.48), and its weekly signal
+    # (-0.42) is mostly just Nifty beta (USD/INR vs Nifty weekly = -0.32), i.e. it
+    # reads the India equity regime, not the currency. Co-directional wins.
     "USD/INR": [
-        "UUP",                                  # long USD (volume-bearing anchor)
-        "IDR=X", "PHP=X", "THB=X",              # USD/IDR, USD/PHP, USD/THB
-        "KRW=X", "SGD=X", "TWD=X",              # USD/KRW, USD/SGD, USD/TWD
+        "UUP", "USDU", "DX-Y.NYB",              # long-USD anchors (UUP/USDU volume-bearing) + Dollar Index
+        "SGD=X", "KRW=X", "IDR=X",              # USD/SGD, USD/KRW, USD/IDR (strongest co-directional)
+        "THB=X", "PHP=X", "TWD=X",              # USD/THB, USD/PHP, USD/TWD
+        "CNY=X", "MYR=X",                       # USD/CNY (China anchor), USD/MYR
     ],
     # UKOIL = Brent crude. Co-directional producer cross-section: integrated
     # majors + E&P + oilfield services. NO energy-sector ETFs (XLE) or oil-price
@@ -368,6 +433,50 @@ COMMODITY_BASKETS = {
         "XOM", "CVX", "COP", "BP", "SHEL", "TTE", "EQNR",   # integrated majors
         "EOG", "OXY", "DVN", "FANG", "HES", "CTRA",         # E&P producers
         "SLB", "HAL", "BKR",                                # oilfield services
+    ],
+    # Jeera (NCDEX cumin) has NO listed pure-play producers — same problem as
+    # Cotton, handled the same way: a HYBRID cross-section of the *Indian* agri
+    # economy (independent bottom-up "votes"), so Nirnay reads the Indian agri-
+    # complex regime, not "jeera miners". All names are NSE (.NS), which trade
+    # the same Indian calendar as the NCDEX target (clean alignment).
+    #
+    # DATA-BACKED CURATION (11y daily return-correlation study vs NCDEX jeera;
+    # see CHANGELOG). Jeera is an idiosyncratic, domestic, supply-driven (monsoon
+    # /sowing/rabi-harvest) market, so ALL single-name linkages are modest
+    # (max daily r ~0.08) — but the equal-weight basket aggregates to r≈+0.087
+    # daily / +0.082 weekly (vs Nifty's +0.076 daily that DECAYS to +0.010 weekly),
+    # i.e. a genuine agri-regime signal, not market beta. Members are the highest-
+    # linkage names within each fundamentally-aligned subsector, chosen for
+    # cross-sectional dispersion (distinct companies, no double-counting).
+    #
+    # KEY FINDING — NO global ag-soft futures (unlike Cotton's ZC/ZS/SB): CT=F,
+    # ZW=F, ZC=F, CC=F etc. are empirically DECOUPLED from jeera (daily r ≈ 0 to
+    # negative; Cotton CT=F 3y r = -0.10). Jeera trades the domestic Indian
+    # complex, not CBOT/ICE. Domestic "soft commodity" exposure is instead
+    # captured via sugar equities (strongest weekly/3y linkage). True sibling
+    # spices (coriander/turmeric/guar) WOULD fit but are NCDEX-only → would need
+    # their own sheets via data/sheets.py (planned enhancement).
+    #
+    # ALSO TESTED & EXCLUDED — international spice/ingredient majors (McCormick,
+    # Olam/ofi, IFF, Symrise, Givaudan, Sensient, Kerry, ADM, Bunge, Nestle,
+    # Unilever): all flat-to-NEGATIVE vs jeera (Olam weekly r = -0.10, McCormick
+    # 3y r = -0.08). Fundamentally correct — these are cumin BUYERS, so a price
+    # spike is a cost/margin headwind (inverse, not co-directional), and they
+    # trade async non-Indian calendars. Co-directional jeera exposure is almost
+    # entirely a domestic-Indian-agri phenomenon.
+    "Jeera": [
+        # agri-inputs / agrochem / fertilizer — jeera's core monsoon & sowing driver
+        "COROMANDEL.NS", "UPL.NS", "ZUARIIND.NS", "RALLIS.NS", "DHANUKA.NS",
+        # sugar — domestic monsoon-levered soft commodity (best weekly/3y linkage)
+        "DALMIASUG.NS", "DHAMPURSUG.NS", "EIDPARRY.NS",
+        # FMCG / packaged foods — spice & staple demand (Tata Sampann packs jeera)
+        "HINDUNILVR.NS", "MARICO.NS", "HERITGFOOD.NS", "TATACONSUM.NS",
+        # spice-direct ethnic foods — closest listed exposure to cumin itself
+        "ADFFOODS.NS",
+        # farm equipment — rural-income / monsoon levered (Cotton's DE/AGCO analog)
+        "ESCORTS.NS", "VSTTILLERS.NS",
+        # staple grain processor + seed cycle (sowing/acreage link)
+        "LTFOODS.NS", "KSCL.NS",
     ],
 }
 
@@ -384,6 +493,7 @@ TARGET_POLARITY = {
     "Cotton": +1,
     "UKOIL": +1,     # oil producers are co-directional with crude
     "USD/INR": +1,   # dollar-strength complex is co-directional with USD/INR
+    "Jeera": +1,     # Indian agri complex is (loosely) co-directional with jeera
 }
 
 # Basket archetype — documentation / UI labeling only (no computational effect):
@@ -397,6 +507,7 @@ TARGET_ARCHETYPE = {
     "Cotton": "hybrid",
     "UKOIL": "producer",
     "USD/INR": "proxy",
+    "Jeera": "hybrid",   # Indian agribusiness/FMCG cross-section (no producers)
 }
 
 # Predictors that quasi-replicate a target and must be excluded from Aarambh
@@ -448,7 +559,7 @@ ALL_TARGETS = {**COMMODITY_TARGETS, **INDEX_TARGETS_MAP}
 
 # Sidebar grouping — ordered category → target names.
 TARGET_CATEGORIES: dict[str, list[str]] = {
-    "Commodities": ["Gold", "Silver", "Copper", "UKOIL", "Cotton"],
+    "Commodities": ["Gold", "Silver", "Copper", "UKOIL", "Cotton", "Jeera"],
     "Currency (FX)": ["USD/INR"],
 }
 for _name, _meta in INDEX_TARGETS.items():

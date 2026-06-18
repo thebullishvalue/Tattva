@@ -322,6 +322,33 @@ def fetch_commodity_dataset(
         return None, "All macro/commodity columns were empty."
 
     df = renamed[keep].copy()
+
+    # Inject exogenous (non-yfinance) target columns — e.g. Jeera (NCDEX cumin)
+    # from a published Google Sheet. Each is reindexed onto the macro (US-
+    # calendar) index and forward-filled so the NCDEX series aligns to the model
+    # matrix; leading dates with no prior price stay NaN and are dropped by the
+    # app's per-target dropna. A fetch failure simply omits the column (the
+    # target then can't be selected) rather than breaking the whole dataset.
+    for _name, _series in _fetch_exogenous_targets(df.index).items():
+        df[_name] = _series
+
     df.insert(0, "DATE", pd.to_datetime(df.index))
     df = df.reset_index(drop=True)
     return df, None
+
+
+def _fetch_exogenous_targets(index: pd.Index) -> dict[str, pd.Series]:
+    """Fetch non-yfinance target series and align them to the macro ``index``.
+
+    Returns a ``{column_name: aligned_series}`` map. Resilient: any source that
+    fails (live + cache + committed snapshot all unavailable) is skipped.
+    """
+    out: dict[str, pd.Series] = {}
+    try:
+        from data.sheets import fetch_jeera_series
+        jeera = fetch_jeera_series(index.min(), index.max())
+        if jeera is not None and not jeera.empty:
+            out["Jeera"] = jeera.reindex(index).ffill()
+    except Exception as e:  # noqa: BLE001
+        log.warning("Exogenous Jeera fetch skipped: %s", e)
+    return out

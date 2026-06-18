@@ -170,4 +170,5 @@ macro_cache = Cache(ttl=3600, version="v1", namespace="macro")
 
 def all_caches() -> list[Cache]:
     """Return all module-level cache instances for diagnostics."""
-    return [ohlcv_cache, macro_cache]
+    from data.sheets import sheets_cache  # local import avoids a cycle
+    return [ohlcv_cache, macro_cache, sheets_cache]

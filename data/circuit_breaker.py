@@ -207,4 +207,5 @@ yfinance_circuit = CircuitBreaker(
 
 def all_circuits() -> list[CircuitBreaker]:
     """Return all module-level circuit breakers for diagnostics."""
-    return [yfinance_circuit]
+    from data.sheets import sheets_circuit  # local import avoids a cycle
+    return [yfinance_circuit, sheets_circuit]

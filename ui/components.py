@@ -349,8 +349,17 @@ def render_nishkarsh_signal_card(
     conviction: float,
     agreement: float,
     explanation: str,
+    val_ic: float | None = None,
+    wf_pos: float | None = None,
+    source: str | None = None,
 ) -> None:
-    """Render the primary Tattva convergence signal card."""
+    """Render the primary Tattva convergence signal card.
+
+    The headline ``conviction`` is the calibrated convergence value in
+    ``[-1, +1]``. ``val_ic`` / ``wf_pos`` drive a trust chip so the direction is
+    always shown alongside its validated edge; ``source`` labels which signal the
+    headline is (calibrated model / consensus / Aarambh-only).
+    """
     if "BUY" in signal:
         signal_class = "undervalued"
     elif "SELL" in signal:
@@ -359,16 +368,43 @@ def render_nishkarsh_signal_card(
         signal_class = "fair"
     agreement_text = "Strong" if agreement > 0.7 else "Moderate" if agreement > 0.5 else "Weak"
 
+    # ── Trust chip: colour + label by validated edge (Val IC) ─────────────
+    if val_ic is None:
+        chip_color, chip_bg, chip_label = "var(--ink-tertiary)", "rgba(148,163,184,0.12)", "UNCALIBRATED"
+    elif val_ic <= 0:
+        chip_color, chip_bg, chip_label = "#FB7185", "rgba(251,113,133,0.12)", "NO EDGE"
+    elif val_ic < 0.02:
+        chip_color, chip_bg, chip_label = "#D4A853", "rgba(212,168,83,0.12)", "MARGINAL"
+    elif val_ic < 0.05:
+        chip_color, chip_bg, chip_label = "#34D399", "rgba(52,211,153,0.12)", "MODEST EDGE"
+    else:
+        chip_color, chip_bg, chip_label = "#34D399", "rgba(52,211,153,0.18)", "SOLID EDGE"
+
+    ic_text = f"Val IC {val_ic:+.3f}" if val_ic is not None else "Val IC —"
+    wf_text = f" &bull; WF {wf_pos:.0%}+" if wf_pos is not None else ""
+    chip = (
+        f'<span style="display:inline-block;padding:2px 9px;border-radius:100px;'
+        f'background:{chip_bg};color:{chip_color};font-family:var(--data);font-size:0.62rem;'
+        f'font-weight:600;letter-spacing:0.06em;">{chip_label} &bull; {ic_text}{wf_text}</span>'
+    )
+    source_line = (
+        f'<div style="font-family:var(--data);font-size:0.6rem;color:var(--ink-tertiary);'
+        f'text-transform:uppercase;letter-spacing:0.08em;margin-bottom:var(--sp-2);">'
+        f'{html_mod.escape(source)}</div>' if source else ""
+    )
+
     st.markdown(
         f"""
         <div class="signal-card {html_mod.escape(signal_class)}">
             <div class="label">TATTVA CONVERGENCE SIGNAL &#40;&#x0924;&#x0924;&#x094D;&#x0924;&#x094D;&#x0935;&#41;</div>
+            {source_line}
             <div class="value">{html_mod.escape(signal)}</div>
             <div class="subtext">
                 Score: <strong style="color:var(--ink-primary)">{conviction:+.2f}</strong> &bull;
                 Agreement: <strong style="color:var(--ink-primary)">{agreement:.0%}</strong> ({html_mod.escape(agreement_text)})
             </div>
-            <div style="margin-top:var(--sp-6);padding-top:var(--sp-5);border-top:1px solid var(--border);font-size:0.8rem;line-height:1.7;color:var(--ink-secondary);font-family:var(--data);">
+            <div style="margin-top:var(--sp-4);">{chip}</div>
+            <div style="margin-top:var(--sp-5);padding-top:var(--sp-5);border-top:1px solid var(--border);font-size:0.8rem;line-height:1.7;color:var(--ink-secondary);font-family:var(--data);">
                 <strong style="color:var(--amber);font-family:var(--display);font-size:0.68rem;letter-spacing:0.1em;text-transform:uppercase;">INTERPRETATION</strong><br>
                 {html_mod.escape(explanation)}
             </div>

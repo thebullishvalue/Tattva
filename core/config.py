@@ -333,7 +333,7 @@ MACRO_SYMBOLS_YF = {
     "Platinum": "PL=F",
     # Commodities - Energy
     "Crude Oil": "CL=F",
-    "UKOIL": "BZ=F",        # Brent crude (front-month) — "UKOIL" per the target naming
+    "Brent Crude": "BZ=F",        # Brent crude (front-month)
     "Natural Gas": "NG=F",
     # Commodities - Agriculture
     "Corn": "ZC=F",
@@ -354,7 +354,7 @@ COMMODITY_TARGETS = {
     "Silver": "SI=F",
     "Copper": "HG=F",
     "Cotton": "CT=F",
-    "UKOIL": "BZ=F",
+    "Brent Crude": "BZ=F",
     "USD/INR": "INR=X",
     # Jeera (NCDEX cumin) is NOT a yfinance symbol — its daily price is pulled
     # from a published Google Sheet (data/sheets.py) and injected as a column in
@@ -426,10 +426,10 @@ COMMODITY_BASKETS = {
         "THB=X", "PHP=X", "TWD=X",              # USD/THB, USD/PHP, USD/TWD
         "CNY=X", "MYR=X",                       # USD/CNY (China anchor), USD/MYR
     ],
-    # UKOIL = Brent crude. Co-directional producer cross-section: integrated
+    # Brent Crude (BZ=F).  Co-directional producer cross-section: integrated
     # majors + E&P + oilfield services. NO energy-sector ETFs (XLE) or oil-price
     # proxies (USO) — those double-count or duplicate the target.
-    "UKOIL": [
+    "Brent Crude": [
         "XOM", "CVX", "COP", "BP", "SHEL", "TTE", "EQNR",   # integrated majors
         "EOG", "OXY", "DVN", "FANG", "HES", "CTRA",         # E&P producers
         "SLB", "HAL", "BKR",                                # oilfield services
@@ -491,7 +491,7 @@ TARGET_POLARITY = {
     "Silver": +1,
     "Copper": +1,
     "Cotton": +1,
-    "UKOIL": +1,     # oil producers are co-directional with crude
+    "Brent Crude": +1,     # oil producers are co-directional with crude
     "USD/INR": +1,   # dollar-strength complex is co-directional with USD/INR
     "Jeera": +1,     # Indian agri complex is (loosely) co-directional with jeera
 }
@@ -505,7 +505,7 @@ TARGET_ARCHETYPE = {
     "Silver": "producer",
     "Copper": "producer",
     "Cotton": "hybrid",
-    "UKOIL": "producer",
+    "Brent Crude": "producer",
     "USD/INR": "proxy",
     "Jeera": "hybrid",   # Indian agribusiness/FMCG cross-section (no producers)
 }
@@ -525,7 +525,7 @@ TARGET_EXCLUDED_PREDICTORS = {
     "USD/INR": ["EUR/INR", "GBP/INR", "JPY/INR"],
     # WTI is ~the same barrel as Brent; the broad commodity indices + energy
     # sector ETF are crude-dominated → all would let crude "explain" itself.
-    "UKOIL": ["Crude Oil", "Broad Commodity Index (DBC)",
+    "Brent Crude": ["Crude Oil", "Broad Commodity Index (DBC)",
               "Commodity Index (GSG)", "US Energy Sector"],
 }
 
@@ -559,7 +559,7 @@ ALL_TARGETS = {**COMMODITY_TARGETS, **INDEX_TARGETS_MAP}
 
 # Sidebar grouping — ordered category → target names.
 TARGET_CATEGORIES: dict[str, list[str]] = {
-    "Commodities": ["Gold", "Silver", "Copper", "UKOIL", "Cotton", "Jeera"],
+    "Commodities": ["Gold", "Silver", "Copper", "Brent Crude", "Cotton", "Jeera"],
     "Currency (FX)": ["USD/INR"],
 }
 for _name, _meta in INDEX_TARGETS.items():

@@ -9,6 +9,60 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Jeera (NCDEX cumin) target** — the first non-yfinance commodity. Its daily
+  price is pulled from a published Google Sheet via a new `data/sheets.py`
+  fetcher (same cache + circuit-breaker + stale + committed-CSV-snapshot
+  resilience contract as the yfinance path), injected into the Aarambh matrix
+  reindexed onto the macro calendar. ~11y of clean daily history.
+- **Data-backed Nirnay basket for Jeera.** Curated from an 11-year daily
+  return-correlation study (`/tmp/jeera_research.py` methodology) over a ~70-name
+  candidate universe (Indian agri/FMCG/agrochem/seed/sugar/farm-equipment
+  equities + global ag-soft futures + macro refs). Findings:
+  - Jeera is idiosyncratic/domestic/supply-driven → all single-name linkages are
+    modest (max daily r ≈ 0.08), but the **equal-weight basket aggregates to
+    r ≈ +0.087 daily / +0.082 weekly** — and unlike Nifty (whose +0.076 daily
+    decays to +0.010 weekly) it **persists at the weekly horizon**, i.e. genuine
+    agri-regime signal rather than market beta. Recent-3y r ≈ +0.111.
+  - **Global ag-soft futures are excluded** (the key divergence from Cotton's
+    basket): CT=F/ZC=F/ZW=F/CC=F are decoupled from jeera (daily r ≈ 0 to
+    negative). Domestic soft-commodity exposure is captured via sugar equities
+    instead. True sibling spices (coriander/turmeric/guar) would fit but are
+    NCDEX-only → future enhancement via the same sheets pipeline.
+  - **International spice/ingredient majors also excluded** (McCormick, Olam/ofi,
+    IFF, Symrise, Kerry, ADM, Bunge, Nestlé, Unilever): flat-to-negative vs jeera
+    (Olam weekly r = −0.10, McCormick 3y r = −0.08). They are cumin *buyers*, so
+    a price spike is a margin headwind (inverse exposure, not co-directional),
+    and they trade async non-Indian calendars.
+  - Final 17 names span agri-inputs/fertilizer, sugar, FMCG-foods, spice-direct,
+    farm equipment, grain processing, and seeds (`COMMODITY_BASKETS["Jeera"]`).
+- **Expanded `GLOBAL_MACRO_MAP` by 37 predictors** (≈98 → 135), all verified with
+  ~11y yfinance history, filling orthogonal gaps in the Aarambh predictor pool:
+  a full **FX complex** (UDN, USDU, FXE/FXY/FXB/FXF/FXA/FXC, CEW), **REITs**
+  (VNQ/VNQI/REET — previously no real-estate asset class), **inflation
+  expectations** (RINF), the **remaining GICS sectors** (XLU/XLP/XLY/XLK/XLV/
+  XLRE/XLC + XHB/IYT/SMH), **equity style factors** (VTV/VUG/MTUM/USMV/SPHB/VYM),
+  **regional equity** (EWJ/EZU/EWY/EWW/EWT/EWU), and real assets (WOOD/IGF). The
+  universe is PCA-reduced inside each walk-forward window, so added inputs broaden
+  factor coverage without destabilising the ensemble. (Cold-fetch verified:
+  model matrix 143 → 180 columns.)
+
+### Changed
+- **USD/INR Nirnay basket refined (data-backed).** An 11y daily+weekly
+  return-correlation study confirmed the **co-directional dollar/USD-Asia design**
+  (polarity +1) and upgraded its members: now 11 names — UUP, **USDU** (added,
+  volume-bearing), **DX-Y.NYB**, the strongest USD/Asia crosses (SGD/KRW/IDR/THB/
+  PHP/TWD), plus **CNY=X** (China/EM-Asia anchor) and MYR=X. Equal-weight tracks
+  USD/INR at daily r ≈ +0.354 / weekly +0.404 with low intra-basket redundancy
+  (0.21), and now carries 2 volume-bearing members (UUP+USDU) for Nirnay's
+  microstructure vs 1 before. An inverse India/EM-equity basket (polarity −1) was
+  tested and **rejected** — daily signal broken by US-calendar async (r ≈ +0.05),
+  redundancy 0.48, and its weekly signal is mostly Nifty beta, not INR.
+
+---
+
 ## [2.1.0] — 2026-06-17 — *Multi-asset universe + robustness*
 
 Minor release. Broadens the target universe well beyond commodities, retunes the

@@ -175,7 +175,10 @@ def find_similar_periods(
 
     latest = feat.iloc[-1]
     current_vec = latest[feature_cols].to_numpy(dtype=np.float64)
-    hist_matrix = historical[feature_cols].to_numpy(dtype=np.float64)
+    # .copy() is load-bearing: on Streamlit Cloud DataFrame.to_numpy() can return a
+    # READ-ONLY view (consolidated/cached buffers), and the median-fill below writes
+    # in place → "assignment destination is read-only" without a writable copy.
+    hist_matrix = historical[feature_cols].to_numpy(dtype=np.float64).copy()
 
     # Clean NaN/Inf → column medians (port of Arthagati's cleaning)
     for col in range(hist_matrix.shape[1]):

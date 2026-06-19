@@ -84,6 +84,48 @@ ENSEMBLE_MODELS = ("ols", "huber")
 OU_PROJECTION_DAYS = 90
 MIN_DATA_POINTS = 1500
 
+# ── Signal horizon (forecast lens) ───────────────────────────────────────────
+# The trader-facing "how far ahead am I reading?" selector. ALL data stays DAILY
+# (yfinance 1d) — we do NOT resample to weekly bars, which would starve the
+# walk-forward / conformal / Optuna machinery (9y ≈ 470 weekly rows < the 500/750
+# train windows and the 1500 MIN_DATA_POINTS floor). Instead we lengthen the
+# FORECAST horizon on daily bars, which keeps every day-denominated constant valid
+# and the full ~2250-row sample intact.
+#
+# TWO lenses only — finalized from a universe-wide computational study (33 targets,
+# honest non-overlapping walk-forward of the analog/precedent engine; see
+# precedent_universe_sweep.py). The analog rank-IC across the universe is:
+#     +5d 0.089 (33/33 +ve) · +10d 0.127 (30/33) · +20d 0.162 (28/33, PEAK)
+#     +40d 0.058 (1/33 sig) · +60d 0.048 (0/33 sig)  ← collapses past 20d
+# Recent-half IC is positive only at 5d (+0.022) and 10d (+0.034); 20d+ has decayed
+# to ~0/negative. So the precedent edge lives in the 5–20d band and is DEAD beyond.
+# We therefore keep a SHORT (Tactical 10d) and a LONG (Positional 20d) lens — 20d
+# being the longest horizon the analog actually supports — and drop 40/60/90d.
+#
+# Each preset maps to:
+#   • horizon  — FWD_HORIZON: the forward log-return the engine forecasts (t→t+h).
+#   • momentum — FWD_MOM_K: trailing predictor-momentum window (~2× horizon).
+#   • hold     — forward-return horizons the Precedent tab AND the Intelligence
+#     Val-IC/walk-forward score over. Trimmed to ONLY the computationally-validated
+#     analog horizons (5/10/20d): Tactical reads 5d+10d (the current-regime-reliable
+#     pair), Positional reads 10d+20d (10d anchor + the 20d full-sample peak).
+#   • ddm_leak / ddm_drift / ddm_lrv — DDM smoothing; leak scales ~(10/horizon) so a
+#     longer lens turns over slower (Tactical 0.10 → Positional 0.05). drift/lrv held
+#     at the convergence defaults (CONV_DDM_DRIFT_SCALE / CONV_DDM_LONG_RUN_VAR).
+# The engine cache key includes (horizon, momentum), so both lenses coexist in one
+# session — position on the long lens, hedge on the short one.
+SIGNAL_HORIZONS = {
+    "Tactical (10d)":    {"horizon": 10, "momentum": 20,
+                          "hold": (5, 10),
+                          "ddm_leak": 0.10, "ddm_drift": 0.12, "ddm_lrv": 50.0,
+                          "blurb": "≈2 weeks · hedging & short-term trades"},
+    "Positional (20d)":  {"horizon": 20, "momentum": 40,
+                          "hold": (10, 20),
+                          "ddm_leak": 0.05, "ddm_drift": 0.12, "ddm_lrv": 50.0,
+                          "blurb": "≈1 month · positioning (analog ceiling)"},
+}
+DEFAULT_SIGNAL_HORIZON = "Tactical (10d)"
+
 # Signal thresholds (conviction score → signal mapping)
 CONVICTION_STRONG = 60
 CONVICTION_MODERATE = 40

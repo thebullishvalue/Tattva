@@ -86,6 +86,7 @@ from ui.tabs.tab_aarambh import render_aarambh_tab
 from ui.tabs.tab_nirnay import render_nirnay_tab
 from ui.tabs.tab_diagnostics import render_diagnostics_tab
 from ui.tabs.tab_data import render_data_tab
+from ui.tabs.tab_precedent import render_precedent_tab
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 from data.fetcher import fetch_constituent_ohlcv, fetch_macro_live, fetch_commodity_dataset
@@ -102,7 +103,7 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -207,7 +208,11 @@ def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
     profile     = st.session_state.get("intelligence_active_profile")  # dict | None
     wf          = st.session_state.get("wf_results")                   # list[dict] | None
     div_events  = st.session_state.get("divergence_events")            # DataFrame | None
-    FWD_HORIZON = 10  # Aarambh forecast horizon (trading days) \u2014 for interpretation copy
+    # Forecast horizon of the active Signal Horizon lens \u2014 for interpretation copy.
+    FWD_HORIZON = SIGNAL_HORIZONS.get(
+        st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
+        SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
+    )["horizon"]
 
     # \u2500\u2500 Headline: calibrated model \u2192 normalized consensus \u2192 Aarambh-only \u2500\u2500
     if calib is not None:
@@ -538,6 +543,33 @@ def main():
                 unsafe_allow_html=True,
             )
 
+        # ── Signal Horizon (forecast lens) ──────────────────────────────────
+        # Pick how far ahead the engine reads. Daily bars throughout — this only
+        # lengthens the forward-return forecast horizon (and matching predictor-
+        # momentum window), so the long lens is for POSITIONING (where to be
+        # long/short) and the short lens for tactical hedging / quick trades. Both
+        # are cached per-config, so switching back and forth is instant after the
+        # first compute and the two reads coexist.
+        _horizon_names = list(SIGNAL_HORIZONS.keys())
+        st.session_state.setdefault("signal_horizon", DEFAULT_SIGNAL_HORIZON)
+        if st.session_state["signal_horizon"] not in _horizon_names:
+            st.session_state["signal_horizon"] = DEFAULT_SIGNAL_HORIZON
+        st.markdown('<div class="sidebar-title" style="margin-top:0.5rem;">Signal Horizon</div>', unsafe_allow_html=True)
+        _sel_horizon = st.selectbox(
+            "Signal Horizon", _horizon_names,
+            label_visibility="collapsed", key="signal_horizon",
+            help="How far ahead Aarambh forecasts. Daily data throughout — the long "
+                 "lens reads positioning (buy/sell interest), the short lens reads "
+                 "tactical hedging / short-term trades. Switching re-runs the engine "
+                 "(cached per lens, so flipping back is instant).",
+        )
+        st.markdown(
+            f'<div style="font-family:var(--data);font-size:0.58rem;'
+            f'color:var(--ink-tertiary);text-transform:uppercase;letter-spacing:0.08em;'
+            f'margin:-0.2rem 0 0.3rem 0;">{SIGNAL_HORIZONS[_sel_horizon]["blurb"]}</div>',
+            unsafe_allow_html=True,
+        )
+
         df = None
         has_data = "data" in st.session_state and "run_analysis" in st.session_state
 
@@ -685,9 +717,11 @@ def main():
 
         # ── Model Passport (Sanket-style) ──────────────────────────────
         # Surfaces the active calibrated profile (Intelligence Mode). Each
-        # commodity target keys its own per-universe profile.
+        # (target, forecast lens) pair keys its own profile — the lens tag must
+        # match the one used at calibration time (see _intel_index below).
         _current_universe = st.session_state.get("active_target") or st.session_state.get("selected_commodity", "Gold")
-        _current_index = st.session_state.get("nishkarsh_index", _current_universe)
+        _current_index = (f"{st.session_state.get('nishkarsh_index', _current_universe)}"
+                          f" · {st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}")
         _render_model_passport_sidebar(_current_universe, _current_index)
 
         st.markdown('<hr style="margin: 1rem 0 0.75rem 0; opacity: 0.05;">', unsafe_allow_html=True)
@@ -756,8 +790,15 @@ def main():
     # The engine runs in forward_signal mode: conviction is driven by the
     # prediction (expected forward return), and R²/R²-vs-RW measure real
     # out-of-sample forecast skill.
-    FWD_HORIZON = 10   # forecast horizon (trading days)
-    FWD_MOM_K = 20     # trailing momentum window for predictors
+    # Forecast lens chosen in the sidebar (Signal Horizon). Daily bars throughout;
+    # this only sets how far ahead we forecast and the matching predictor-momentum
+    # window. Default preset reproduces the historical 10d/20d behaviour exactly.
+    _horizon_cfg = SIGNAL_HORIZONS.get(
+        st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
+        SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
+    )
+    FWD_HORIZON = _horizon_cfg["horizon"]   # forecast horizon (trading days)
+    FWD_MOM_K = _horizon_cfg["momentum"]    # trailing momentum window for predictors
     _lvl = data[[active_target] + active_features].astype(float)
     _ret = np.log(_lvl.where(_lvl > 0)).diff().replace([np.inf, -np.inf], np.nan)
     _mom = _ret[active_features].rolling(FWD_MOM_K, min_periods=FWD_MOM_K).sum()
@@ -874,7 +915,7 @@ def main():
             progress_bar(progress_container, 40, "Aarambh Engine Reused", "Cached walk-forward fit")
         else:
             engine = FairValueEngine()
-            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
+            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, purge=FWD_HORIZON, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
             # Carry the raw price LEVEL on the engine output (returns-space
             # modeling otherwise leaves only return-scale columns). Used by the
             # Aarambh tab for price display and by the Intelligence tuner.
@@ -978,7 +1019,11 @@ def main():
         # factory defaults — no calibration runs.
         from convergence import intelligence as _intel_mod
         _intel_universe = active_target
-        _intel_index = st.session_state.get("nishkarsh_index", _intel_universe)
+        # Fold the active forecast lens into the profile key so each Signal Horizon
+        # keeps its OWN calibrated weights on disk — a Tactical and a Positional
+        # profile for the same target must not clobber each other.
+        _intel_index = (f"{st.session_state.get('nishkarsh_index', _intel_universe)}"
+                        f" · {st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}")
         _intel_enabled = bool(st.session_state.get("intelligence_mode", True))
         if _intel_enabled:
             _prior_w, _prior_t, _prior_profile = _intel_mod.resolve_active(_intel_universe, _intel_index)
@@ -1082,7 +1127,13 @@ def main():
             "DDM Filter · Prior Weights" if (_intel_enabled and _prior_profile is not None) else "DDM Filter · Default Weights",
         )
         convergence_df = validator.get_convergence_series()
-        conviction_model = UnifiedConvictionModel()
+        # DDM smoothing tuned to the active lens — longer horizons turn over
+        # slower, so they get longer DDM memory (lower leak_rate).
+        conviction_model = UnifiedConvictionModel(
+            leak_rate=_horizon_cfg["ddm_leak"],
+            drift_scale=_horizon_cfg["ddm_drift"],
+            long_run_var=_horizon_cfg["ddm_lrv"],
+        )
         results = conviction_model.fit(
             convergence_df["convergence_score"].tolist(),
             convergence_df.index.tolist(),
@@ -1114,6 +1165,7 @@ def main():
                     convergence_df, aarambh_ts,
                     universe=_intel_universe, selected_index=_intel_index,
                     target_col="Price",
+                    horizons=tuple(_horizon_cfg["hold"]),  # validate at the traded lens
                 )
                 console.item("TPE Trials", _n_trials)
                 console.item("Objective", f"{tuner.n_cv_folds}-fold CV (purged) · L2 {tuner.l2_alpha}")
@@ -1176,7 +1228,12 @@ def main():
                 "Post-Calibration DDM Pass",
             )
             # Re-fit the conviction model with the new convergence_score
-            conviction_model = UnifiedConvictionModel()
+            # (same lens-tuned DDM as the initial pass).
+            conviction_model = UnifiedConvictionModel(
+                leak_rate=_horizon_cfg["ddm_leak"],
+                drift_scale=_horizon_cfg["ddm_drift"],
+                long_run_var=_horizon_cfg["ddm_lrv"],
+            )
             results = conviction_model.fit(
                 convergence_df["convergence_score"].tolist(),
                 convergence_df.index.tolist(),
@@ -1232,10 +1289,11 @@ def main():
         console.section("Walk-Forward Validation")
         progress_bar(progress_container, 93, "Walk-Forward Validation", "Rolling OOS IC · Re-Calibration")
         try:
+            _hold_grid = tuple(_horizon_cfg["hold"])  # IC durability at the traded lens
             _wf_frame = _intel_mod._build_calibration_frame(
-                convergence_df, aarambh_ts, target_col="Price", horizons=_intel_mod.HOLD_HORIZONS,
+                convergence_df, aarambh_ts, target_col="Price", horizons=_hold_grid,
             )
-            _wf_results = _intel_mod.walk_forward_ic(_wf_frame, horizons=_intel_mod.HOLD_HORIZONS)
+            _wf_results = _intel_mod.walk_forward_ic(_wf_frame, horizons=_hold_grid)
             st.session_state["wf_results"] = _wf_results
             _wf_ics = [r["ic"] for r in _wf_results if r["ic"] == r["ic"]]  # drop NaN
             if _wf_ics:
@@ -1447,8 +1505,8 @@ def main():
     # Get current active tab from URL hash or default to 0
     active_tab_idx = 0  # Streamlit doesn't expose active tab index directly, so we render on demand
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "CONVERGENCE", "AARAMBH", "NIRNAY", "DIAGNOSTICS", "DATA",
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "CONVERGENCE", "AARAMBH", "NIRNAY", "PRECEDENT", "DIAGNOSTICS", "DATA",
     ])
 
     # Error boundary wrapper
@@ -1469,6 +1527,13 @@ def main():
                 unsafe_allow_html=True,
             )
 
+    # Active Signal-Horizon lens → the Precedent analog horizons/momentum window
+    # follow the same lens chosen in the sidebar (full-history `ts`, not filtered).
+    _lens = SIGNAL_HORIZONS.get(
+        st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
+        SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
+    )
+
     with tab1:
         st.session_state.rendered_tabs.add(0)
         _safe_render("Convergence", lambda: render_convergence_tab(ts_filtered))
@@ -1480,9 +1545,13 @@ def main():
         _safe_render("Nirnay", lambda: render_nirnay_tab(selected_tf=selected_tf))
     with tab4:
         st.session_state.rendered_tabs.add(3)
-        _safe_render("Diagnostics", lambda: render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats))
+        _safe_render("Precedent", lambda: render_precedent_tab(
+            ts, active_target, tuple(_lens["hold"]), _lens["momentum"], _lens["horizon"]))
     with tab5:
         st.session_state.rendered_tabs.add(4)
+        _safe_render("Diagnostics", lambda: render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats))
+    with tab6:
+        st.session_state.rendered_tabs.add(5)
         _safe_render("Data", lambda: render_data_tab(ts_filtered, ts, active_target))
 
     _render_footer()

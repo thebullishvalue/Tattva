@@ -167,7 +167,7 @@ def render_precedent_tab(
                 render_metric_card(
                     label=f"+{h}D Median Return" + ("  · honorary" if _hon else ""),
                     value=f"{s['median']:+.1f}%",
-                    subtext=("reference only — analog has no edge at 1d (study)" if _hon
+                    subtext=("reference only — no edge at 1d" if _hon
                              else f"{s['positive_pct']:.0f}% positive ({s['n']} analogs)"),
                     color_class="neutral" if _hon else ("success" if s["median"] > 0 else "danger"),
                     icon="help-circle" if _hon else ("trending-up" if s["median"] > 0 else "trending-down"),

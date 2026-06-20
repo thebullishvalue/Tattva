@@ -26,9 +26,16 @@ import pandas as pd
 from analytics.hurst import hurst_dfa
 
 # ── Blend weights (ported verbatim from Arthagati) ───────────────────────────
-ANALOG_W_MAHA = 0.55   # Mahalanobis distance weight (covariance-aware state match)
-ANALOG_W_TRAJ = 0.35   # trajectory cosine-similarity weight (path-shape match)
-ANALOG_W_RECV = 0.10   # exponential recency-decay weight (prefer recent analogs)
+# Blend re-tuned for Tattva (2026-06-20, analog_tuning_study.py + analog_confirm.py:
+# 13 targets, non-overlapping OOS IC full + recent-half). The ported Arthagati blend
+# (.55/.35/.10) was actively HURTING: trajectory adds ~nothing and recency degrades
+# the recent regime. PURE Mahalanobis state-matching is the clear winner — it
+# recovers the decayed recent edge (10d recent IC −0.010 → +0.079; 20d −0.083 →
+# +0.095) while holding full-sample IC. So trajectory + recency are dropped (weight
+# 0 → their computation is skipped entirely, also a live speedup).
+ANALOG_W_MAHA = 1.0    # Mahalanobis distance weight (covariance-aware state match)
+ANALOG_W_TRAJ = 0.0    # trajectory cosine-similarity — DROPPED (no lift, hurt recent)
+ANALOG_W_RECV = 0.0    # exponential recency-decay — DROPPED (degraded recent regime)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -108,11 +115,14 @@ def _rolling_hurst(price: np.ndarray, window: int = 120, step: int = 5) -> np.nd
 def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFrame, list[str]]:
     """Assemble the per-day analog state matrix from Tattva's engine.ts_data.
 
-    Features (each guarded by availability, like Arthagati):
+    Feature set re-tuned for Tattva (analog_tuning_study.py): AvgZ was DROPPED —
+    it degraded the recent regime (10d recent IC −0.010 → +0.034 without it) while
+    NetBreadth proved critical and the candidate extras (ModelSpread, ExtremeBreadth,
+    SignalBreadth, ConvictionRaw, MomentumLong) added nothing. Kept (availability-
+    guarded):
       • Momentum     — trailing ``mom_window``-day log-return of the target Price
       • Realized Vol — rolling σ of daily log-returns over ``mom_window``
-      • AvgZ         — conformal multi-lookback z-state (extension), if present
-      • NetBreadth   — OversoldBreadth − OverboughtBreadth, if present
+      • NetBreadth   — OversoldBreadth − OverboughtBreadth, if present (key feature)
       • Hurst        — rolling DFA Hurst of the target Price
 
     Returns ``(frame, feature_cols)`` where ``frame`` carries the feature columns
@@ -129,14 +139,12 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
     feat["Momentum"] = log_ret.rolling(mom_window, min_periods=mom_window).sum()
     feat["RealizedVol"] = log_ret.rolling(mom_window, min_periods=mom_window).std()
 
-    if "AvgZ" in df.columns:
-        feat["AvgZ"] = pd.to_numeric(df["AvgZ"], errors="coerce")
     if {"OversoldBreadth", "OverboughtBreadth"}.issubset(df.columns):
         feat["NetBreadth"] = (pd.to_numeric(df["OversoldBreadth"], errors="coerce")
                               - pd.to_numeric(df["OverboughtBreadth"], errors="coerce"))
     feat["Hurst"] = _rolling_hurst(price, window=max(60, mom_window * 3))
 
-    feature_cols = [c for c in ("Momentum", "RealizedVol", "AvgZ", "NetBreadth", "Hurst")
+    feature_cols = [c for c in ("Momentum", "RealizedVol", "NetBreadth", "Hurst")
                     if c in feat.columns]
     feat["Price"] = price
     feat["Date"] = df["Date"].to_numpy() if "Date" in df.columns else df.index.to_numpy()
@@ -188,7 +196,7 @@ def find_similar_periods(
         hist_matrix[~valid, col] = median_val
     current_vec = np.where(np.isfinite(current_vec), current_vec, 0.0)
 
-    # ── Part 1: Mahalanobis (55%) ───────────────────────────────────────────
+    # ── Part 1: Mahalanobis (the signal — covariance-aware state match) ─────
     cov_matrix = np.cov(hist_matrix, rowvar=False)
     if cov_matrix.ndim < 2:
         cov_matrix = np.array([[max(float(cov_matrix), 1e-6)]])
@@ -196,11 +204,11 @@ def find_similar_periods(
     max_dist = maha_dist.max() if maha_dist.max() > 0 else 1.0
     maha_sim = 1.0 - (maha_dist / max_dist)
 
-    # ── Part 2: Trajectory cosine similarity (35%) ──────────────────────────
+    # ── Part 2: Trajectory cosine similarity (DROPPED → skipped when weight 0) ─
     traj_window = mom_window
     traj_sim = np.zeros(len(historical))
     price_all = feat["Price"].to_numpy(dtype=np.float64)
-    if n > traj_window:
+    if ANALOG_W_TRAJ > 0 and n > traj_window:
         _x = np.arange(traj_window, dtype=np.float64)
         _xm = _x - _x.mean()
         _xvar = np.sum(_xm ** 2)
@@ -219,14 +227,16 @@ def find_similar_periods(
                 ht = _ls_detrend(price_all[pos - traj_window:pos])
                 traj_sim[j] = (cosine_similarity(ct, ht) + 1) / 2
 
-    # ── Part 3: Exponential recency decay (10%) ─────────────────────────────
-    dates = historical["Date"]
-    if np.issubdtype(np.asarray(dates).dtype, np.datetime64):
-        days_since = (pd.Timestamp(latest["Date"]) - pd.to_datetime(dates)).dt.days.to_numpy(dtype=float)
-    else:
-        days_since = (float(latest["Date"]) - np.asarray(dates, dtype=float))
-    recency = np.exp(-np.log(2) * np.clip(days_since, 0, None) / 365.0) * recency_weight
-    recency_norm = recency / max(recency.max(), 1e-6)
+    # ── Part 3: Exponential recency decay (DROPPED → skipped when weight 0) ──
+    recency_norm = np.zeros(len(historical))
+    if ANALOG_W_RECV > 0:
+        dates = historical["Date"]
+        if np.issubdtype(np.asarray(dates).dtype, np.datetime64):
+            days_since = (pd.Timestamp(latest["Date"]) - pd.to_datetime(dates)).dt.days.to_numpy(dtype=float)
+        else:
+            days_since = (float(latest["Date"]) - np.asarray(dates, dtype=float))
+        recency = np.exp(-np.log(2) * np.clip(days_since, 0, None) / 365.0) * recency_weight
+        recency_norm = recency / max(recency.max(), 1e-6)
 
     # ── Combined ────────────────────────────────────────────────────────────
     combined = ANALOG_W_MAHA * maha_sim + ANALOG_W_TRAJ * traj_sim + ANALOG_W_RECV * recency_norm

@@ -1,6 +1,6 @@
 # TATTVA — तत्त्व
 
-**Unified Convergence Engine** · v2.1.0 · *@thebullishvalue*
+**Unified Convergence Engine** · v2.2.0 · *@thebullishvalue*
 
 > *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality": the underlying
 > truth distilled from the convergence of evidence.
@@ -24,10 +24,11 @@ terminal:
 
 | Engine | Question it answers | How |
 |---|---|---|
-| **AARAMBH** | *Is the macro setup pointing up or down?* | Walk-forward ensemble (configurable via `ENSEMBLE_MODELS`; default **PCA-OLS + Huber**) **forecasting the forward 10-day return** from trailing macro momentum. |
+| **AARAMBH** | *Is the macro setup pointing up or down?* | Walk-forward ensemble (configurable via `ENSEMBLE_MODELS`; default **PCA-OLS + Huber**) **forecasting the forward return at the selected Signal Horizon** (Tactical 10d / Positional 20d) from trailing macro momentum. The walk-forward purges label overlap, so the out-of-sample IC is leakage-free. |
 | **NIRNAY** | *What is the related complex doing bottom-up?* | Per-instrument MSF + MMR oscillators with HMM/GARCH/CUSUM regime detection across the target's basket (related miners/streamers for a commodity, or the index's own constituents), aggregated into breadth. |
 | **CONVERGENCE** | *Do the two agree, and how strongly?* | Adaptive-weighted, **directional** composite across Direction / Breadth / Magnitude / Regime, smoothed with a Drift-Diffusion filter. |
-| **INTELLIGENCE** | *Does the signal actually have edge?* | Optuna TPE calibration of the convergence weights/thresholds with a **purged k-fold CV objective** + held-out tail, plus an automatic **walk-forward IC** durability check. |
+| **INTELLIGENCE** | *Does the signal actually have edge?* | Optuna TPE calibration of the convergence weights/thresholds with a **purged k-fold CV objective** + held-out tail, plus an automatic **walk-forward IC** durability check (per `(target, lens)`). |
+| **PRECEDENT** | *When the state looked like today, what happened next?* | Covariance-aware **Mahalanobis** analog matching (Ledoit-Wolf) + trajectory + recency over Tattva's own state features → an empirical, non-parametric forward-return base rate at the lens horizons, independent of the model. |
 
 The headline output is a normalized convergence signal in `[-1, +1]`
 (STRONG BUY → HOLD → STRONG SELL) with an honest out-of-sample **Val IC** and a
@@ -45,10 +46,12 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Then in the sidebar: pick a **Target** (a commodity, USD/INR, or an equity index)
-and click **Run Analysis**. First run fetches ~9 years of history (cached afterwards)
-and runs the full pipeline; subsequent runs are fast. Switching target re-runs the
-engines on the already-fetched macro universe (only the Nirnay basket re-pulls).
+Then in the sidebar: pick a **Target** (a commodity, USD/INR, or an equity index),
+a **Signal Horizon** (Tactical 10d or Positional 20d), and click **Run Analysis**.
+First run fetches ~9 years of history (cached afterwards) and runs the full pipeline;
+subsequent runs are fast. Switching target re-runs the engines on the already-fetched
+macro universe (only the Nirnay basket re-pulls); switching lens recomputes and caches
+that lens separately, so both reads coexist.
 
 No configuration is required — there are no secrets or environment variables to set.
 
@@ -57,11 +60,18 @@ No configuration is required — there are no secrets or environment variables t
 ## How the model works
 
 **Predictive, returns-based.** Aarambh does **not** regress price levels (which is a
-spurious regression). It forecasts the **forward 10-day log-return** of the target
-from **trailing 20-day momentum** of ~112 macro/FX/commodity series — a genuine
-ex-ante setup. The forecast drives a directional conviction; out-of-sample skill is
-measured by rank **IC**, not R² (a price forecast's magnitude R² is ~0 by nature; the
-tradeable information is in the direction).
+spurious regression). It forecasts the **forward log-return** of the target — over the
+selected **Signal Horizon** — from **trailing momentum** of ~135 macro/FX/commodity
+series, a genuine ex-ante setup. The forecast drives a directional conviction;
+out-of-sample skill is measured by rank **IC**, not R² (a price forecast's magnitude
+R² is ~0 by nature; the tradeable information is in the direction).
+
+**Two horizons, chosen by computation.** The sidebar offers **Tactical (10d)** and
+**Positional (20d)** lenses (daily bars throughout — no weekly resampling). The two
+`d` values, and which horizons the Precedent base rate is shown at, were finalized
+from a 33-target walk-forward study: analog edge peaks at +20d across the universe and
+collapses beyond it (zero of 33 targets significant at +60d). Each lens carries its
+own momentum window, lens-scaled DDM smoothing, and its own calibrated profile.
 
 **Causal PCA, no repainting.** The ~112 collinear macro inputs are reduced to ~20
 orthogonal components **inside each walk-forward training window** — fit only on past
@@ -69,11 +79,16 @@ data, so a component's value at time *t* never depends on the future. Adding new
 never rewrites history. This stabilises the ensemble (low model spread) while keeping
 every input "on."
 
-**Honest validation.** The intelligence calibration optimises a **purged k-fold
-cross-validation** objective (robust across time, not one slice) and reports a Val IC
-on a genuinely held-out, purged tail. An expanding-window **walk-forward IC** runs
-every analysis and is charted in Diagnostics — consistently positive bars = durable
-edge; a couple of spikes = a lucky regime.
+**Honest validation, leakage-free.** The intelligence calibration optimises a
+**purged k-fold cross-validation** objective (robust across time, not one slice) and
+reports a Val IC on a genuinely held-out, purged tail. The Aarambh walk-forward
+itself also **purges label overlap** — each forward-return label spans `(t, t+h]`, so
+training rows within `h` of the prediction point are dropped to stop the forecast
+window leaking into training (this materially lowered, and corrected, the long-horizon
+IC). An expanding-window **walk-forward IC** runs every analysis and is charted in
+Diagnostics — consistently positive bars = durable edge; a couple of spikes = a lucky
+regime. The **Precedent** tab is a separate, non-parametric base rate read alongside
+the model, not part of the calibrated convergence signal.
 
 ---
 
@@ -104,13 +119,13 @@ working through transient yfinance outages.
 | Macro predictor universe | `GLOBAL_MACRO_MAP` + `MACRO_SYMBOLS_YF` |
 | Ensemble members | `ENSEMBLE_MODELS` in `core/config.py` (default `("ols", "huber")`) |
 | Constituent cap | `_DEFAULT_CAP` in `data/universe.py` (`0` = no cap, full index) |
-| Forecast horizon / momentum window | `FWD_HORIZON`, `FWD_MOM_K` in `app.py` |
+| Signal Horizon lenses (horizon · momentum · hold · DDM) | `SIGNAL_HORIZONS` in `core/config.py` (Tactical 10d / Positional 20d) |
 | PCA components | `n_pca_components` in the `engine.fit(...)` call (`app.py`) |
 | Walk-forward / train sizes | `core/config.py` (`MIN_TRAIN_SIZE`, `MAX_TRAIN_SIZE`, `MIN_DATA_POINTS`) |
 
 In-app: the sidebar **Model Configuration** lets you deselect predictors (the full
-universe is on by default). Calibrated profiles persist to
-`~/.cache/tattva/intelligence/profiles.json` (one per target).
+universe is on by default) and pick the **Signal Horizon**. Calibrated profiles persist
+to `~/.cache/tattva/intelligence/profiles.json` (one per `(target, lens)`).
 
 ---
 
@@ -118,15 +133,19 @@ universe is on by default). Calibrated profiles persist to
 
 ```
 app.py                  Streamlit entrypoint + 5-phase orchestration
-core/                   config (macro universe, baskets, thresholds), logging
+core/                   config (macro universe, baskets, thresholds, Signal
+                        Horizons), logging
 data/                   yfinance fetchers, index catalogue + constituent
                         resolution (universe), two-tier cache, circuit breakers
-engines/                aarambh (forecast), nirnay (regime breadth)
-analytics/              OU, Hurst/DFA, conformal, HMM/GARCH/CUSUM, breaks
+engines/                aarambh (forecast, purged walk-forward), nirnay (breadth)
+analytics/              OU, Hurst/DFA, conformal, HMM/GARCH/CUSUM, breaks,
+                        analogs (Mahalanobis precedent matcher)
 convergence/            cross-validator, conviction (DDM), divergence,
                         normalization, intelligence (calibration + walk-forward)
 ui/                     theme, components, tabs (Convergence/Aarambh/Nirnay/
-                        Diagnostics/Data)
+                        Precedent/Diagnostics/Data)
+precedent_study.py …    research harnesses: model-vs-analog, universe analog
+                        sweep, purged model-vs-analog (non-overlapping IC)
 ```
 
 ---
@@ -136,11 +155,16 @@ ui/                     theme, components, tabs (Convergence/Aarambh/Nirnay/
 - **Hero card** — normalized convergence signal and the Aarambh / Nirnay contributions.
 - **Aarambh tab** — price + expected-forward-return forecast; model quality shows
   **Val IC** and the train→val gap (overfit detector).
+- **Precedent tab** — the most statistically-similar historical states (Mahalanobis)
+  and what the target did next, at the lens horizons; an empirical base rate to read
+  *alongside* Aarambh (agreement strengthens conviction, disagreement is a divergence).
 - **Diagnostics → Intelligence Center** — calibration state and the **walk-forward
   IC** chart (the durability verdict).
 
 Rule of thumb: trust the **Val IC** and the **walk-forward consistency**, not any
-single conviction reading.
+single conviction reading. Across the universe the (leakage-free) directional edge is
+modest and concentrated at **10–20d** — the precedent base rate is strongest as a
+~10d confirmer, and is best treated as fading in the recent regime.
 
 ---
 

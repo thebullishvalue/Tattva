@@ -103,7 +103,7 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -260,6 +260,28 @@ def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
         lead = (f"{source} reads **{direction}** ({sig}, {conv:+.2f}) over the next "
                 f"~{FWD_HORIZON} trading days.")
     parts = [lead, trust]
+
+    # \u2500\u2500 Precedent base rate \u2014 co-equal second opinion (the stronger directional
+    # read per hero_study.py). Agreement raises confidence; disagreement is flagged.
+    prec = st.session_state.get("precedent_summary")
+    if prec and prec.get("n"):
+        hero_sign = 1 if direction == "bullish" else -1 if direction == "bearish" else 0
+        p_dir, p_med, p_pos, p_h = prec["dir"], prec["median"], prec["positive_pct"], prec["horizon"]
+        p_word = "bullish" if p_dir > 0 else "bearish" if p_dir < 0 else "flat"
+        stub = f"similar past states returned {p_med:+.1f}% ({p_pos:.0f}% positive) at +{p_h}d"
+        # Reliability gate: when the analogs themselves are split (~coin-flip), don't
+        # claim agreement/divergence \u2014 say it's low-conviction.
+        if abs(p_pos - 50) < 15:
+            parts.append(f"Precedent is **split** ({stub}) \u2014 low conviction either way.")
+        elif hero_sign == 0:
+            parts.append(f"Precedent base rate leans **{p_word}** \u2014 {stub}.")
+        elif p_dir == hero_sign:
+            parts.append(f"Precedent **agrees** \u2014 {stub}, confirming the {direction} read.")
+        else:
+            parts.append(f"\u26a0 Precedent **diverges** ({p_word}) \u2014 {stub}; the analog base rate "
+                         f"(historically the stronger directional read) disagrees, so treat the "
+                         f"{direction} signal with caution.")
+
     if a_norm is not None and n_norm is not None:
         aligned = (a_norm < 0) == (n_norm < 0)
         parts.append(
@@ -966,8 +988,10 @@ def main():
                     has_macro = len([c for c in macro_cols_list if c in merged.columns])
 
                     result_df, _ = run_full_analysis(
-                        merged, length=20, roc_len=14,
-                        regime_sensitivity=1.5, base_weight=0.6,
+                        merged, length=NIRNAY_MSF_LENGTH, roc_len=NIRNAY_ROC_LEN,
+                        regime_sensitivity=NIRNAY_REGIME_SENSITIVITY, base_weight=NIRNAY_BASE_WEIGHT,
+                        num_vars=NIRNAY_MMR_NUM_VARS,
+                        oversold=NIRNAY_OVERSOLD, overbought=NIRNAY_OVERBOUGHT,
                         macro_columns=macro_cols_list,
                     )
                     nirnay_constituent_dfs[sym] = result_df
@@ -1406,6 +1430,38 @@ def main():
 
     nishkarsh_norm = st.session_state.get("nishkarsh_conv_normalized")
     agreement = st.session_state.get("last_agreement", 0)
+
+    # ─── Precedent base rate for the hero (co-equal second opinion) ────────
+    # A 33-target non-overlapping study (hero_study.py) found the analog precedent
+    # is the STRONGER directional read (IC +0.226 vs the convergence's +0.158) and
+    # adds genuine, independent value — while the plot markers add nothing (they ARE
+    # the convergence's own inputs). So the hero reads the precedent alongside its
+    # signal: agreement raises confidence, disagreement is flagged as a divergence.
+    _pkey = f"{active_target}|{st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}|{len(ts)}"
+    if st.session_state.get("_prec_key") != _pkey:   # recompute only when inputs change
+        _prec_summary = None
+        try:
+            from analytics.analogs import find_similar_periods as _fsp, summarize_forward as _sf
+            _hlens = SIGNAL_HORIZONS.get(
+                st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
+                SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
+            )
+            _hold = tuple(_hlens["hold"])
+            _analogs = _fsp(ts, active_target, hold_horizons=_hold, mom_window=_hlens["momentum"])
+            _ps = _sf(_analogs, _hold) if _analogs else {}
+            _hp = max(_hold)                         # lens primary horizon
+            _row = _ps.get(int(_hp))
+            if _row:
+                _med = _row["median"]
+                _prec_summary = {
+                    "horizon": int(_hp), "median": float(_med),
+                    "positive_pct": float(_row["positive_pct"]), "n": int(_row["n"]),
+                    "dir": 1 if _med > 0 else -1 if _med < 0 else 0,
+                }
+        except Exception:
+            _prec_summary = None
+        st.session_state["precedent_summary"] = _prec_summary
+        st.session_state["_prec_key"] = _pkey
 
     # ─── Primary Signal (Above Tabs, Always Visible) ───────────────────────
     _render_primary_signal(nishkarsh_norm, agreement, signal)

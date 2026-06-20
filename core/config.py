@@ -9,7 +9,7 @@ CORE — Merged from both Aarambh (correl.py) and Nirnay (nirnay_core.py) monoli
 
 # Single source of truth for the app version — ui/theme.py imports these (do not
 # redefine elsewhere; past drift between config and theme is why this is centralized).
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 PRODUCT_NAME = "Tattva"
 COMPANY = "@thebullishvalue"
 
@@ -17,28 +17,34 @@ COMPANY = "@thebullishvalue"
 
 LOOKBACK_WINDOWS = (5, 10, 20, 50, 100)
 # ── Walk-forward windowing ───────────────────────────────────────────────────
-# Chosen by backtest on the real macro universe, all 5 targets, scored by rank IC
-# of the forecast vs realized forward return (holdout = fixed last 504 pts so the
-# comparison is apples-to-apples; full-OOS shown too). The OLD (1500/2000/10) was
-# the WEAKEST point tested.
-#   • MIN_TRAIN_SIZE — where OOS forecasting begins. Late-forecast skill is
-#     independent of it (the window is MAX-capped regardless), so a large value
-#     only wastes history: MIN=1500 left just 776 OOS rows — starving the
-#     Intelligence calibration + walk-forward IC — for NO recent-skill gain.
-#     MIN=500 yields ~1786 OOS rows and the best full-OOS IC; first fit stays
-#     well-conditioned (»20 PCA components).
-#   • MAX_TRAIN_SIZE — training-window cap. 750 matched/beat 2000 on IC across
-#     targets (regimes shift → a ~3y window is more adaptive) and is cheaper per
-#     fit. Large windows buy nothing with ~9y of data.
-#   • REFIT_INTERVAL — refit cadence; the dominant skill lever (forecast horizon
-#     is 10d, so a stale model decays as its 20d-momentum signal turns over).
-#     Measured avg holdout IC (ridge+ols): 10→0.072, 7→0.147, 5→0.194, 3→0.259,
-#     monotone & consistent across all 5 targets. Cost ∝ 1/REFIT (more chunks).
-#     5 = chosen sweet spot (~2.7× current IC at ~2× walk-forward cost); raise to
-#     7/10 to favour speed, drop to 3 for max skill (~2× the cost of 5).
-MIN_TRAIN_SIZE = 500
+# RE-TUNED post-purge (2026-06-19). The walk-forward now PURGES forward-label
+# overlap (FairValueEngine.fit(purge=h) drops training rows within h of the forecast
+# point — their labels span (t, t+h] and otherwise leak into the forecast window).
+# That removed a large future-leak the OLD study was unknowingly scored on, so the
+# defaults were re-chosen honestly: 33 targets, BOTH lenses (10d & 20d), metric =
+# NON-OVERLAPPING OOS rank IC of forecast vs realized return. Repro:
+# aarambh_tuning_study.py (+ confirm_max_sweep.py for the MAX×MIN interaction).
+# Reality check: post-purge directional IC is modest everywhere (combined ≈ 0;
+# ~+0.02–0.04 at 10d, ~0/negative at 20d, US equities negative) — no setting unlocks
+# a strong edge, so the analog/Precedent base rate carries more directional signal
+# than the model at these horizons. These are the honest optima, not big wins.
+#   • MIN_TRAIN_SIZE = 750 — the ONE real gain. Starting OOS later (better-
+#     conditioned models) lifted combined IC −0.004 → +0.019 vs MIN=500 (both
+#     horizons up; India-Eq +0.007 → +0.033), monotone over 300→500→750. Still
+#     leaves ~1500 OOS rows, so Intelligence calibration is not starved. (The old
+#     "MIN=500 is best" was a leakage artifact.)
+#   • MAX_TRAIN_SIZE = 750 — confirmed at MIN=750: 750/1000/1500 tie (~+0.020,
+#     within noise), so a ~3y window wins on cost + adaptivity. The one hard rule —
+#     never cap BELOW MIN: MAX=500 at MIN=750 collapses to −0.035 (throws away the
+#     well-conditioned window). MAX (750) ≥ MIN (750) satisfies it.
+#   • REFIT_INTERVAL = 10 — the OLD "more refit = monotonically more skill"
+#     (10→0.072 … 3→0.259) was PURE LEAKAGE (a fresher training tail overlapped the
+#     forecast window more). Post-purge it VANISHES: 5 and 10 tie best (combined
+#     −0.004), 3 and 7 are worse. So 10 is chosen — identical skill at ~2× LESS
+#     walk-forward cost (notably cheaper on Streamlit Cloud). Cost ∝ 1/REFIT.
+MIN_TRAIN_SIZE = 750
 MAX_TRAIN_SIZE = 750
-REFIT_INTERVAL = 5
+REFIT_INTERVAL = 10
 RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0)
 HUBER_EPSILON = 1.35
 HUBER_MAX_ITER = 500
@@ -80,6 +86,14 @@ HUBER_MAX_ITER = 500
 #     ridge+ols           0.192 | 0.088   ← prior default, ranked last
 # Spread is within ~1 SE (≈0.035), so the win is consistent-direction, not large;
 # elasticnet stays out (no lift over the simpler baskets). Reproduce: ensemble_study.py.
+#
+# 2026-06-19 POST-PURGE re-check (33 targets, both lenses, non-overlapping OOS IC;
+# aarambh_tuning_study.py). With the leak removed the ABSOLUTE ICs collapse (the
+# 0.202 above was leak-inflated) but the RANKING holds: ols+huber best (combined
+# −0.001), ols −0.003, ridge+ols −0.004, ridge+ols+huber −0.002, and
+# ols+huber+elasticnet WORST (−0.007). Conclusion unchanged → keep ("ols","huber");
+# elasticnet stays out. (PCA components, set in app.py's engine.fit, re-confirmed at
+# 20 — PCA=30 overfits hard: combined −0.059. Do not raise it.)
 ENSEMBLE_MODELS = ("ols", "huber")
 OU_PROJECTION_DAYS = 90
 MIN_DATA_POINTS = 1500
@@ -126,6 +140,13 @@ SIGNAL_HORIZONS = {
 }
 DEFAULT_SIGNAL_HORIZON = "Tactical (10d)"
 
+# Honorary +1d tile on the Precedent tab — DISPLAY ONLY. The analog has no edge at
+# 1d (analog_tuning_study.py: full IC ≈ +0.04, recent ≈ 0 → noise), so it is shown
+# for reference/curiosity with a caveat and is deliberately NOT in any lens `hold`
+# grid (kept out of the Intelligence Val-IC / walk-forward calibration so it can't
+# dilute it). Set to None to hide the tile entirely.
+PRECEDENT_HONORARY_HORIZON = 1
+
 # Signal thresholds (conviction score → signal mapping)
 CONVICTION_STRONG = 60
 CONVICTION_MODERATE = 40
@@ -147,18 +168,31 @@ DDM_DRIFT_SCALE = 0.15
 DDM_LONG_RUN_VAR = 100.0
 
 # ─── Nirnay Engine Defaults ──────────────────────────────────────────────────
+# These are now the SINGLE SOURCE OF TRUTH for the Nirnay engine — app.py reads
+# them and passes them into engines.nirnay.run_full_analysis (they were previously
+# dead: the engine ran on hardcoded literals in app.py / nirnay.py and these
+# constants were referenced nowhere). Not in the Optuna search, so they are
+# hand-set — but a 2026-06-20 structural sweep (nirnay_tuning_study.py +
+# nirnay_index_check.py: breadth-oscillator OOS IC vs forward return) CONFIRMS the
+# current values as the best global compromise. Findings: breadth is a weak
+# dimension everywhere (|IC| ≈ 0.02–0.06, no knob unlocks more); REGIME_SENSITIVITY
+# is INERT (1.0/1.5/2.0 identical) and MMR_NUM_VARS ~flat; MSF_LENGTH=10 beats 20 on
+# commodities (|IC| 0.057 vs 0.036) but LOSES on equity indices (0.025 vs 0.055) —
+# and indices are 26 of 33 targets, so 20 stays as the cross-universe optimum.
+NIRNAY_MSF_LENGTH = 20            # MSF oscillator rolling-window length
+NIRNAY_ROC_LEN = 14              # rate-of-change lookback inside MSF
+NIRNAY_REGIME_SENSITIVITY = 1.5  # clarity-weight exponent (corrected from a stale
+                                 # 1.0 here that disagreed with the 1.5 the engine
+                                 # actually ran — 1.5 preserves prior behaviour)
+NIRNAY_BASE_WEIGHT = 0.6         # MSF vs MMR base blend (0.6 → 60% MSF)
+NIRNAY_MMR_NUM_VARS = 5          # top-N macro drivers selected per row in MMR
 
-NIRNAY_MSF_LENGTH = 20
-NIRNAY_ROC_LEN = 14
-NIRNAY_REGIME_SENSITIVITY = 1.0
-NIRNAY_BASE_WEIGHT = 0.6
-NIRNAY_MMR_NUM_VARS = 5
-
-# Nirnay signal thresholds (oscillator scale: -10 to +10)
+# Nirnay condition thresholds (unified oscillator scale: -10 to +10). Classify the
+# per-instrument signal into Oversold / Overbought / Neutral and gate buy/sell +
+# divergence flags. (A ±7 "strong" tier was defined here but had NO code path, so
+# it was removed rather than left as dead config.)
 NIRNAY_OVERSOLD = -5
 NIRNAY_OVERBOUGHT = 5
-NIRNAY_STRONG_BUY = -7
-NIRNAY_STRONG_SELL = 7
 
 # ─── Convergence Layer Defaults ──────────────────────────────────────────────
 
@@ -644,6 +678,21 @@ UI_AGREEMENT_MODERATE = 0.5
 # Nirnay avg signal thresholds
 UI_NIRNAY_BULLISH = -2
 UI_NIRNAY_BEARISH = 2
+
+# ── Unified-Signal plot marker thresholds (data-anchored) ────────────────────
+# The 3-row Unified Signal plot's reference lines + marker-color tiers. Set to the
+# p90 (strong) / p75 (moderate) quantiles of each signal's own distribution, pooled
+# across 8 targets / 17.6k days (markers_study.py), so "strong/moderate" means the
+# same extremeness on every row. This CORRECTED hand-set values that were badly
+# mis-scaled: the old Row-1 ±0.5 fired only 3% of days (too tight), while Row-2 ±20
+# and Row-3 ±2 fired 51% / 41% of days (too loose). The conviction rows are mean-
+# reverting (high extension → lower forward return, monotone), Nirnay-avg is flat
+# (interpretive guide only) — so these are EXTREMENESS markers, not actionable edges.
+UI_CONSENSUS_STRONG = 0.40      # Row 1 · norm_avg (consensus, [-1,1])
+UI_CONSENSUS_MODERATE = 0.25
+UI_CONVRAW_STRONG = 60          # Row 2 · ConvictionRaw (Aarambh, ~[-100,100])
+UI_CONVRAW_MODERATE = 40
+UI_NIRNAY_AVG_THRESHOLD = 2.5   # Row 3 · Avg_Signal (Nirnay, [-10,10]) — single tier
 
 # Model spread thresholds
 UI_MODEL_SPREAD_LOW = 20.0

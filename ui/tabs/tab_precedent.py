@@ -18,6 +18,7 @@ import streamlit as st
 
 from analytics.analogs import find_similar_periods, summarize_forward
 from core.config import (
+    PRECEDENT_HONORARY_HORIZON,
     COLOR_GREEN, COLOR_RED, COLOR_GOLD, COLOR_CYAN, COLOR_MUTED,
 )
 from ui.components import (
@@ -130,9 +131,16 @@ def render_precedent_tab(
 ) -> None:
     """Render the Precedent view — analog cards + base-rate summary + backtest."""
 
+    # Display horizons = the lens hold grid + an honorary +1d reference tile (the
+    # analog has no edge at 1d; shown with a caveat, NOT part of calibration).
+    if PRECEDENT_HONORARY_HORIZON is not None and PRECEDENT_HONORARY_HORIZON not in hold_horizons:
+        display_hold = tuple(sorted(set((PRECEDENT_HONORARY_HORIZON,) + tuple(hold_horizons))))
+    else:
+        display_hold = tuple(hold_horizons)
+
     render_section_header(
         title="Similar Historical Periods",
-        description=(f"Mahalanobis + trajectory matching · forward {active_target} "
+        description=(f"Covariance-aware Mahalanobis state-matching · forward {active_target} "
                      f"returns from each analog · lens horizons {'/'.join(str(h) for h in hold_horizons)}d"),
         icon="compass",
         accent="emerald",
@@ -143,24 +151,26 @@ def render_precedent_tab(
         return
 
     periods = find_similar_periods(
-        ts, active_target, hold_horizons=hold_horizons, mom_window=mom_window,
+        ts, active_target, hold_horizons=display_hold, mom_window=mom_window,
     )
     if not periods:
         st.warning("Not enough historical data to find similar periods.")
         return
 
-    # ── Forward-return base-rate summary (one card per lens horizon) ─────────
-    summary = summarize_forward(periods, hold_horizons)
+    # ── Forward-return base-rate summary (one card per horizon) ──────────────
+    summary = summarize_forward(periods, display_hold)
     if summary:
         cols = st.columns(len(summary), gap="small")
         for col, (h, s) in zip(cols, summary.items()):
+            _hon = (h == PRECEDENT_HONORARY_HORIZON)
             with col:
                 render_metric_card(
-                    label=f"+{h}D Median Return",
+                    label=f"+{h}D Median Return" + ("  · honorary" if _hon else ""),
                     value=f"{s['median']:+.1f}%",
-                    subtext=f"{s['positive_pct']:.0f}% positive ({s['n']} analogs)",
-                    color_class="success" if s["median"] > 0 else "danger",
-                    icon="trending-up" if s["median"] > 0 else "trending-down",
+                    subtext=("reference only — analog has no edge at 1d (study)" if _hon
+                             else f"{s['positive_pct']:.0f}% positive ({s['n']} analogs)"),
+                    color_class="neutral" if _hon else ("success" if s["median"] > 0 else "danger"),
+                    icon="help-circle" if _hon else ("trending-up" if s["median"] > 0 else "trending-down"),
                 )
 
     render_interpretation_card(
@@ -188,14 +198,14 @@ def render_precedent_tab(
     analog_cols = st.columns(2, gap="medium")
     for i, period in enumerate(periods):
         with analog_cols[i % 2]:
-            _render_period_card(period, active_target, hold_horizons)
+            _render_period_card(period, active_target, display_hold)
             st.markdown('<div style="height: var(--sp-3);"></div>', unsafe_allow_html=True)
 
     # ── Backtest: state extension vs forward return (descriptive) ───────────
     section_gap()
     render_section_header(
         title=f"Backtest · Extension (Z) vs Forward {active_target} Return",
-        description=f"Each dot = one historical day · {fwd_horizon}d forward horizon (active lens)",
+        description=f"Each dot = one independent (non-overlapping) {fwd_horizon}d window · honest OOS IC",
         icon="chart",
         accent="rose",
     )
@@ -219,8 +229,13 @@ def render_precedent_tab(
         st.caption("Insufficient data points for backtest.")
         return
 
-    avgz = np.asarray(df["AvgZ"], dtype=np.float64)[: n - horizon]
-    fwd_ret = (price[horizon:] / price[: n - horizon] - 1) * 100
+    avgz_full = np.asarray(df["AvgZ"], dtype=np.float64)[: n - horizon]
+    fwd_full = (price[horizon:] / price[: n - horizon] - 1) * 100
+    # NON-OVERLAPPING sampling (stride = horizon): adjacent forward windows don't
+    # overlap, so the correlation isn't overlap-inflated (the honest IC for smooth
+    # multi-day returns). Every dot below is one independent window.
+    avgz = avgz_full[::horizon]
+    fwd_ret = fwd_full[::horizon]
 
     valid = np.isfinite(avgz) & np.isfinite(fwd_ret)
     x = avgz[valid]

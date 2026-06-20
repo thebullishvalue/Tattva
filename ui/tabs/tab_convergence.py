@@ -32,6 +32,11 @@ from core.config import (
     UI_CONVICTION_MODERATE,
     UI_NIRNAY_BULLISH,
     UI_NIRNAY_BEARISH,
+    UI_CONSENSUS_STRONG,
+    UI_CONSENSUS_MODERATE,
+    UI_CONVRAW_STRONG,
+    UI_CONVRAW_MODERATE,
+    UI_NIRNAY_AVG_THRESHOLD,
     UI_CHART_HEIGHT_STACKED,
 )
 
@@ -224,13 +229,13 @@ def render_convergence_tab(ts_filtered=None):
     # Convergence color mapping
     avg_colors, avg_sizes = [], []
     for v in norm_avg:
-        if v < -0.40:
+        if v < -UI_CONSENSUS_STRONG:
             avg_colors.append(EMERALD); avg_sizes.append(8)
-        elif v <= -0.25:
+        elif v <= -UI_CONSENSUS_MODERATE:
             avg_colors.append("rgba(52,211,153,1.0)"); avg_sizes.append(6)
-        elif v > 0.40:
+        elif v > UI_CONSENSUS_STRONG:
             avg_colors.append(ROSE); avg_sizes.append(8)
-        elif v >= 0.25:
+        elif v >= UI_CONSENSUS_MODERATE:
             avg_colors.append("rgba(251,113,133,1.0)"); avg_sizes.append(6)
         else:
             avg_colors.append("rgba(148,163,184,0.95)"); avg_sizes.append(5)
@@ -273,8 +278,8 @@ def render_convergence_tab(ts_filtered=None):
     #            x=aligned_dates, y=_cal_y, mode="lines", name="Calibrated model",
     #            line=dict(color=AMBER, width=2), connectgaps=True,
     #        ), row=1, col=1)
-    fig.add_hline(y=0.5, line_dash="dot", line_color="rgba(251,113,133,0.15)", line_width=0.5, row=1, col=1)
-    fig.add_hline(y=-0.5, line_dash="dot", line_color="rgba(52,211,153,0.15)", line_width=0.5, row=1, col=1)
+    fig.add_hline(y=UI_CONSENSUS_STRONG, line_dash="dot", line_color="rgba(251,113,133,0.15)", line_width=0.5, row=1, col=1)
+    fig.add_hline(y=-UI_CONSENSUS_STRONG, line_dash="dot", line_color="rgba(52,211,153,0.15)", line_width=0.5, row=1, col=1)
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5, row=1, col=1)
 
     # ── Row 2: Base Conviction ────────────────────────────────────────
@@ -283,13 +288,13 @@ def render_convergence_tab(ts_filtered=None):
     for v in aligned_conv_raw:
         if v is None:
             conv_colors.append("rgba(148,163,184,0.90)"); conv_sizes.append(5)
-        elif v > 40:
+        elif v > UI_CONVRAW_STRONG:
             conv_colors.append(ROSE); conv_sizes.append(7)
-        elif v >= 20:
+        elif v >= UI_CONVRAW_MODERATE:
             conv_colors.append("rgba(251,113,133,1.0)"); conv_sizes.append(6)
-        elif v < -40:
+        elif v < -UI_CONVRAW_STRONG:
             conv_colors.append(EMERALD); conv_sizes.append(7)
-        elif v <= -20:
+        elif v <= -UI_CONVRAW_MODERATE:
             conv_colors.append("rgba(52,211,153,1.0)"); conv_sizes.append(6)
         else:
             conv_colors.append("rgba(148,163,184,0.95)"); conv_sizes.append(5)
@@ -308,11 +313,11 @@ def render_convergence_tab(ts_filtered=None):
         marker=dict(size=conv_sizes, color=conv_colors),
     ), row=2, col=1)
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5, row=2, col=1)
-    fig.add_hline(y=40, line_dash="dot", line_color="rgba(251,113,133,0.12)", line_width=0.5, row=2, col=1)
-    fig.add_hline(y=-40, line_dash="dot", line_color="rgba(52,211,153,0.12)", line_width=0.5, row=2, col=1)
+    fig.add_hline(y=UI_CONVRAW_STRONG, line_dash="dot", line_color="rgba(251,113,133,0.12)", line_width=0.5, row=2, col=1)
+    fig.add_hline(y=-UI_CONVRAW_STRONG, line_dash="dot", line_color="rgba(52,211,153,0.12)", line_width=0.5, row=2, col=1)
 
     # ── Row 3: Nirnay Avg Signal ──────────────────────────────────────
-    nirnay_colors = [EMERALD if v < -2 else ROSE if v > 2 else "rgba(148,163,184,0.95)" for v in aligned_nirnay_raw]
+    nirnay_colors = [EMERALD if v < -UI_NIRNAY_AVG_THRESHOLD else ROSE if v > UI_NIRNAY_AVG_THRESHOLD else "rgba(148,163,184,0.95)" for v in aligned_nirnay_raw]
 
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=np.clip(aligned_nirnay_raw, 0, None),
@@ -327,8 +332,8 @@ def render_convergence_tab(ts_filtered=None):
         line=dict(color=SLATE, width=1.2),
         marker=dict(size=5, color=nirnay_colors),
     ), row=3, col=1)
-    fig.add_hline(y=2, line_dash="dot", line_color="rgba(251,113,133,0.15)", line_width=0.5, row=3, col=1)
-    fig.add_hline(y=-2, line_dash="dot", line_color="rgba(52,211,153,0.15)", line_width=0.5, row=3, col=1)
+    fig.add_hline(y=UI_NIRNAY_AVG_THRESHOLD, line_dash="dot", line_color="rgba(251,113,133,0.15)", line_width=0.5, row=3, col=1)
+    fig.add_hline(y=-UI_NIRNAY_AVG_THRESHOLD, line_dash="dot", line_color="rgba(52,211,153,0.15)", line_width=0.5, row=3, col=1)
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5, row=3, col=1)
 
     # ── Layout ────────────────────────────────────────────────────────

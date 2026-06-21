@@ -23,7 +23,7 @@ LOOKBACK_WINDOWS = (5, 10, 20, 50, 100)
 # That removed a large future-leak the OLD study was unknowingly scored on, so the
 # defaults were re-chosen honestly: 33 targets, BOTH lenses (10d & 20d), metric =
 # NON-OVERLAPPING OOS rank IC of forecast vs realized return. Repro:
-# aarambh_tuning_study.py (+ confirm_max_sweep.py for the MAX×MIN interaction).
+# research/aarambh_tuning_study.py (+ research/confirm_max_sweep.py for the MAX×MIN interaction).
 # Reality check: post-purge directional IC is modest everywhere (combined ≈ 0;
 # ~+0.02–0.04 at 10d, ~0/negative at 20d, US equities negative) — no setting unlocks
 # a strong edge, so the analog/Precedent base rate carries more directional signal
@@ -88,7 +88,7 @@ HUBER_MAX_ITER = 500
 # elasticnet stays out (no lift over the simpler baskets). Reproduce: ensemble_study.py.
 #
 # 2026-06-19 POST-PURGE re-check (33 targets, both lenses, non-overlapping OOS IC;
-# aarambh_tuning_study.py). With the leak removed the ABSOLUTE ICs collapse (the
+# research/aarambh_tuning_study.py). With the leak removed the ABSOLUTE ICs collapse (the
 # 0.202 above was leak-inflated) but the RANKING holds: ols+huber best (combined
 # −0.001), ols −0.003, ridge+ols −0.004, ridge+ols+huber −0.002, and
 # ols+huber+elasticnet WORST (−0.007). Conclusion unchanged → keep ("ols","huber");
@@ -108,7 +108,7 @@ MIN_DATA_POINTS = 1500
 #
 # TWO lenses only — finalized from a universe-wide computational study (33 targets,
 # honest non-overlapping walk-forward of the analog/precedent engine; see
-# precedent_universe_sweep.py). The analog rank-IC across the universe is:
+# research/precedent_universe_sweep.py). The analog rank-IC across the universe is:
 #     +5d 0.089 (33/33 +ve) · +10d 0.127 (30/33) · +20d 0.162 (28/33, PEAK)
 #     +40d 0.058 (1/33 sig) · +60d 0.048 (0/33 sig)  ← collapses past 20d
 # Recent-half IC is positive only at 5d (+0.022) and 10d (+0.034); 20d+ has decayed
@@ -141,7 +141,7 @@ SIGNAL_HORIZONS = {
 DEFAULT_SIGNAL_HORIZON = "Tactical (10d)"
 
 # Honorary +1d tile on the Precedent tab — DISPLAY ONLY. The analog has no edge at
-# 1d (analog_tuning_study.py: full IC ≈ +0.04, recent ≈ 0 → noise), so it is shown
+# 1d (research/analog_tuning_study.py: full IC ≈ +0.04, recent ≈ 0 → noise), so it is shown
 # for reference/curiosity with a caveat and is deliberately NOT in any lens `hold`
 # grid (kept out of the Intelligence Val-IC / walk-forward calibration so it can't
 # dilute it). Set to None to hide the tile entirely.
@@ -156,8 +156,15 @@ CONVICTION_WEAK = 20
 Z_EXTREME = 2.0
 Z_THRESHOLD = 1.0
 
-# Staleness
+# Staleness (in TRADING days behind — weekends ignored).
 STALENESS_DAYS = 3
+# Session completeness floor: the latest row is a "real" session only if at least
+# this fraction of inputs posted NATIVELY (detected as "changed vs the prior row" —
+# continuous prices move every session; forward-filled columns don't). Below this,
+# the row is a PARTIAL session (e.g. non-US markets in, US not yet posted on a
+# timezone/publish lag) that the ff-fill makes *look* complete. Full sessions run
+# ~0.95+; weekend/partial rows ~0.03–0.3, so 0.6 separates them cleanly.
+SESSION_FRESH_FLOOR = 0.6
 
 # Timeframe filter mapping (trading days)
 TIMEFRAME_TRADING_DAYS = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504}
@@ -172,8 +179,8 @@ DDM_LONG_RUN_VAR = 100.0
 # them and passes them into engines.nirnay.run_full_analysis (they were previously
 # dead: the engine ran on hardcoded literals in app.py / nirnay.py and these
 # constants were referenced nowhere). Not in the Optuna search, so they are
-# hand-set — but a 2026-06-20 structural sweep (nirnay_tuning_study.py +
-# nirnay_index_check.py: breadth-oscillator OOS IC vs forward return) CONFIRMS the
+# hand-set — but a 2026-06-20 structural sweep (research/nirnay_tuning_study.py +
+# research/nirnay_index_check.py: breadth-oscillator OOS IC vs forward return) CONFIRMS the
 # current values as the best global compromise. Findings: breadth is a weak
 # dimension everywhere (|IC| ≈ 0.02–0.06, no knob unlocks more); REGIME_SENSITIVITY
 # is INERT (1.0/1.5/2.0 identical) and MMR_NUM_VARS ~flat; MSF_LENGTH=10 beats 20 on
@@ -641,6 +648,35 @@ TARGET_CATEGORIES: dict[str, list[str]] = {
 for _name, _meta in INDEX_TARGETS.items():
     TARGET_CATEGORIES.setdefault(_meta["category"], []).append(_name)
 
+# ─── Sheet-sourced targets (non-yfinance; injected via fetcher exogenous path) ─
+# Daily series pulled from a published Google Sheet (data/sheets.py SHEET_SOURCES,
+# keyed by the same name) and injected into the model matrix exactly like Jeera.
+# Registered here so they appear in the sidebar under their chosen category, with a
+# sentinel ticker kept OUT of the yfinance maps. A sheet target may BORROW another
+# index's constituents for its Nirnay basket via NIRNAY_BASKET_ALIAS below (e.g.
+# Nifty 50 PE → the Nifty 50 stocks). (Jeera predates this registry and stays in
+# COMMODITY_TARGETS.)
+SHEET_TARGETS: dict[str, dict] = {
+    "Nifty 50 - PE": {"ticker": "NIFTY50_PE.SHEET", "category": "India Indices",
+                      "polarity": +1, "archetype": "index"},
+}
+for _sname, _smeta in SHEET_TARGETS.items():
+    ALL_TARGETS[_sname] = _smeta["ticker"]
+    TARGET_CATEGORIES.setdefault(_smeta["category"], []).append(_sname)
+    TARGET_POLARITY.setdefault(_sname, _smeta.get("polarity", +1))
+    TARGET_ARCHETYPE.setdefault(_sname, _smeta.get("archetype", "index"))
+    # Don't let sibling India equity indices / the India ETF "explain" the PE.
+    TARGET_EXCLUDED_PREDICTORS.setdefault(_sname, list(_INDEX_NAMES) + _INDIA_INDEX_ETFS)
+
+# Targets that borrow another index's live constituents for their Nirnay basket
+# (the target itself isn't a yfinance index, so it has no constituents of its own).
+# Nifty 50 PE co-moves with the Nifty 50 complex → use the Nifty 50 stocks (the PE
+# rises with constituent strength, so polarity stays +1). Resolved in
+# data.constituents.get_commodity_basket.
+NIRNAY_BASKET_ALIAS: dict[str, str] = {
+    "Nifty 50 - PE": "Nifty 50",
+}
+
 # ─── Chart Theme ─────────────────────────────────────────────────────────────
 
 CHART_BG = "rgba(0,0,0,0)"
@@ -682,7 +718,7 @@ UI_NIRNAY_BEARISH = 2
 # ── Unified-Signal plot marker thresholds (data-anchored) ────────────────────
 # The 3-row Unified Signal plot's reference lines + marker-color tiers. Set to the
 # p90 (strong) / p75 (moderate) quantiles of each signal's own distribution, pooled
-# across 8 targets / 17.6k days (markers_study.py), so "strong/moderate" means the
+# across 8 targets / 17.6k days (research/markers_study.py), so "strong/moderate" means the
 # same extremeness on every row. This CORRECTED hand-set values that were badly
 # mis-scaled: the old Row-1 ±0.5 fired only 3% of days (too tight), while Row-2 ±20
 # and Row-3 ±2 fired 51% / 41% of days (too loose). The conviction rows are mean-

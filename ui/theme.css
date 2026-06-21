@@ -2761,7 +2761,6 @@ footer {
 .warning-box {
     background: rgba(212, 168, 83, 0.04);
     border: 1px solid rgba(212, 168, 83, 0.12);
-    border-left: 2px solid var(--amber);
     border-radius: var(--r-md);
     padding: var(--sp-4) var(--sp-5);
     margin-bottom: var(--sp-5);
@@ -3621,7 +3620,6 @@ footer {
 }
 
 .info-box::before,
-.warning-box::before,
 .interp-card::before {
     content: "";
     position: absolute;
@@ -3630,10 +3628,6 @@ footer {
     bottom: 0;
     width: 3px;
     background: linear-gradient(180deg, var(--amber), var(--cyan));
-}
-
-.warning-box::before {
-    background: linear-gradient(180deg, var(--rose), var(--orange));
 }
 
 /* ================================================================

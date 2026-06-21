@@ -23,6 +23,25 @@ Backward compatible — no data-format or cache-key breakage (the lens is a new 
 dimension; old profiles simply recalibrate).
 
 ### Added
+- **`research/` suite + `run_tuning.py` orchestrator.** All the session's tuning &
+  validation harnesses (Aarambh/Nirnay/analog sweeps, marker & hero studies — 11
+  scripts) moved out of the repo root into `research/` (path-shimmed so each still
+  runs standalone). A single `python3 research/run_tuning.py` re-runs the whole
+  suite, tees one consolidated timestamped report to `research/reports/`, and prints
+  a **current-vs-validated reference** for every tuned constant. By design it
+  *reports only* — config stays applied-by-hand after review (auto-tuning would
+  invite overfitting / regime-chasing). `research/README.md` documents the suite.
+- **Nifty 50 — PE target (sheet-sourced), under India Indices.** A second
+  non-yfinance target after Jeera: its daily P/E series is pulled from a published
+  Google Sheet (column `NIFTY50_PE`) via the same `data/sheets.py` contract (cache +
+  circuit-breaker + stale fallback) and injected into the model matrix. The sheet
+  fetcher/parser were generalized for an arbitrary value column + auto-detected date
+  column, and `_fetch_exogenous_targets` now loops every registered `SHEET_SOURCES`
+  entry. Registered via a new `SHEET_TARGETS` map (sentinel ticker kept out of the
+  yfinance maps; category "India Indices"; ~20y / 4.9k rows of history). It borrows
+  the **Nifty 50 constituents** as its Nirnay basket via a new `NIRNAY_BASKET_ALIAS`
+  (the PE co-moves with constituent strength, polarity +1), so it runs the FULL
+  pipeline — Aarambh forecast + Nirnay breadth + Convergence + Precedent.
 - **Signal Horizon lenses (2).** A sidebar selector picks how far ahead the engine
   reads — **Tactical (10d)** for hedging / short-term and **Positional (20d)** for
   positioning — on daily bars throughout (no weekly resampling, which would starve
@@ -168,6 +187,49 @@ dimension; old profiles simply recalibrate).
   redundancy 0.48, and its weekly signal is mostly Nifty beta, not INR.
 
 ### Fixed
+- **Edge-case audit resolutions (verified by execution).** A rigorous pass found and
+  fixed several real defects (and refuted a few suspected ones — constant-series
+  div-by-zero, single-feature crash, and the MIN_DATA_POINTS pre-warmup failure were
+  all proven *non*-issues):
+  - **Partial-session gate.** The latest row can be a partial session (e.g. Indian
+    markets posted Jun 19 but US hasn't on a publish lag) that ff-fill makes *look*
+    complete — measured at **27% native-fresh** on such a day. The forecast, breadth
+    and analog then rest on stale predictors. A calendar-agnostic check (native
+    coverage = fraction of columns that changed vs the prior row) now flags it
+    prominently ("Partial latest session — only N% of inputs posted… provisional");
+    full sessions run ~97% so the 0.6 floor separates cleanly.
+  - **`conv_norm_params` now target-keyed** — was cached once and reused across
+    target switches, silently mis-normalizing every later target's Row-1 plot + card.
+  - **Missing-target guard** — a selected target whose source fetch fails no longer
+    KeyErrors the run; it fails clean with a message.
+  - **Content-aware precedent cache** (keyed on latest price, not just row count) so
+    an intraday refresh recomputes. **Non-positive-target guard** (returns-based engine
+    needs a strictly positive series — defensive). **`render_info_box` color** is now
+    applied (was a dead param). Documented two deliberate limits: the macro calendar
+    is the spine (rare cross-calendar sheet dates dropped, ~4/6y), and `busday_count`
+    has no holiday table (the partial-session gate is the calendar-agnostic primary).
+- **Convergence cards & plot are now a single source of truth.** The "Aarambh
+  Conviction" card read `aarambh_ts[...].iloc[-1]` (raw last row) while the plot Row 2
+  read the Nirnay-aligned series — two sources, one label, so they could disagree.
+  `render_convergence_tab` now aligns Aarambh+Nirnay **once, up front**, and both the
+  metric cards and the 3-row plot read those exact arrays → a card can never drift
+  from the point it mirrors (Aarambh-only targets fall back gracefully and still
+  render their cards).
+- **Weekend artifact rows removed from the dataset.** A few weekend-trading tickers
+  (FX) created Sat/Sun index dates that the upstream `combined.ffill()` back-filled
+  across the other ~180 columns — a fully ff-filled, entirely-stale weekend row that
+  *looked* complete but carried Friday's values (which drove the illogical signals
+  and exposed the card/plot split above). `fetch_commodity_dataset` now drops
+  weekend rows so the latest row is always a real trading day.
+- **Per-source, trading-day-aware data-freshness notices.** Staleness is now counted
+  in TRADING days (weekends ignored — Friday data on a weekend reads *current*, not
+  stale), tiered and design-consistent: a calm info note when 1–2 trading days
+  behind, a prominent warning ("Latest data unavailable") once genuinely stale. Plus
+  a **per-target** check: the active target can lag the macro universe (sheet behind,
+  or its market shut on a holiday) with the gap forward-filled — detected exactly for
+  sheet targets (from the source) and via ff-filled-tail detection for the rest — so
+  the user is told when *that target's* latest signal is stale even if the dataset
+  isn't. Every notice states the as-of date; signals reflect that date, not today.
 - **Wired previously-dead `NIRNAY_*` config.** The nine Nirnay constants were
   referenced nowhere — the engine ran on hardcoded literals in `app.py` /
   `engines/nirnay.py`, and `NIRNAY_REGIME_SENSITIVITY = 1.0` actively *disagreed*

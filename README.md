@@ -144,9 +144,14 @@ convergence/            cross-validator, conviction (DDM), divergence,
                         normalization, intelligence (calibration + walk-forward)
 ui/                     theme, components, tabs (Convergence/Aarambh/Nirnay/
                         Precedent/Diagnostics/Data)
-precedent_study.py …    research harnesses: model-vs-analog, universe analog
-                        sweep, purged model-vs-analog (non-overlapping IC)
+research/               tuning & validation harnesses (Aarambh/Nirnay/analog
+                        sweeps, marker/hero studies) + run_tuning.py orchestrator
 ```
+
+Re-tuning: `python3 research/run_tuning.py --list` shows the suite;
+`python3 research/run_tuning.py` re-runs all studies and writes one consolidated
+report (`research/reports/`) plus a current-vs-validated reference for every tuned
+constant. It reports only — config is applied by hand after review.
 
 ---
 

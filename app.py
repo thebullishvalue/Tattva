@@ -103,7 +103,7 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -765,7 +765,17 @@ def main():
     active_features = [f for f in active_features if f not in _excluded_feats]
     active_date = st.session_state.get("active_date_col", date_col)
 
-    # ─── Data staleness warning ────────────────────────────────────────────
+    # ─── Data freshness notice ──────────────────────────────────────────────
+    # Measured in TRADING days behind (weekends ignored) so Friday data read on a
+    # Sunday is "current", not stale. Tiered, design-consistent: a calm info note
+    # when 1–2 trading days behind (today's bar often isn't published yet), and a
+    # prominent warning once genuinely stale (source hasn't updated). The signal
+    # always reflects the as-of date shown, never "today".
+    # NOTE: np.busday_count uses a plain Mon–Fri mask with NO market-holiday table,
+    # so it can over-count "behind" by ~1 across a holiday → an occasional early
+    # stale notice. The PRIMARY, calendar-agnostic freshness signal is the
+    # partial-session check below (native coverage), which needs no holiday calendar;
+    # exact per-exchange calendars are future work.
     if active_date != "None" and active_date in df.columns:
         try:
             dates = pd.to_datetime(df[active_date], errors="coerce", dayfirst=True).dropna()
@@ -773,17 +783,92 @@ def main():
                 latest_date = dates.max().to_pydatetime()
                 if latest_date.tzinfo is not None:
                     latest_date = latest_date.replace(tzinfo=None)
-                now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-                data_age = (now_utc - latest_date).days
-                if data_age > STALENESS_DAYS:
+                today = datetime.now(timezone.utc).replace(tzinfo=None).date()
+                # trading days strictly after the data date, up to & including today
+                behind = int(np.busday_count(
+                    (latest_date.date() + timedelta(days=1)), (today + timedelta(days=1))))
+                ds = latest_date.strftime("%d %b %Y")
+                if behind >= STALENESS_DAYS:
                     render_warning_box(
-                        title="Stale Data",
-                        content=f"Last data point is from {latest_date.strftime('%d %b %Y')} ({data_age} days ago). Analysis may be outdated."
+                        title="Latest data unavailable",
+                        content=(f"Newest data is {ds} — {behind} trading days behind. The price source "
+                                 f"(yfinance) hasn't published more recent data, so every signal below "
+                                 f"reflects {ds}, not today. Re-run once the source updates."),
                     )
+                elif behind >= 1:
+                    render_info_box(
+                        "Data freshness",
+                        f"Signals are as of {ds} ({behind} trading day"
+                        f"{'s' if behind > 1 else ''} behind — today's bar may not be published yet).",
+                    )
+
+                # Session completeness: is the LATEST row a broadly-fresh session, or
+                # a PARTIAL one the ff-fill makes look complete? Native freshness =
+                # fraction of numeric columns that changed vs the prior row (continuous
+                # prices move every session; ff-filled columns don't). This is
+                # calendar-agnostic (no holiday table needed) and catches the case
+                # where e.g. Indian markets posted but US hasn't yet.
+                num = df.select_dtypes(include=[np.number])
+                if len(num) >= 2:
+                    last_r = num.iloc[-1].to_numpy(dtype=np.float64)
+                    prev_r = num.iloc[-2].to_numpy(dtype=np.float64)
+                    ok = np.isfinite(last_r) & np.isfinite(prev_r)
+                    fresh_frac = float(((last_r != prev_r) & ok).sum() / max(int(ok.sum()), 1))
+                    if fresh_frac < SESSION_FRESH_FLOOR:
+                        render_warning_box(
+                            title="Partial latest session",
+                            content=(f"Only {fresh_frac:.0%} of inputs have posted for {ds} — the rest "
+                                     f"(e.g. US markets, on a timezone/publish lag) are forward-filled from the "
+                                     f"prior session, so the macro predictors and constituent breadth behind the "
+                                     f"latest signal are stale. Treat it as provisional; re-run once those "
+                                     f"markets close."),
+                        )
+
+                # Per-source freshness for the ACTIVE target specifically — it can
+                # lag the macro universe (sheet behind, or its market shut on a
+                # holiday) with the gap forward-filled. Find its true last update:
+                #   • sheet target  → exact, from the source series.
+                #   • yfinance/other → detect the ff-filled tail (continuous prices
+                #     don't repeat, so a run of identical closes = forward-filled days).
+                try:
+                    from data.sheets import SHEET_SOURCES, fetch_sheet_series
+                    t_last = None
+                    if active_target in SHEET_SOURCES:
+                        s = fetch_sheet_series(active_target)
+                        if s is not None and len(s):
+                            t_last = pd.Timestamp(s.index.max()).to_pydatetime()
+                    elif active_target in df.columns and active_date in df.columns:
+                        tv = pd.to_numeric(df[active_target], errors="coerce").to_numpy()
+                        tdates = pd.to_datetime(df[active_date], errors="coerce", dayfirst=True)
+                        j = len(tv) - 1
+                        while j > 0 and np.isfinite(tv[j]) and tv[j] == tv[j - 1]:
+                            j -= 1
+                        if j < len(tv) - 1 and pd.notna(tdates.iloc[j]):
+                            t_last = pd.Timestamp(tdates.iloc[j]).to_pydatetime()
+                    if t_last is not None:
+                        t_behind = int(np.busday_count(
+                            (t_last.date() + timedelta(days=1)), (today + timedelta(days=1))))
+                        if t_behind >= 1:
+                            render_warning_box(
+                                title=f"{active_target} data is lagging",
+                                content=(f"This target last updated {t_last.strftime('%d %b %Y')} "
+                                         f"({t_behind} trading day{'s' if t_behind > 1 else ''} behind the macro "
+                                         f"universe) — more recent rows are forward-filled from that value, so "
+                                         f"its latest signal may be stale."),
+                            )
+                except Exception:
+                    pass
         except Exception:
             pass
 
     # ─── Clean & Fit Engine ────────────────────────────────────────────────
+    # Guard: a selected target whose column failed to fetch (e.g. a sheet/source
+    # outage on a later run, while it stays selected) is silently dropped by the
+    # column filter below and would KeyError at the per-column coercion. Fail clean.
+    if active_target not in df.columns:
+        st.error(f"'{active_target}' data is currently unavailable (its source fetch failed). "
+                 f"Pick another target, or re-run once the source is back online.")
+        return
     cols = [active_target] + active_features + ([active_date] if active_date != "None" and active_date in df.columns else [])
     data = df[[c for c in cols if c in df.columns]].copy()
     if active_date != "None" and active_date in data.columns:
@@ -799,6 +884,14 @@ def main():
     active_features = [f for f in active_features if f in data.columns]
     if not active_features:
         st.error("No valid features found after data cleaning.")
+        return
+    # Returns-based forecasting takes log() of the target → it must be strictly
+    # positive. Every shipped target is (prices/levels/ratios), but a future target
+    # (a spread, a net position, a yield differential) could go ≤0; fail clean
+    # rather than silently producing all-NaN forecasts.
+    if (pd.to_numeric(data[active_target], errors="coerce") <= 0).any():
+        st.error(f"'{active_target}' has non-positive values — the returns-based engine needs a "
+                 f"strictly positive series (it forecasts log-returns).")
         return
 
     # ── Predictive representation: FORECAST the forward return from lagged
@@ -1437,7 +1530,10 @@ def main():
     # adds genuine, independent value — while the plot markers add nothing (they ARE
     # the convergence's own inputs). So the hero reads the precedent alongside its
     # signal: agreement raises confidence, disagreement is flagged as a divergence.
-    _pkey = f"{active_target}|{st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}|{len(ts)}"
+    # Content-aware key (not just row count): include the latest Price so an intraday
+    # refresh that updates the last bar without adding a row still recomputes.
+    _plast = float(ts["Price"].iloc[-1]) if "Price" in ts.columns and len(ts) else 0.0
+    _pkey = f"{active_target}|{st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}|{len(ts)}|{_plast:.6g}"
     if st.session_state.get("_prec_key") != _pkey:   # recompute only when inputs change
         _prec_summary = None
         try:

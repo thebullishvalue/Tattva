@@ -46,7 +46,14 @@ SHEET_SOURCES: dict[str, dict[str, str]] = {
     "Jeera": {
         "sheet_id": "1WfT2EGCyqPuKXtejp2CZsFBs9T3Lsa8JCPuHUlv-rUo",
         "gid": "0",
+        "value_col": "Price",
         "snapshot": "jeera.csv",
+    },
+    "Nifty 50 - PE": {
+        "sheet_id": "1po7z42n3dYIQGAvn0D1-a4pmyxpnGPQ13TrNi3DB5_c",
+        "gid": "990005192",
+        "value_col": "NIFTY50_PE",
+        "snapshot": "nifty50_pe.csv",
     },
 }
 
@@ -67,9 +74,12 @@ sheets_circuit = CircuitBreaker(
 
 # ─── Parsing ─────────────────────────────────────────────────────────────────
 
-def _parse_price_csv(text: str, name: str) -> pd.Series:
-    """Parse a ``Date,Price`` CSV (dd/mm/yyyy dates, comma-thousands prices)
-    into a clean, de-duplicated, datetime-indexed float Series named ``name``.
+def _parse_price_csv(text: str, name: str, value_col: str = "Price") -> pd.Series:
+    """Parse a sheet CSV into a clean, de-duplicated, datetime-indexed float Series
+    named ``name``. The value column is ``value_col`` (e.g. ``Price`` for Jeera,
+    ``NIFTY50_PE`` for the Nifty 50 PE sheet); the date column is auto-detected
+    (first column whose header contains "date", else the first column). Dates are
+    dd/mm/yyyy; values may carry comma-thousands.
     """
     if "<!DOCTYPE html" in text[:200] or "<html" in text[:200].lower():
         # Google served a login/error page instead of CSV (sheet went private).
@@ -77,12 +87,13 @@ def _parse_price_csv(text: str, name: str) -> pd.Series:
 
     df = pd.read_csv(io.StringIO(text))
     df.columns = [str(c).strip() for c in df.columns]
-    if "Date" not in df.columns or "Price" not in df.columns:
-        raise ValueError(f"{name}: expected 'Date,Price' columns, got {list(df.columns)}")
+    if value_col not in df.columns:
+        raise ValueError(f"{name}: value column {value_col!r} not found, got {list(df.columns)}")
+    date_col = next((c for c in df.columns if "date" in c.lower()), df.columns[0])
 
-    dates = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+    dates = pd.to_datetime(df[date_col], dayfirst=True, errors="coerce")
     prices = pd.to_numeric(
-        df["Price"].astype(str).str.replace(",", "", regex=False).str.strip(),
+        df[value_col].astype(str).str.replace(",", "", regex=False).str.strip(),
         errors="coerce",
     )
     s = pd.Series(prices.values, index=dates, name=name)
@@ -114,7 +125,7 @@ def _load_snapshot(name: str) -> pd.Series | None:
     if not path.exists():
         return None
     try:
-        return _parse_price_csv(path.read_text(encoding="utf-8"), name)
+        return _parse_price_csv(path.read_text(encoding="utf-8"), name, meta.get("value_col", "Price"))
     except Exception as e:  # noqa: BLE001
         log.warning("%s snapshot parse failed: %s", name, e)
         return None
@@ -146,7 +157,7 @@ def fetch_sheet_series(
     if series is None:
         try:
             text = sheets_circuit.call(_download_sheet_csv, url)
-            series = _parse_price_csv(text, name)
+            series = _parse_price_csv(text, name, meta.get("value_col", "Price"))
             sheets_cache.put(name, url, value=series)
         except CircuitBreakerError as e:
             log.warning("%s sheet circuit open: %s", name, e)

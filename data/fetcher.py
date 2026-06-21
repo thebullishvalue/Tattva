@@ -323,12 +323,28 @@ def fetch_commodity_dataset(
 
     df = renamed[keep].copy()
 
+    # Drop weekend rows. A few weekend-trading tickers (FX crosses) create Sat/Sun
+    # index dates; the upstream ffill then back-fills the other ~180 columns, yielding
+    # a fully ff-filled, entirely-stale weekend row that *looks* complete (100%
+    # coverage) but carries Friday's values. That bogus latest row produced illogical
+    # signals and a card-vs-plot mismatch (the card read it; Nirnay-aligned plots
+    # dropped it). Equities/commodities don't trade weekends, so these rows are pure
+    # artifacts — remove them so the latest row is always a real trading day.
+    df = df[df.index.dayofweek < 5]
+
     # Inject exogenous (non-yfinance) target columns — e.g. Jeera (NCDEX cumin)
     # from a published Google Sheet. Each is reindexed onto the macro (US-
     # calendar) index and forward-filled so the NCDEX series aligns to the model
     # matrix; leading dates with no prior price stay NaN and are dropped by the
     # app's per-target dropna. A fetch failure simply omits the column (the
     # target then can't be selected) rather than breaking the whole dataset.
+    #
+    # DELIBERATE: the macro index is the calendar SPINE. A sheet date the macro
+    # lacks (an NSE-trading day that's a US holiday) is dropped by the reindex —
+    # measured at ~4 days / 6y for the Nifty PE sheet (negligible). The alternative
+    # (union the sheet's dates in) would re-create partial rows — India fresh, US
+    # ff-filled — i.e. the very thing the partial-session gate flags. So the spine
+    # stays; true per-market alignment would need exchange calendars (future work).
     for _name, _series in _fetch_exogenous_targets(df.index).items():
         df[_name] = _series
 
@@ -344,11 +360,12 @@ def _fetch_exogenous_targets(index: pd.Index) -> dict[str, pd.Series]:
     fails (live + cache + committed snapshot all unavailable) is skipped.
     """
     out: dict[str, pd.Series] = {}
-    try:
-        from data.sheets import fetch_jeera_series
-        jeera = fetch_jeera_series(index.min(), index.max())
-        if jeera is not None and not jeera.empty:
-            out["Jeera"] = jeera.reindex(index).ffill()
-    except Exception as e:  # noqa: BLE001
-        log.warning("Exogenous Jeera fetch skipped: %s", e)
+    from data.sheets import SHEET_SOURCES, fetch_sheet_series
+    for _name in SHEET_SOURCES:
+        try:
+            s = fetch_sheet_series(_name, index.min(), index.max())
+            if s is not None and not s.empty:
+                out[_name] = s.reindex(index).ffill()
+        except Exception as e:  # noqa: BLE001
+            log.warning("Exogenous %s fetch skipped: %s", _name, e)
     return out

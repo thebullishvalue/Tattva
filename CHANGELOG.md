@@ -11,7 +11,103 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ## [Unreleased]
 
+### Fixed
+- **Aarambh tab — conviction card vs DDM plot now agree (single source of truth).**
+  The DDM-Filtered Conviction chart drew the *unbounded* `ConvictionScore` line/fills
+  while its own confidence bands and the interpretation card used the *bounded*
+  series (`signal["conviction_score"]` = `ConvictionBounded`) — a three-way mismatch
+  on a `[-100,100]` axis, visible at extreme conviction. The chart line/fills now read
+  `ConvictionBounded`, so the plot's last point equals the card value and matches the
+  bands and axis. (The `get_signal_performance` `±CONVICTION_MODERATE` classifier sits
+  far below the clip bound, so its labels are unchanged.)
+- **Data-freshness off-by-one across timezones.** "Trading days behind" anchored
+  `today` to UTC while the data date is exchange-local, so a UTC-hosted deploy rolling
+  past midnight over-counted a current bar as "1 day behind". Now anchored to the
+  earlier of UTC and machine-local (brackets the realistic tz band, never *overstates*
+  staleness) and `behind`/`t_behind` are clamped `≥ 0` to guard tz-ahead/future-dated
+  bars. Genuine staleness and the exact partial-session gate are unaffected.
+- **Convergence — short-history degeneracy.** When the full Aarambh∩Nirnay overlap is
+  tiny (new sheet target / freshly-listed constituents), the z-score σ collapsed to its
+  `1e-10` floor and the normalized plot flat-lined at zero, misreading as a confident
+  "neutral". A guard now suppresses the plot below 10 shared sessions with a calm
+  "building convergence history" note; the metric cards still show the raw latest reads.
+
+### Tested
+- **Inverse-basket polarity path** (`engines.nirnay.apply_polarity`, `TARGET_POLARITY = -1`)
+  is execution-verified for the first time via `research/test_polarity.py` — full
+  27-column schema: directional-pair swaps, signed-oscillator negation, neutral/count
+  columns untouched, no-op for `+1/0/None`, involution (double-flip = identity), and
+  breadth-% conservation. No live target sets `-1` yet, so the path previously shipped
+  unexercised.
+
+---
+
+## [2.2.0] — 2026-06-19 — *Signal Horizons · Precedent engine · leakage-free walk-forward*
+
+Adds a two-lens forecast-horizon selector, a new **Precedent** analog-matching tab
+(ported from Arthagati and validated across the full 33-target universe), and a
+correctness fix that purges future-leakage from the Aarambh walk-forward. The two
+horizons and the analog hold grid were chosen by computational study, not by hand.
+Backward compatible — no data-format or cache-key breakage (the lens is a new cache
+dimension; old profiles simply recalibrate).
+
 ### Added
+- **"Refresh Data" control — force a live re-pull.** A sidebar button below Reset
+  Analysis that force-fetches the whole universe live, then recomputes (Reset =
+  re-run on cached data, fast; Refresh = re-fetch + re-run, slower). Implemented
+  snapshot-preserving: `Cache.begin_force_refresh()` opens a window in which
+  `Cache.get` misses (→ live fetch) **without deleting the disk snapshot**, so a
+  failed forced refresh (rate-limit / circuit-open) degrades to last-good data, not
+  to an empty app — the safety the naive "clear cache" lacks. Also fixed
+  `all_caches()` to include the constituents cache (was missed). The data-freshness
+  notices now point users to it. UI matches the existing sidebar button idiom (no
+  new visual language).
+- **`research/` suite + `run_tuning.py` orchestrator.** All the session's tuning &
+  validation harnesses (Aarambh/Nirnay/analog sweeps, marker & hero studies — 11
+  scripts) moved out of the repo root into `research/` (path-shimmed so each still
+  runs standalone). A single `python3 research/run_tuning.py` re-runs the whole
+  suite, tees one consolidated timestamped report to `research/reports/`, and prints
+  a **current-vs-validated reference** for every tuned constant. By design it
+  *reports only* — config stays applied-by-hand after review (auto-tuning would
+  invite overfitting / regime-chasing). `research/README.md` documents the suite.
+- **Nifty 50 — PE target (sheet-sourced), under India Indices.** A second
+  non-yfinance target after Jeera: its daily P/E series is pulled from a published
+  Google Sheet (column `NIFTY50_PE`) via the same `data/sheets.py` contract (cache +
+  circuit-breaker + stale fallback) and injected into the model matrix. The sheet
+  fetcher/parser were generalized for an arbitrary value column + auto-detected date
+  column, and `_fetch_exogenous_targets` now loops every registered `SHEET_SOURCES`
+  entry. Registered via a new `SHEET_TARGETS` map (sentinel ticker kept out of the
+  yfinance maps; category "India Indices"; ~20y / 4.9k rows of history). It borrows
+  the **Nifty 50 constituents** as its Nirnay basket via a new `NIRNAY_BASKET_ALIAS`
+  (the PE co-moves with constituent strength, polarity +1), so it runs the FULL
+  pipeline — Aarambh forecast + Nirnay breadth + Convergence + Precedent.
+- **Signal Horizon lenses (2).** A sidebar selector picks how far ahead the engine
+  reads — **Tactical (10d)** for hedging / short-term and **Positional (20d)** for
+  positioning — on daily bars throughout (no weekly resampling, which would starve
+  the walk-forward / conformal / Optuna machinery: ~9y ≈ 470 weekly rows < the
+  500/750 train windows and the 1500-point floor). Each lens sets the forecast
+  horizon (`FWD_HORIZON`), the predictor-momentum window, lens-scaled DDM smoothing,
+  and its **own** calibrated Intelligence profile (keyed per `(target, lens)` so they
+  never clobber). The engine cache keys on the lens, so a Tactical and a Positional
+  read coexist in one session — position on the long lens, hedge on the short one.
+  Both `d` values were finalized from a 33-target study (see *Changed*), not guessed.
+  (`SIGNAL_HORIZONS` in `core/config.py`.)
+- **PRECEDENT tab — historical analog matcher.** A non-parametric base rate ported
+  from Arthagati: covariance-aware **Mahalanobis** matching (Ledoit-Wolf shrinkage) +
+  detrended-trajectory cosine + recency, run over Tattva's own causal state features
+  (`AvgZ`, net internal breadth, target momentum/volatility, rolling Hurst). For the
+  most statistically-similar historical states it reports what the target *actually
+  did next*, at the active lens's hold horizons — an empirical complement to the
+  Aarambh forecast, framed as descriptive (the calibrated edge still lives in the
+  Diagnostics walk-forward IC). Rendered with the ported Obsidian-Quant analog cards,
+  a forward-return base-rate summary, and a state→forward-return backtest.
+  (`analytics/analogs.py`, `ui/tabs/tab_precedent.py`; new `analog-*` CSS reusing the
+  existing `position-card`/`conviction-bar` system.)
+- **Reproducible research harnesses** behind the horizon/engine decisions, all using
+  honest **non-overlapping** (stride = horizon) IC to avoid overlap inflation on
+  smooth multi-day forward returns: `precedent_study.py` (model-vs-analog at multiple
+  horizons on one target), `precedent_universe_sweep.py` (analog potency across all
+  33 targets), `precedent_vs_model_sweep.py` (purged model vs analog by asset class).
 - **Jeera (NCDEX cumin) target** — the first non-yfinance commodity. Its daily
   price is pulled from a published Google Sheet via a new `data/sheets.py`
   fetcher (same cache + circuit-breaker + stale + committed-CSV-snapshot
@@ -50,6 +146,74 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
   model matrix 143 → 180 columns.)
 
 ### Changed
+- **Forecast lenses finalized to two (10d / 20d), data-driven.** A universe-wide
+  walk-forward of the analog engine (33 targets, non-overlapping IC;
+  `precedent_universe_sweep.py`) showed analog edge peaking at **+20d** (mean rank
+  IC 0.162, positive in 28/33 targets) and collapsing beyond it (+40d: 1/33
+  significant; +60d: **0/33**). So the prior three-lens set (Tactical 10d / Swing 20d
+  / Positional 40d) was **cut to two — Tactical 10d and Positional 20d** (20d being
+  the longest horizon the analog actually supports), and the Precedent hold grids
+  were trimmed to only the validated horizons: **Tactical reads 5d + 10d**,
+  **Positional reads 10d + 20d**. 40/60/90d were dropped as non-predictive. (Honest
+  caveat in the code: even 20d's edge is full-sample; recent-half IC has decayed,
+  so the precedent is a *fading* base rate strongest as a 10d confirmer.)
+- **Precedent (analog) engine re-tuned for Tattva — fixes the recent decay.** Since
+  the analog is now the system's primary directional edge (post-purge the Aarambh
+  model IC ≈ 0), its ported-from-Arthagati knobs were swept honestly (33-target
+  non-overlapping OOS IC, full + recent-half; `analog_tuning_study.py` +
+  `analog_confirm.py`). Findings → changes:
+  - **Blend → pure Mahalanobis (1/0/0).** Trajectory cosine added nothing and
+    recency decay *hurt* the recent regime; dropping both **recovered the decayed
+    recent-half IC** (10d −0.010 → +0.079, 20d −0.083 → +0.095) while holding
+    full-sample IC. (Their computation is now skipped when weight = 0 — a live
+    speedup for the Precedent tab + hero.)
+  - **Dropped the `AvgZ` feature** — it degraded the recent regime; `NetBreadth`
+    proved critical (kept). **No new feature helped** — ModelSpread, ExtremeBreadth,
+    SignalBreadth, ConvictionRaw, MomentumLong all tested, none added lift; so
+    "do we need more features?" → no. Similarity-weighting ≈ median (no gain).
+    1d horizon is noise (IC ≈ 0) → surfaced on the Precedent tab as an **honorary
+    reference tile** (`PRECEDENT_HONORARY_HORIZON`), clearly caveated and excluded
+    from calibration so it can't dilute the Val-IC.
+  - **Precedent tab backtest IC is now NON-OVERLAPPING** (stride = horizon) — the
+    old overlapping daily IC was inflated; the chart now reports the honest OOS number.
+  - **Hero reliability gate:** when the analogs are internally split (~coin-flip
+    on direction) the hero now says "Precedent is split — low conviction" instead of
+    claiming agreement/divergence.
+- **Hero card now reads the precedent as a co-equal second opinion.** A 3-model
+  non-overlapping study (`hero_study.py`, 8 targets) found the hero's convergence
+  signal *does* predict (OOS IC +0.158, 55% hit) but the **analog precedent is the
+  stronger directional read** (IC +0.226, 58% hit) and adds genuine independent
+  value — while the plot markers add **nothing** (they ARE the convergence's own
+  inputs; the +markers model was byte-identical to current). So the hero now
+  computes the precedent base rate for the active target/lens and folds it into the
+  interpretation: **agreement** confirms the read, **disagreement** is flagged as a
+  divergence (the analog being the historically stronger predictor). Markers were
+  deliberately NOT added (proven redundant). Cached per (target, lens, length) to
+  avoid recompute on rerun.
+- **Unified-Signal plot markers re-anchored to the data.** The 3-row plot's
+  reference lines + marker-color tiers were hand-set magic numbers that were badly
+  mis-scaled (a marker-distribution study across 8 targets / 17.6k days,
+  `markers_study.py`, found Row-1 ±0.5 fired only **3%** of days while Row-2 ±20 and
+  Row-3 ±2 fired **51% / 41%**). Re-set to each signal's p90 (strong) / p75
+  (moderate) quantiles so "strong/moderate" means the same extremeness on every row,
+  and lifted into named config constants (`UI_CONSENSUS_*`, `UI_CONVRAW_*`,
+  `UI_NIRNAY_AVG_THRESHOLD`): Row 1 ±0.5→**±0.40/±0.25**, Row 2 ±40/±20→**±60/±40**,
+  Row 3 ±2→**±2.5**. (The forward-return check showed the conviction rows are
+  mean-reverting and Nirnay-avg is flat — these are extremeness guides, not
+  actionable thresholds.)
+- **DDM smoothing, the Intelligence hold-grid, and the Val-IC are now lens-aware.**
+  DDM `leak_rate` scales ~(10 / horizon) so a longer lens turns over slower
+  (Tactical 0.10 → Positional 0.05); calibration/durability IC is scored at the
+  lens's own hold horizons rather than a fixed grid.
+- **Aarambh engine defaults re-tuned post-purge.** Once the walk-forward stopped
+  leaking (see *Fixed*), the old leaky-study defaults were re-validated across 33
+  targets × both lenses on honest non-overlapping OOS IC (`aarambh_tuning_study.py`,
+  `confirm_max_sweep.py`): **`MIN_TRAIN_SIZE` 500 → 750** (the one real gain: combined
+  IC −0.004 → +0.019, mostly lifting the 20d lens + India equities) and
+  **`REFIT_INTERVAL` 5 → 10** (equal skill at ~2× lower walk-forward cost — the prior
+  "more refit = more skill" ladder was a pure leakage artifact). `MAX_TRAIN_SIZE`=750,
+  `ENSEMBLE_MODELS`=ols+huber, and PCA=20 were re-confirmed (PCA=30 overfits;
+  elasticnet remains worst). Config rationale comments updated to match.
 - **USD/INR Nirnay basket refined (data-backed).** An 11y daily+weekly
   return-correlation study confirmed the **co-directional dollar/USD-Asia design**
   (polarity +1) and upgraded its members: now 11 names — UUP, **USDU** (added,
@@ -60,6 +224,86 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
   microstructure vs 1 before. An inverse India/EM-equity basket (polarity −1) was
   tested and **rejected** — daily signal broken by US-calendar async (r ≈ +0.05),
   redundancy 0.48, and its weekly signal is mostly Nifty beta, not INR.
+
+### Fixed
+- **Nirnay basket carried forward onto the target's calendar (cross-calendar fix).**
+  The constituents often trade a different calendar than the target (US-listed
+  miners vs an Indian target; or a Monday-morning IST run where global EOD bars
+  haven't posted). Previously the convergence/breadth signal & plots **truncated to
+  the slowest constituent** (e.g. Gold's plots stopped at Jun 18 while Gold itself
+  was fresh to Jun 22), so an India-based user couldn't see the latest session. The
+  basket is now reindexed onto the target's trading calendar with forward-fill — a
+  closed market's last close *is* its current value — so the SIGNAL (CrossValidator),
+  cards and plots all reach the target's latest session. Honesty preserved, not
+  truncation: a "Breadth carried forward" notice (Convergence tab) states the
+  basket's true last-native date and that those trailing bars are provisional, and
+  the partial-session gate still flags the row-level staleness. (Verified: Gold
+  basket Jun 18 → carried to Jun 22.)
+- **Edge-case audit resolutions (verified by execution).** A rigorous pass found and
+  fixed several real defects (and refuted a few suspected ones — constant-series
+  div-by-zero, single-feature crash, and the MIN_DATA_POINTS pre-warmup failure were
+  all proven *non*-issues):
+  - **Partial-session gate.** The latest row can be a partial session (e.g. Indian
+    markets posted Jun 19 but US hasn't on a publish lag) that ff-fill makes *look*
+    complete — measured at **27% native-fresh** on such a day. The forecast, breadth
+    and analog then rest on stale predictors. A calendar-agnostic check (native
+    coverage = fraction of columns that changed vs the prior row) now flags it
+    prominently ("Partial latest session — only N% of inputs posted… provisional");
+    full sessions run ~97% so the 0.6 floor separates cleanly.
+  - **`conv_norm_params` now target-keyed** — was cached once and reused across
+    target switches, silently mis-normalizing every later target's Row-1 plot + card.
+  - **Missing-target guard** — a selected target whose source fetch fails no longer
+    KeyErrors the run; it fails clean with a message.
+  - **Content-aware precedent cache** (keyed on latest price, not just row count) so
+    an intraday refresh recomputes. **Non-positive-target guard** (returns-based engine
+    needs a strictly positive series — defensive). **`render_info_box` color** is now
+    applied (was a dead param). Documented two deliberate limits: the macro calendar
+    is the spine (rare cross-calendar sheet dates dropped, ~4/6y), and `busday_count`
+    has no holiday table (the partial-session gate is the calendar-agnostic primary).
+- **Convergence cards & plot are now a single source of truth.** The "Aarambh
+  Conviction" card read `aarambh_ts[...].iloc[-1]` (raw last row) while the plot Row 2
+  read the Nirnay-aligned series — two sources, one label, so they could disagree.
+  `render_convergence_tab` now aligns Aarambh+Nirnay **once, up front**, and both the
+  metric cards and the 3-row plot read those exact arrays → a card can never drift
+  from the point it mirrors (Aarambh-only targets fall back gracefully and still
+  render their cards).
+- **Weekend artifact rows removed from the dataset.** A few weekend-trading tickers
+  (FX) created Sat/Sun index dates that the upstream `combined.ffill()` back-filled
+  across the other ~180 columns — a fully ff-filled, entirely-stale weekend row that
+  *looked* complete but carried Friday's values (which drove the illogical signals
+  and exposed the card/plot split above). `fetch_commodity_dataset` now drops
+  weekend rows so the latest row is always a real trading day.
+- **Per-source, trading-day-aware data-freshness notices.** Staleness is now counted
+  in TRADING days (weekends ignored — Friday data on a weekend reads *current*, not
+  stale), tiered and design-consistent: a calm info note when 1–2 trading days
+  behind, a prominent warning ("Latest data unavailable") once genuinely stale. Plus
+  a **per-target** check: the active target can lag the macro universe (sheet behind,
+  or its market shut on a holiday) with the gap forward-filled — detected exactly for
+  sheet targets (from the source) and via ff-filled-tail detection for the rest — so
+  the user is told when *that target's* latest signal is stale even if the dataset
+  isn't. Every notice states the as-of date; signals reflect that date, not today.
+- **Wired previously-dead `NIRNAY_*` config.** The nine Nirnay constants were
+  referenced nowhere — the engine ran on hardcoded literals in `app.py` /
+  `engines/nirnay.py`, and `NIRNAY_REGIME_SENSITIVITY = 1.0` actively *disagreed*
+  with the `1.5` the engine really used. Now `core/config.py` is the single source
+  of truth: `app.py` reads the constants and passes them into `run_full_analysis`
+  (which gained `num_vars`/`oversold`/`overbought` params). Corrected the
+  sensitivity drift (1.0 → 1.5, behaviour-preserving) and removed the no-op `±7`
+  `NIRNAY_STRONG_BUY/SELL` (no code path). Output is byte-identical; the knobs are
+  now honest and tunable.
+- **Walk-forward label-overlap leakage purged (Aarambh).** Each forward-return label
+  spans `(t, t+h]`, so training rows within `h` of the prediction point had targets
+  overlapping the forecast window — future leakage that inflated out-of-sample skill,
+  worse at longer horizons. `FairValueEngine.fit(…, purge=h)` now drops the last `h`
+  training rows per walk-forward chunk (and keeps the ensemble-weighting validation
+  slice behind the gap); the live app passes `purge=FWD_HORIZON`. Impact is large and
+  measured: on Jeera the honest non-overlapping model IC at +90d fell from **+0.86 →
+  +0.04** (it was almost entirely leakage), and short-horizon IC settled near the
+  documented ~0.2 Val IC. The displayed **Val IC / walk-forward IC are now
+  leakage-free** (lower but honest). A purged universe sweep (`precedent_vs_model_
+  sweep.py`) confirmed the de-leaked model's directional edge is modest at 10/20d
+  (overall IC +0.03 / −0.05), with the leakage-free **analog leading in 27–29 of 33
+  targets**. `purge=0` (default) preserves legacy behaviour for non-forward modes.
 
 ---
 

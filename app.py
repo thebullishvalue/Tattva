@@ -91,7 +91,7 @@ from ui.tabs.tab_precedent import render_precedent_tab
 # ── Data ─────────────────────────────────────────────────────────────────────
 from data.fetcher import fetch_constituent_ohlcv, fetch_macro_live, fetch_commodity_dataset
 from data.constituents import get_commodity_basket
-from data.calendars import trading_days_behind
+from data.calendars import trading_days_behind, is_session, session_mask
 
 # ── Engines ──────────────────────────────────────────────────────────────────
 from engines.aarambh import FairValueEngine
@@ -105,6 +105,12 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
 from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT
+from core.config import GLOBAL_MACRO_MAP, MACRO_SYMBOLS_YF, INDEX_TARGETS_MAP
+
+# Friendly column name → ticker, for resolving each predictor/target column to its
+# exchange (holiday-aware data freshness + target-session spine filtering). Targets
+# (incl. sheet/NCDEX sentinels) are merged last so they win any name collision.
+_COLUMN_TICKERS = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF, **INDEX_TARGETS_MAP, **ALL_TARGETS}
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -834,27 +840,36 @@ def main():
                         f"{'s' if behind > 1 else ''} behind — today's bar may not be published yet).",
                     )
 
-                # Session completeness: is the LATEST row a broadly-fresh session, or
-                # a PARTIAL one the ff-fill makes look complete? Native freshness =
-                # fraction of numeric columns that changed vs the prior row (continuous
-                # prices move every session; ff-filled columns don't). This is
-                # calendar-agnostic (no holiday table needed) and catches the case
-                # where e.g. Indian markets posted but US hasn't yet.
+                # Session completeness (Phase 2 — exchange-aware): of the inputs whose
+                # market was OPEN on the latest date, how many actually posted a fresh
+                # value vs are still forward-filled? Columns whose exchange was CLOSED
+                # that day (e.g. US on Thanksgiving) are legitimately carried forward
+                # and EXCLUDED — only genuinely-lagging open markets count, so a global
+                # holiday no longer trips a false "partial session". Native freshness =
+                # changed vs the prior row (continuous prices move every session). With
+                # the calendar lib absent, is_session is "is a weekday" → every column
+                # counts → identical to the prior calendar-agnostic gate.
                 num = df.select_dtypes(include=[np.number])
                 if len(num) >= 2:
+                    cols = list(num.columns)
                     last_r = num.iloc[-1].to_numpy(dtype=np.float64)
                     prev_r = num.iloc[-2].to_numpy(dtype=np.float64)
-                    ok = np.isfinite(last_r) & np.isfinite(prev_r)
-                    fresh_frac = float(((last_r != prev_r) & ok).sum() / max(int(ok.sum()), 1))
-                    if fresh_frac < SESSION_FRESH_FLOOR:
-                        render_warning_box(
-                            title="Partial latest session",
-                            content=(f"Only {fresh_frac:.0%} of inputs have posted for {ds} — the rest "
-                                     f"(e.g. US markets, on a timezone/publish lag) are forward-filled from the "
-                                     f"prior session, so the macro predictors and constituent breadth behind the "
-                                     f"latest signal are stale. Treat it as provisional; use Refresh Data in the "
-                                     f"sidebar once those markets close."),
-                        )
+                    finite = np.isfinite(last_r) & np.isfinite(prev_r)
+                    should_post = np.array(
+                        [is_session(_COLUMN_TICKERS.get(c), latest_date.date()) for c in cols]
+                    )
+                    judged = finite & should_post
+                    denom = int(judged.sum())
+                    if denom >= 3:   # need a few open markets before judging completeness
+                        fresh_frac = float(((last_r != prev_r) & judged).sum() / denom)
+                        if fresh_frac < SESSION_FRESH_FLOOR:
+                            render_warning_box(
+                                title="Partial latest session",
+                                content=(f"Only {fresh_frac:.0%} of the markets open on {ds} have posted — the "
+                                         f"rest are forward-filled from the prior session, so the macro predictors "
+                                         f"and constituent breadth behind the latest signal are stale. Treat it as "
+                                         f"provisional; use Refresh Data in the sidebar once those markets post."),
+                            )
 
                 # Per-source freshness for the ACTIVE target specifically — it can
                 # lag the macro universe (sheet behind, or its market shut on a
@@ -909,6 +924,18 @@ def main():
         data[col] = pd.to_numeric(data[col], errors="coerce")
     data[[active_target] + active_features] = data[[active_target] + active_features].ffill().bfill()
     data = data.dropna(subset=[active_target] + active_features).reset_index(drop=True)
+    # Phase 3 — target-exchange session spine. The fetched matrix is a Mon–Fri spine
+    # (FX trades every weekday), so a row on the TARGET's own market holiday carries
+    # the target's last close forward: a fake no-change bar with stale predictors.
+    # Restrict to the target exchange's real sessions so the walk-forward trains on
+    # genuine bars and the forward-return horizon counts true target trading days.
+    # No-op for 24×5 FX and under the weekday fallback (lib absent), so those paths
+    # are byte-identical to before; the `.any()` guard refuses to blank the frame if
+    # the ticker→calendar mapping ever misfires.
+    if active_date != "None" and active_date in data.columns and len(data):
+        _smask = session_mask(ALL_TARGETS.get(active_target), data[active_date])
+        if _smask.any():
+            data = data[_smask].reset_index(drop=True)
     if len(data) < MIN_DATA_POINTS:
         st.error(f"Need {MIN_DATA_POINTS}+ data points for walk-forward analysis.")
         return

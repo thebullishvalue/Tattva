@@ -9,7 +9,7 @@ CORE — Merged from both Aarambh (correl.py) and Nirnay (nirnay_core.py) monoli
 
 # Single source of truth for the app version — ui/theme.py imports these (do not
 # redefine elsewhere; past drift between config and theme is why this is centralized).
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 PRODUCT_NAME = "Tattva"
 COMPANY = "@thebullishvalue"
 
@@ -297,12 +297,13 @@ GLOBAL_MACRO_MAP = {
     "UK Gilts (Inflation-Linked)":       "INXG.L",
     "UK Corporate Bonds":                "SLXX.L",
     # ── Developed Markets Sovereign (Asia-Pacific) ─────────────────────────
-    "Japan Government Bonds (Broad)":    "JGBL.L",
+    # (No reliable free JGB ETF on yfinance — JGBL.L returned ~13% coverage and was
+    # silently dropped by the ≥20% filter, so it's omitted rather than feigned.)
     "Australia Government Bonds":        "VGB.AX",
     "Canada Broad Aggregate Bond":       "XBB.TO",
     # ── Asia-Pacific Equity Benchmarks ─────────────────────────────────────
     "Nikkei 225":                        "^N225",
-    "TOPIX":                             "^TPX",
+    # (^TPX / TOPIX returns no data on yfinance — dropped; ^N225 covers Japan equity.)
     "KOSPI":                             "^KS11",
     "KOSDAQ":                            "^KQ11",
     # ── India Fixed Income ─────────────────────────────────────────────────
@@ -651,9 +652,17 @@ TARGET_EXCLUDED_PREDICTORS = {
     # DBA (Agriculture ETF) holds cotton + softs/grains → it would let the
     # regression "explain" cotton with a basket containing cotton.
     "Cotton": ["Agriculture (DBA)"],
-    # The other INR crosses are quasi-replicas of USD/INR (all priced in INR).
-    # Dollar Index is kept — it is a legitimate driver, not a replica.
-    "USD/INR": ["EUR/INR", "GBP/INR", "JPY/INR"],
+    # DBB (DB Base Metals) is ~⅓ copper → a copper-bearing basket the regression
+    # could explain copper with. (The broad commodity indices DBC/GSG hold only a
+    # few % copper — legitimate macro drivers, so they are kept; cf. Brent, which
+    # excludes them because crude DOMINATES those indices.)
+    "Copper": ["Base Metals (DBB)"],
+    # EVERY INR-leg cross is a replica of USD/INR: INR/USD is its exact reciprocal,
+    # and X/INR = X/USD × USD/INR all carry the target's own currency leg. Excluding
+    # the whole set (computed so future additions are covered automatically) keeps
+    # the fair-value residual honest. Dollar Index is kept — a driver, not a replica.
+    "USD/INR": [n for n in MACRO_SYMBOLS_YF
+                if (n.endswith("/INR") or n == "INR/USD") and n != "USD/INR"],
     # WTI is ~the same barrel as Brent; the broad commodity indices + energy
     # sector ETF are crude-dominated → all would let crude "explain" itself.
     "Brent Crude": ["Crude Oil", "Broad Commodity Index (DBC)",

@@ -1,7 +1,7 @@
 # LICENSE
 
 **TATTVA (तत्त्व) — Unified Convergence Engine**
-**Version 2.2.0**
+**Version 2.3.0**
 
 ---
 
@@ -89,6 +89,7 @@ to terminate this licence at any time for breach of terms.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 2.3.0 | 2026-06-22 | Per-exchange trading calendars (holiday-aware freshness, partial-session gate, target-session model spine; optional `exchange_calendars` with Mon–Fri fallback), global macro universe (EU/Asia/AU indices + bonds), predictor→target leakage fixes (INR crosses, Copper/DBB), tuning-orchestrator preflight data check |
 | 2.2.0 | 2026-06-19 | Signal Horizon lenses (Tactical 10d / Positional 20d, data-chosen), Precedent analog-matching tab (Mahalanobis, ported from Arthagati), leakage-free purged Aarambh walk-forward, Jeera (NCDEX) target + data-backed baskets |
 | 2.1.0 | 2026-06-17 | Multi-asset universe (India/US equity indices + FX alongside commodities), `ols+huber` ensemble default, uncapped constituents, macro-fetch backfill, dead-code/version cleanup |
 | 2.0.0 | 2026-06-11 | **Tattva** — Commodity pivot (Gold/Silver/Copper), predictive forecast engine, causal PCA, walk-forward validation; renamed from Nishkarsh |
@@ -109,7 +110,7 @@ For licensing inquiries or permissions, contact:
 
 ---
 
-**Last Updated:** 2026-06-19
+**Last Updated:** 2026-06-22
 
 **By using this software, you acknowledge that you have read, understood, and
 agree to be bound by these terms and conditions.**

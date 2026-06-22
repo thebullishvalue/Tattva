@@ -11,40 +11,88 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ## [Unreleased]
 
+---
+
+## [2.3.0] — 2026-06-22 — *Per-exchange calendars · global macro universe · leakage & freshness hardening*
+
+Takes data freshness from heuristic to calendar-exact: holiday-aware **per-exchange
+trading calendars** now drive the "days-behind" notices, the partial-session gate, and
+the per-target model spine. Adds a **preflight data check** to the tuning orchestrator,
+and resolves a round of **leakage / data-integrity issues** surfaced by auditing a newly
+expanded *global* macro universe (European/Asian/AU indices + bonds). Backward
+compatible — `exchange_calendars` is an OPTIONAL dependency that degrades to the prior
+Mon–Fri behaviour when absent, so a lib-less deploy is byte-identical to 2.2.0.
+
 ### Added
 - **Per-exchange trading calendars — holiday-aware data freshness (Phase 1).** New
-  `data/calendars.py` resolves each target ticker to its exchange (`.NS/.BO`→XBOM,
-  `=F`→CMES, `=X`→FX weekday, `^`→XNYS/XBOM, sheet/NCDEX sentinels→XBOM, bare→XNYS)
-  and counts "trading days behind" on that exchange's actual session calendar via the
-  `exchange_calendars` library. This retires the ~1-day over-count the old Mon–Fri
-  `busday_count` produced across market holidays (Diwali, Thanksgiving, Juneteenth,
-  15 Aug…) — the freshness notices no longer flash a premature "behind" across a
-  closed session. Wired into both the dataset and per-target freshness notices in
-  `app.py`. The partial-session gate remains the calendar-agnostic *primary* signal.
+  `data/calendars.py` resolves each target ticker to its exchange and counts "trading
+  days behind" on that exchange's actual session calendar via the `exchange_calendars`
+  library. This retires the ~1-day over-count the old Mon–Fri `busday_count` produced
+  across market holidays (Diwali, Thanksgiving, Juneteenth, 15 Aug…) — the freshness
+  notices no longer flash a premature "behind" across a closed session. Wired into both
+  the dataset and per-target freshness notices in `app.py`.
   - **Graceful, optional dependency.** The import is guarded: if `exchange_calendars`
     is absent (or a calendar can't be built / a date is out of bounds), every count
-    degrades to the *exact* legacy `busday_count` — the app never breaks and is never
-    worse than before, only better when the lib is present. Added to `requirements.txt`.
-  - Verified end-to-end by `research/test_calendars.py`: all 35 targets resolve to a
-    known exchange; holiday-aware counts are strictly lower than the naive mask across
-    real US/India holidays and equal on plain weeks; FX equals the weekday mask; the
-    forced no-library path reproduces `busday_count` byte-for-byte.
+    degrades to the *exact* legacy `busday_count` — never broken, never worse than
+    before, only better when the lib is present. Added to `requirements.txt`.
+- **Exchange-aware partial-session gate (Phase 2).** The "partial latest session"
+  warning previously counted *every* numeric column equally, so a one-region holiday
+  (e.g. US Thanksgiving) made the whole row look half-stale and could trip a false
+  warning. It now (via `is_session`) judges only the columns whose exchange was actually
+  OPEN on the latest date — a closed market's forward-filled value is legitimate, not
+  stale. Degrades to the prior all-column weekday check without the lib.
+- **Target-exchange session spine (Phase 3).** The fetched matrix is a Mon–Fri spine
+  (FX trades every weekday), so each target carried a forward-filled fake "no-change"
+  bar on its own market holidays (~1% CME, ~4% US equity, ~6% NSE; 0% FX). The
+  per-target model frame is now restricted to the target exchange's real sessions
+  (`session_mask`), so the walk-forward trains on genuine bars and the forward-return
+  horizon counts true target trading days. Nirnay/Convergence already reindex onto the
+  target's dates, so they stay aligned. No-op for FX and under the weekday fallback, and
+  a `.any()` guard refuses to blank the frame if a ticker→calendar mapping misfires.
+  - *Note:* the `research/` tuning scripts still build on the weekday spine; the 1–6%
+    row delta is immaterial to the row-count hyperparameters (`MIN_TRAIN_SIZE` 750 ≈ 3y
+    of sessions either way), so the validated configs carry over.
+- **Tuning preflight — data sufficiency check (`research/run_tuning.py`).** Every study
+  shares the same 9-year `fetch_commodity_dataset` pull, so a thin/rate-limited fetch
+  would silently corrupt a multi-hour run. The orchestrator now warms that fetch ONCE
+  and asserts it's deep/broad enough (`≥ MIN_DATA_POINTS` rows, `≥ 50` numeric columns,
+  `≥ 60%` of targets present) before any tier runs — aborting with a clear rate-limit /
+  "Refresh Data" hint instead. Flags: `--skip-preflight`, `--preflight-warn`.
 
 ### Fixed
+- **Predictor→target leakage from the expanded universe.** Two targets could be
+  "explained by themselves", contaminating the Aarambh fair-value residual the whole
+  system trades:
+  - `USD/INR` now excludes **every INR-leg cross** — `INR/USD` (its exact reciprocal,
+    near-perfect collinearity) plus `AUD/NZD/CAD/CHF/CNY/SGD/HKD-INR` (each =
+    `X/USD × USD/INR`). Computed from `MACRO_SYMBOLS_YF` so future INR crosses are
+    covered automatically. (Previously only `EUR/GBP/JPY-INR`.)
+  - `Copper` had **no** exclusion list (the only commodity target without one); now
+    excludes `Base Metals (DBB)` (~⅓ copper). DBC/GSG are kept — only a few % copper.
+- **Dead tickers silently dropped by the ≥20% coverage filter** removed from
+  `GLOBAL_MACRO_MAP`: `^TPX` (TOPIX — yfinance returns nothing; `^N225` covers Japan)
+  and `JGBL.L` (Japan Gov Bonds — ~13% coverage). They produced no column, just
+  confusion; omitted with a note rather than feigned.
+- **Exchange resolution wrong for the new global universe** (`data/calendars.py`). The
+  `^`-index heuristic assumed US-or-India, so European/Asian indices resolved to the
+  *Indian* calendar (`^GDAXI, ^FCHI, ^STOXX50E, ^FTSE, ^IBEX, ^AEX, ^SSMI, ^N225,
+  ^KS11, ^KQ11`) and China/Australia to *US* (`000001.SS, 399001.SZ, VGB.AX`) — skewing
+  the Phase-2 gate for those columns. Added a suffix→MIC table (`.DE→XETR, .SS→XSHG,
+  .AX→XASX, .HK→XHKG, .T→XTKS, …`) and a foreign-index map; **unknown `^` symbols /
+  unmapped suffixes now return the safe weekday fallback instead of a guessed calendar**,
+  so a future foreign add can never again be silently mis-dated. Verified against real
+  DE/JP/CN/UK closures in `research/test_calendars.py`.
 - **Aarambh tab — conviction card vs DDM plot now agree (single source of truth).**
   The DDM-Filtered Conviction chart drew the *unbounded* `ConvictionScore` line/fills
-  while its own confidence bands and the interpretation card used the *bounded*
-  series (`signal["conviction_score"]` = `ConvictionBounded`) — a three-way mismatch
-  on a `[-100,100]` axis, visible at extreme conviction. The chart line/fills now read
-  `ConvictionBounded`, so the plot's last point equals the card value and matches the
-  bands and axis. (The `get_signal_performance` `±CONVICTION_MODERATE` classifier sits
-  far below the clip bound, so its labels are unchanged.)
+  while its own confidence bands and the interpretation card used the *bounded* series
+  (`ConvictionBounded`) — a three-way mismatch on a `[-100,100]` axis, visible at
+  extreme conviction. The line/fills now read `ConvictionBounded`, so the plot's last
+  point equals the card value and matches the bands and axis.
 - **Data-freshness off-by-one across timezones.** "Trading days behind" anchored
   `today` to UTC while the data date is exchange-local, so a UTC-hosted deploy rolling
   past midnight over-counted a current bar as "1 day behind". Now anchored to the
-  earlier of UTC and machine-local (brackets the realistic tz band, never *overstates*
-  staleness) and `behind`/`t_behind` are clamped `≥ 0` to guard tz-ahead/future-dated
-  bars. Genuine staleness and the exact partial-session gate are unaffected.
+  earlier of UTC and machine-local and clamped `≥ 0` (this is additionally subsumed by
+  the per-exchange calendar count above).
 - **Convergence — short-history degeneracy.** When the full Aarambh∩Nirnay overlap is
   tiny (new sheet target / freshly-listed constituents), the z-score σ collapsed to its
   `1e-10` floor and the normalized plot flat-lined at zero, misreading as a confident
@@ -53,11 +101,14 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ### Tested
 - **Inverse-basket polarity path** (`engines.nirnay.apply_polarity`, `TARGET_POLARITY = -1`)
-  is execution-verified for the first time via `research/test_polarity.py` — full
-  27-column schema: directional-pair swaps, signed-oscillator negation, neutral/count
-  columns untouched, no-op for `+1/0/None`, involution (double-flip = identity), and
-  breadth-% conservation. No live target sets `-1` yet, so the path previously shipped
-  unexercised.
+  execution-verified for the first time via `research/test_polarity.py` — full 27-column
+  schema: pair swaps, sign negation, neutral-column preservation, no-op for `+1/0/None`,
+  involution (double-flip = identity), breadth-% conservation. No live target sets `-1`
+  yet, so the path previously shipped unexercised.
+- **Per-exchange calendars** covered by `research/test_calendars.py`: ticker→exchange
+  resolution (incl. the global universe + safe fallback), holiday-aware counts vs the
+  naive mask, `is_session`/`session_mask` against real foreign closures, and the forced
+  no-library path reproducing `busday_count` byte-for-byte.
 
 ---
 

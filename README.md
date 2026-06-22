@@ -1,6 +1,6 @@
 # TATTVA — तत्त्व
 
-**Unified Convergence Engine** · v2.2.0 · *@thebullishvalue*
+**Unified Convergence Engine** · v2.3.0 · *@thebullishvalue*
 
 > *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality": the underlying
 > truth distilled from the convergence of evidence.
@@ -107,6 +107,12 @@ Every external call is wrapped in a two-tier cache (memory + disk), a per-servic
 circuit breaker, retry-with-backoff, and a stale-snapshot fallback — so the UI keeps
 working through transient yfinance outages.
 
+**Freshness is calendar-exact.** `data/calendars.py` resolves each ticker to its home
+exchange and uses real trading calendars (`exchange_calendars`) to count "days behind",
+judge the partial-session gate (only markets that were *open* are expected to post), and
+build each target's model spine from its true sessions. The dependency is **optional** —
+absent, every check degrades to a plain Mon–Fri mask, identical to prior behaviour.
+
 ---
 
 ## Configuration
@@ -136,7 +142,8 @@ app.py                  Streamlit entrypoint + 5-phase orchestration
 core/                   config (macro universe, baskets, thresholds, Signal
                         Horizons), logging
 data/                   yfinance fetchers, index catalogue + constituent
-                        resolution (universe), two-tier cache, circuit breakers
+                        resolution (universe), two-tier cache, circuit breakers,
+                        per-exchange trading calendars (calendars.py)
 engines/                aarambh (forecast, purged walk-forward), nirnay (breadth)
 analytics/              OU, Hurst/DFA, conformal, HMM/GARCH/CUSUM, breaks,
                         analogs (Mahalanobis precedent matcher)

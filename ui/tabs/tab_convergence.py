@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from ui.theme import chart_layout, style_axes
-from ui.components import render_metric_card, render_section_header, section_gap
+from ui.components import render_metric_card, render_section_header, section_gap, render_info_box
 from convergence.normalization import (
     align_aarambh_nirnay,
     compute_norm_params,
@@ -92,6 +92,53 @@ def render_convergence_tab(ts_filtered=None):
         st.info("No convergence data available. Run the analysis first.")
         return
 
+    # ── SINGLE SOURCE OF TRUTH ───────────────────────────────────────────────
+    # Align Aarambh + Nirnay ONCE, here, before anything renders. The metric cards
+    # AND the 3-row plot below both read these exact arrays, so a card can never
+    # disagree with the plot point it mirrors (the old bug: card read the raw last
+    # ts row, the plot read the Nirnay-aligned last row → drift on calendar gaps).
+    if ts_filtered is not None and not ts_filtered.empty:
+        if "Date" in ts_filtered.columns:
+            filtered_dates = set(pd.to_datetime(ts_filtered["Date"]).dt.date.astype(str))
+        else:
+            filtered_dates = set(ts_filtered.index.astype(str))
+    else:
+        filtered_dates = None
+
+    aligned_dates, aligned_aarambh_raw, aligned_nirnay_raw = align_aarambh_nirnay(
+        aarambh_ts, nirnay_daily, filter_dates=filtered_dates,
+    )
+    has_overlap = bool(aligned_dates)
+
+    norm_a = norm_n = norm_avg = np.array([], dtype=np.float64)
+    aligned_conv_raw: list = []
+    if has_overlap:
+        # Key the cached μ/σ by the ACTIVE TARGET — otherwise the first target's
+        # normalization params get reused for every later target after a switch,
+        # silently mis-normalizing their Row-1 plot + TATTVA card.
+        _np_key = f"conv_norm_params::{st.session_state.get('active_target', '')}"
+        if _np_key not in st.session_state:
+            _, full_a, full_n = align_aarambh_nirnay(aarambh_ts, nirnay_daily)
+            st.session_state[_np_key] = compute_norm_params(full_a, full_n)
+        params = st.session_state[_np_key]
+        arr_a = np.array(aligned_aarambh_raw, dtype=np.float64)
+        arr_n = np.array(aligned_nirnay_raw, dtype=np.float64)
+        norm_a = zscore_clip(arr_a, params["mu_a"], params["sigma_a"])
+        norm_n = zscore_clip(arr_n, params["mu_n"], params["sigma_n"])
+        norm_avg = (norm_a + norm_n) / 2.0
+        at_dedup = aarambh_ts[~aarambh_ts.index.duplicated(keep="last")] if aarambh_ts is not None else None
+        for d in aligned_dates:
+            d_str = str(d.date()) if hasattr(d, "date") else str(d)
+            val = None
+            if at_dedup is not None:
+                if d in at_dedup.index:
+                    val = float(at_dedup.loc[d]["ConvictionRaw"])
+                elif "Date" in at_dedup.columns:
+                    mask = at_dedup["Date"].astype(str).str.contains(d_str)
+                    if mask.any():
+                        val = float(at_dedup.loc[mask, "ConvictionRaw"].iloc[0])
+            aligned_conv_raw.append(val)
+
     # System identity background
     st.markdown(
         '<div class="tab-bg convergence"></div>',
@@ -121,9 +168,14 @@ def render_convergence_tab(ts_filtered=None):
             render_metric_card("TATTVA CONVICTION", "N/A", "Not computed", "neutral")
 
     with col2:
-        # Mirrors Row 2 of the Unified Signal plot: raw Aarambh ConvictionRaw.
-        if aarambh_ts is not None and "ConvictionRaw" in aarambh_ts.columns:
-            a_conv = aarambh_ts["ConvictionRaw"].iloc[-1]
+        # Mirrors Row 2 of the plot — reads the SAME aligned ConvictionRaw last point
+        # (falls back to the raw last ts row only when there is no Nirnay overlap).
+        a_conv = None
+        if has_overlap and aligned_conv_raw and aligned_conv_raw[-1] is not None:
+            a_conv = aligned_conv_raw[-1]
+        elif aarambh_ts is not None and "ConvictionRaw" in aarambh_ts.columns:
+            a_conv = float(aarambh_ts["ConvictionRaw"].iloc[-1])
+        if a_conv is not None:
             render_metric_card("AARAMBH CONVICTION", f"{a_conv:+.2f}", "Market breadth: oversold vs overbought",
                                "success" if a_conv < -UI_CONVICTION_MODERATE else "danger" if a_conv > UI_CONVICTION_MODERATE else "neutral",
                                tooltip=TOOLTIPS["aarambh_conviction"])
@@ -131,14 +183,9 @@ def render_convergence_tab(ts_filtered=None):
             render_metric_card("AARAMBH CONVICTION", "N/A", "", "neutral")
 
     with col3:
-        # Mirrors Row 3 of the Unified Signal plot: raw Nirnay Avg Signal.
-        if nirnay_daily is not None and not nirnay_daily.empty:
-            df_n = nirnay_daily[~nirnay_daily.index.duplicated(keep="last")]
-            n_avg = 0.0
-            for candidate in ("avg_unified_osc", "Avg_Signal", "avg_signal"):
-                if candidate in df_n.columns:
-                    n_avg = df_n[candidate].iloc[-1]
-                    break
+        # Mirrors Row 3 of the plot — reads the SAME aligned Nirnay Avg Signal point.
+        if has_overlap and len(aligned_nirnay_raw):
+            n_avg = float(aligned_nirnay_raw[-1])
             render_metric_card("NIRNAY AVG SIGNAL", f"{n_avg:.2f}", "Bottom-up constituent momentum",
                                "success" if n_avg < UI_NIRNAY_BULLISH else "danger" if n_avg > UI_NIRNAY_BEARISH else "neutral",
                                tooltip=TOOLTIPS["nirnay_avg"])
@@ -163,56 +210,32 @@ def render_convergence_tab(ts_filtered=None):
         accent="cyan",
     )
 
-    # Build filtered date set
-    if ts_filtered is not None and not ts_filtered.empty:
-        if "Date" in ts_filtered.columns:
-            filtered_dates = set(pd.to_datetime(ts_filtered["Date"]).dt.date.astype(str))
-        else:
-            filtered_dates = set(ts_filtered.index.astype(str))
-    else:
-        filtered_dates = None
-
-    # Align Aarambh + Nirnay on overlapping dates (respecting the user's filter)
-    aligned_dates, aligned_aarambh_raw, aligned_nirnay_raw = align_aarambh_nirnay(
-        aarambh_ts, nirnay_daily, filter_dates=filtered_dates,
-    )
-
-    if not aligned_dates:
-        st.warning("No overlapping dates between Aarambh and Nirnay data sources.")
+    # Aligned series already computed once at the top (single source of truth with
+    # the metric cards). Aarambh-only targets (no Nirnay basket) have no overlap →
+    # the cards above still rendered; the plot just can't be drawn.
+    if not has_overlap:
+        st.warning("No overlapping dates between Aarambh and Nirnay data sources "
+                   "(this target runs Aarambh-only — see the cards above).")
         return
 
-    # ── Normalization params: computed once from the FULL dataset, cached, ──
-    #    then applied to the filtered slice for plotting.
-    if "conv_norm_params" not in st.session_state:
-        _, full_a, full_n = align_aarambh_nirnay(aarambh_ts, nirnay_daily)
-        st.session_state["conv_norm_params"] = compute_norm_params(full_a, full_n)
-
-    params = st.session_state["conv_norm_params"]
-
-    arr_a = np.array(aligned_aarambh_raw, dtype=np.float64)
-    arr_n = np.array(aligned_nirnay_raw, dtype=np.float64)
-    norm_a = zscore_clip(arr_a, params["mu_a"], params["sigma_a"])
-    norm_n = zscore_clip(arr_n, params["mu_n"], params["sigma_n"])
-    norm_avg = (norm_a + norm_n) / 2.0
-
-    # Pre-compute conviction raw for row 2
-    aligned_conv_raw = []
-    if aarambh_ts is not None:
-        at_dedup = aarambh_ts[~aarambh_ts.index.duplicated(keep="last")]
-        for d in aligned_dates:
-            d_str = str(d.date()) if hasattr(d, "date") else str(d)
-            if d in at_dedup.index:
-                aligned_conv_raw.append(float(at_dedup.loc[d]["ConvictionRaw"]))
-            elif "Date" in at_dedup.columns:
-                mask = at_dedup["Date"].astype(str).str.contains(d_str)
-                if mask.any():
-                    aligned_conv_raw.append(float(at_dedup.loc[mask, "ConvictionRaw"].iloc[0]))
-                else:
-                    aligned_conv_raw.append(None)
-            else:
-                aligned_conv_raw.append(None)
-    else:
-        aligned_conv_raw = [None] * len(aligned_dates)
+    # Honesty for the carry-forward: when the basket's native data ends before the
+    # latest plotted session (its markets closed / haven't posted), say so — those
+    # trailing breadth points are carried forward, so they're provisional.
+    _nn_last = st.session_state.get("nirnay_native_last")
+    _plot_last = aligned_dates[-1] if aligned_dates else None
+    try:
+        if _nn_last is not None and _plot_last is not None \
+                and pd.Timestamp(_nn_last).normalize() < pd.Timestamp(_plot_last).normalize():
+            render_info_box(
+                "Breadth carried forward",
+                f"The constituent basket's data ends {pd.Timestamp(_nn_last):%d %b %Y}; later sessions "
+                f"(through {pd.Timestamp(_plot_last):%d %b %Y}) carry its last reads forward — the "
+                f"constituents' markets are closed or haven't posted yet, so bottom-up breadth on those "
+                f"bars is provisional.",
+                color="amber",
+            )
+    except Exception:
+        pass
 
     # Compute ranges
     unified_y = _dynamic_range(norm_avg)

@@ -19,8 +19,12 @@ Design constraints (system context):
   • Conservative — unknown tickers fall back to the Mon–Fri weekmask, never to an
     arbitrary calendar that could mis-state freshness.
 
-Phase 1 scope is freshness counting only (app.py). Making the dataset spine and the
-partial-session gate exchange-aware are deliberately deferred (see CHANGELOG / #5).
+Exposes three primitives, all with the same weekday fallback:
+  • ``trading_days_behind`` — holiday-aware "trading days behind" (freshness notices).
+  • ``is_session``          — was a given ticker's exchange open on a given day? (the
+                              exchange-aware partial-session gate, app.py Phase 2).
+  • ``session_mask``        — vectorised session membership over a date index (the
+                              target-exchange model spine, app.py Phase 3).
 """
 from __future__ import annotations
 
@@ -108,6 +112,50 @@ def _get_calendar(mic: str):
         log.debug("calendar %s unavailable (%s); using weekday fallback", mic, e)
     _CAL_CACHE[mic] = cal
     return cal
+
+
+def is_session(ticker: str | None, day) -> bool:
+    """True if ``ticker``'s exchange held a trading session on ``day``.
+
+    Holiday-aware when ``exchange_calendars`` is installed; otherwise (and for FX /
+    unknown tickers / out-of-bounds dates) falls back to "is a weekday" — which makes
+    every caller degrade to the legacy Mon–Fri behaviour with the library absent.
+    Never raises.
+    """
+    ts = pd.Timestamp(day).normalize()
+    cal = _get_calendar(resolve_exchange(ticker))
+    if cal is None:
+        return bool(ts.dayofweek < 5)
+    try:
+        if ts < cal.first_session or ts > cal.last_session:
+            return bool(ts.dayofweek < 5)
+        return bool(cal.is_session(ts))
+    except Exception:
+        return bool(ts.dayofweek < 5)
+
+
+def session_mask(ticker: str | None, dates) -> np.ndarray:
+    """Boolean mask over ``dates`` — True where ``ticker``'s exchange had a session.
+
+    Vectorised companion to :func:`is_session` for filtering a whole index in one call
+    (Phase 3 spine restriction). Same weekday fallback semantics: with no library the
+    mask is simply "is a weekday", so a weekday-only frame is returned unchanged.
+    """
+    dts = pd.DatetimeIndex(pd.to_datetime(dates)).normalize()
+    if len(dts) == 0:
+        return np.zeros(0, dtype=bool)
+    weekday = np.asarray(dts.dayofweek < 5)
+    cal = _get_calendar(resolve_exchange(ticker))
+    if cal is None:
+        return weekday
+    try:
+        lo, hi = dts.min(), dts.max()
+        if lo < cal.first_session or hi > cal.last_session:
+            return weekday
+        sess = cal.sessions_in_range(lo, hi)
+        return np.asarray(dts.isin(sess))
+    except Exception:
+        return weekday
 
 
 def _busday_behind(latest: date, today: date) -> int:

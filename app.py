@@ -1133,6 +1133,24 @@ def main():
                 if _polarity < 0:
                     nirnay_daily = apply_polarity(nirnay_daily, _polarity)
                     console.item("Polarity", f"{_polarity} (basket inverted to target)")
+
+                # Carry the basket forward onto the TARGET's trading calendar. The
+                # constituents (often global / US-listed) trade on a different calendar
+                # than the target — on a Monday-morning IST run, or when the target's
+                # market is open but the basket's is on holiday, the basket's last close
+                # IS its current value. Reindexing it onto the target's dates (ff-fill)
+                # lets the SIGNAL, cards and plots all reach the target's latest session
+                # instead of truncating to the slowest constituent. We record the
+                # basket's true last-native date so the UI can flag how much is carried
+                # over (the partial-session notice covers the row-level staleness).
+                st.session_state["nirnay_native_last"] = pd.Timestamp(nirnay_daily.index.max())
+                if active_date in data.columns:
+                    _cal = pd.DatetimeIndex(sorted(pd.to_datetime(
+                        data[active_date], errors="coerce").dropna().dt.normalize().unique()))
+                    _nd = nirnay_daily.copy()
+                    _nd.index = pd.to_datetime(_nd.index).normalize()
+                    _nd = _nd[~_nd.index.duplicated(keep="last")].sort_index()
+                    nirnay_daily = _nd.reindex(_cal, method="ffill").dropna(how="all")
                 console.item("Trading Days", len(nirnay_daily))
                 if len(nirnay_daily) > 0:
                     last = nirnay_daily.iloc[-1]

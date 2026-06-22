@@ -23,6 +23,16 @@ Backward compatible — no data-format or cache-key breakage (the lens is a new 
 dimension; old profiles simply recalibrate).
 
 ### Added
+- **"Refresh Data" control — force a live re-pull.** A sidebar button below Reset
+  Analysis that force-fetches the whole universe live, then recomputes (Reset =
+  re-run on cached data, fast; Refresh = re-fetch + re-run, slower). Implemented
+  snapshot-preserving: `Cache.begin_force_refresh()` opens a window in which
+  `Cache.get` misses (→ live fetch) **without deleting the disk snapshot**, so a
+  failed forced refresh (rate-limit / circuit-open) degrades to last-good data, not
+  to an empty app — the safety the naive "clear cache" lacks. Also fixed
+  `all_caches()` to include the constituents cache (was missed). The data-freshness
+  notices now point users to it. UI matches the existing sidebar button idiom (no
+  new visual language).
 - **`research/` suite + `run_tuning.py` orchestrator.** All the session's tuning &
   validation harnesses (Aarambh/Nirnay/analog sweeps, marker & hero studies — 11
   scripts) moved out of the repo root into `research/` (path-shimmed so each still
@@ -187,6 +197,19 @@ dimension; old profiles simply recalibrate).
   redundancy 0.48, and its weekly signal is mostly Nifty beta, not INR.
 
 ### Fixed
+- **Nirnay basket carried forward onto the target's calendar (cross-calendar fix).**
+  The constituents often trade a different calendar than the target (US-listed
+  miners vs an Indian target; or a Monday-morning IST run where global EOD bars
+  haven't posted). Previously the convergence/breadth signal & plots **truncated to
+  the slowest constituent** (e.g. Gold's plots stopped at Jun 18 while Gold itself
+  was fresh to Jun 22), so an India-based user couldn't see the latest session. The
+  basket is now reindexed onto the target's trading calendar with forward-fill — a
+  closed market's last close *is* its current value — so the SIGNAL (CrossValidator),
+  cards and plots all reach the target's latest session. Honesty preserved, not
+  truncation: a "Breadth carried forward" notice (Convergence tab) states the
+  basket's true last-native date and that those trailing bars are provisional, and
+  the partial-session gate still flags the row-level staleness. (Verified: Gold
+  basket Jun 18 → carried to Jun 22.)
 - **Edge-case audit resolutions (verified by execution).** A rigorous pass found and
   fixed several real defects (and refuted a few suspected ones — constant-series
   div-by-zero, single-feature crash, and the MIN_DATA_POINTS pre-warmup failure were

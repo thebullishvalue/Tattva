@@ -146,7 +146,6 @@ class FairValueEngine:
         cumulative_residual: bool = False,
         forward_signal: bool = False,
         n_pca_components: int | None = None,
-        purge: int = 0,
     ) -> "FairValueEngine":
         """Run the full walk-forward pipeline.
 
@@ -161,14 +160,6 @@ class FairValueEngine:
             return maps to the engine's bullish/oversold pole). Takes precedence
             over ``cumulative_residual``. R²/R²-vs-RW still measure forecast
             skill (prediction vs realized forward return).
-
-        purge: in forward_signal mode, the label horizon h (FWD_HORIZON). Each
-            label y[i] spans (i, i+h], so training samples within h of the
-            prediction point have targets that overlap the forecast window —
-            future leakage that inflates OOS skill, worse at longer horizons.
-            Setting ``purge=h`` drops the last h training rows per walk-forward
-            chunk (a purge gap), so the model is trained only on labels whose
-            windows close before the forecast point. Default 0 = legacy behaviour.
         """
         start_time = time.time()
 
@@ -178,7 +169,6 @@ class FairValueEngine:
         self.cumulative_residual = cumulative_residual and not forward_signal
         self.forward_signal = forward_signal
         self.n_pca_components = n_pca_components
-        self.purge = max(0, int(purge))
 
         # Detect structural breaks
         self.break_dates = detect_structural_breaks(y)
@@ -399,16 +389,8 @@ class FairValueEngine:
         else:
             start_idx = max_lookback
 
-        # Purge gap: drop the last `purge` training rows whose forward-return
-        # labels overlap the forecast window [t_start, …]. Guard against starving
-        # the window (keep ≥50 rows); otherwise fall back to no purge for the chunk.
-        purge = getattr(self, "purge", 0)
-        train_end = t_start - purge
-        if train_end - start_idx < 50:
-            train_end = t_start
-
         models, scaler, valid_cols = self._fit_ensemble(
-            X[start_idx:train_end], y[start_idx:train_end], t_start, global_weights,
+            X[start_idx:t_start], y[start_idx:t_start], t_start, global_weights,
             n_pca=getattr(self, "n_pca_components", None),
         )
 
@@ -416,10 +398,9 @@ class FairValueEngine:
         if len(X_chunk) == 0:
             return t_start, t_end, np.array([]), np.array([]), models, valid_cols
 
-        # Validation slice for ensemble weighting must also stay behind the gap.
-        val_size = min(30, max(5, int((train_end - start_idx) * 0.2)))
-        X_val = X[train_end - val_size : train_end] if train_end > val_size else None
-        y_val = y[train_end - val_size : train_end] if train_end > val_size else None
+        val_size = min(30, max(5, int((t_start - start_idx) * 0.2)))
+        X_val = X[t_start - val_size : t_start] if t_start > val_size else None
+        y_val = y[t_start - val_size : t_start] if t_start > val_size else None
 
         preds_matrix, weights = self._predict_ensemble(
             X_chunk, models, scaler, valid_cols, t_start, X_val, y_val

@@ -245,9 +245,6 @@ def run_full_analysis(
     roc_len: int,
     regime_sensitivity: float,
     base_weight: float,
-    num_vars: int = 5,
-    oversold: float = -5.0,
-    overbought: float = 5.0,
     macro_columns: list[str] | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     """Run the complete Nirnay pipeline on a single stock DataFrame.
@@ -268,7 +265,7 @@ def run_full_analysis(
     # pandas' "highly fragmented DataFrame" PerformanceWarning on every stock.
     msf, micro, momentum, flow = calculate_msf(df, length, roc_len)
     mmr, drivers, mmr_quality = calculate_mmr(
-        df, length, num_vars=num_vars, macro_columns=macro_columns
+        df, length, num_vars=5, macro_columns=macro_columns
     )
     df = pd.concat(
         [
@@ -324,8 +321,8 @@ def run_full_analysis(
 
     agreement_arr = agreement.to_numpy() if hasattr(agreement, "to_numpy") else np.asarray(agreement)
     strong_agreement = agreement_arr > 0.3
-    buy_signal = strong_agreement & (unified_osc < oversold)
-    sell_signal = strong_agreement & (unified_osc > overbought)
+    buy_signal = strong_agreement & (unified_osc < -5)
+    sell_signal = strong_agreement & (unified_osc > 5)
 
     # Divergence detection (shift(1) ↔ prepend NaN, drop last)
     prev_unified_osc = np.concatenate(([np.nan], unified_osc[:-1]))
@@ -335,13 +332,13 @@ def run_full_analysis(
         price_falling = close_arr < prev_close
         osc_falling = unified_osc < prev_unified_osc
         price_rising = close_arr > prev_close
-    bullish_div = osc_rising & price_falling & (unified_osc < oversold)
-    bearish_div = osc_falling & price_rising & (unified_osc > overbought)
+    bullish_div = osc_rising & price_falling & (unified_osc < -5)
+    bearish_div = osc_falling & price_rising & (unified_osc > 5)
 
     condition = np.where(
-        unified_osc < oversold,
+        unified_osc < -5,
         "Oversold",
-        np.where(unified_osc > overbought, "Overbought", "Neutral"),
+        np.where(unified_osc > 5, "Overbought", "Neutral"),
     )
 
     df = pd.concat(

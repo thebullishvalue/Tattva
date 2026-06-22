@@ -26,7 +26,7 @@ import pandas as pd
 from analytics.hurst import hurst_dfa
 
 # ── Blend weights (ported verbatim from Arthagati) ───────────────────────────
-# Blend re-tuned for Tattva (2026-06-20, analog_tuning_study.py + analog_confirm.py:
+# Blend re-tuned for Tattva (2026-06-20, research/analog_tuning_study.py + research/analog_confirm.py:
 # 13 targets, non-overlapping OOS IC full + recent-half). The ported Arthagati blend
 # (.55/.35/.10) was actively HURTING: trajectory adds ~nothing and recency degrades
 # the recent regime. PURE Mahalanobis state-matching is the clear winner — it
@@ -115,7 +115,7 @@ def _rolling_hurst(price: np.ndarray, window: int = 120, step: int = 5) -> np.nd
 def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFrame, list[str]]:
     """Assemble the per-day analog state matrix from Tattva's engine.ts_data.
 
-    Feature set re-tuned for Tattva (analog_tuning_study.py): AvgZ was DROPPED —
+    Feature set re-tuned for Tattva (research/analog_tuning_study.py): AvgZ was DROPPED —
     it degraded the recent regime (10d recent IC −0.010 → +0.034 without it) while
     NetBreadth proved critical and the candidate extras (ModelSpread, ExtremeBreadth,
     SignalBreadth, ConvictionRaw, MomentumLong) added nothing. Kept (availability-

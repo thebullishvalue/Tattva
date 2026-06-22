@@ -50,32 +50,60 @@ CALENDAR_BACKEND = "exchange_calendars" if _HAVE_EC else "weekday"
 # (spot FX is ~24×5). These use the Mon–Fri weekmask, which is correct for them.
 _FX = "FX"
 
-# Explicit MICs for index / sentinel tickers that carry no resolvable suffix.
-# Indian equities/indices → XBOM (BSE): the lib has no XNSE, but BSE and NSE observe
-# the same holiday schedule, so it is the correct proxy. Jeera (NCDEX) and the
-# Nifty-50-PE sheet are Indian-session instruments → XBOM as well.
+# Yahoo ticker SUFFIX → exchange MIC (home market of a stock/ETF listed there).
+# A MIC the library doesn't ship degrades to the weekday mask automatically
+# (_get_calendar → None), so it is safe to map liberally. India (NSE/BSE) and China
+# (SSE/SZSE) each share ONE national holiday calendar, so .BO→XBOM and .SZ→XSHG are
+# accurate proxies (the lib lacks XNSE / XSHE).
+_SUFFIX_MIC = {
+    ".NS": "XBOM", ".BO": "XBOM",                 # India
+    ".L":  "XLON",                                # London
+    ".TO": "XTSE",                                # Toronto
+    ".AX": "XASX",                                # Australia
+    ".SS": "XSHG", ".SZ": "XSHG",                 # China (Shanghai / Shenzhen)
+    ".HK": "XHKG",                                # Hong Kong
+    ".T":  "XTKS",                                # Tokyo
+    ".KS": "XKRX", ".KQ": "XKRX",                 # Korea (KOSPI / KOSDAQ)
+    ".TW": "XTAI",                                # Taiwan
+    ".SI": "XSES",                                # Singapore
+    ".DE": "XETR", ".F": "XFRA",                  # Germany (Xetra / Frankfurt)
+    ".PA": "XPAR", ".AS": "XAMS", ".BR": "XBRU",  # Euronext
+    ".MC": "XMAD",                                # Madrid
+    ".MI": "XMIL",                                # Milan
+    ".SW": "XSWX",                                # SIX Swiss
+}
+
+# Index symbols (^...) carry no suffix, so they need an explicit home-MIC map.
+# US indices → XNYS; Indian indices are recognised by prefix below; NEW foreign
+# indices must be listed here, else they fall through to the SAFE weekday mask
+# (never silently assigned a wrong calendar, which was the pre-global-universe bug).
 _US_INDEX_SYMBOLS = {"^GSPC", "^DJI", "^NDX", "^IXIC", "^RUT", "^VIX", "^OEX"}
+_FOREIGN_INDEX_MIC = {
+    "^GDAXI": "XETR", "^FCHI": "XPAR", "^STOXX50E": "XPAR", "^FTSE": "XLON",
+    "^IBEX": "XMAD", "^AEX": "XAMS", "^SSMI": "XSWX",
+    "^N225": "XTKS", "^TPX": "XTKS", "^KS11": "XKRX", "^KQ11": "XKRX",
+    "^HSI": "XHKG", "^TWII": "XTAI", "^STI": "XSES", "^AXJO": "XASX",
+}
+# Indian index prefixes (Nifty/BSE families) → XBOM proxy. Covers ^NSEI, ^NSEBANK,
+# ^NSEMDCP50, ^CNX*, ^NSMIDCP, ^CRSLDX, etc.
+_INDIA_INDEX_PREFIXES = ("^NSE", "^CNX", "^NSM", "^CRSLDX", "^BSE")
 
 
 def resolve_exchange(ticker: str | None) -> str:
     """Map a yfinance ticker (or Tattva sentinel) to an exchange code.
 
-    Returns an ``exchange_calendars`` MIC ("XBOM", "XNYS", "CMES", "XLON", "XTSE"),
-    the ``_FX`` weekday sentinel, or "" when unknown (→ weekday fallback). Pure string
-    logic; never raises.
+    Returns an ``exchange_calendars`` MIC (e.g. "XBOM", "XNYS", "CMES", "XETR",
+    "XTKS"), the ``_FX`` weekday sentinel, or "" when unknown (→ weekday fallback).
+    Unknown ``^`` indices and unmapped suffixes return "" rather than a guessed
+    calendar, so a freshly-added foreign ticker is never assigned the wrong holidays.
+    Pure string logic; never raises.
     """
     if not ticker:
         return ""
     t = ticker.strip()
     tu = t.upper()
 
-    # Suffix-encoded exchanges.
-    if tu.endswith(".NS") or tu.endswith(".BO"):
-        return "XBOM"           # India (NSE/BSE share a holiday calendar)
-    if tu.endswith(".L"):
-        return "XLON"           # London
-    if tu.endswith(".TO"):
-        return "XTSE"           # Toronto
+    # FX / futures first (these suffixes override any home-market notion).
     if tu.endswith("=X"):
         return _FX              # spot FX — 24×5, weekday mask
     if tu.endswith("=F"):
@@ -85,11 +113,23 @@ def resolve_exchange(ticker: str | None) -> str:
     if tu.endswith(".SHEET") or tu.endswith(".NCDEX"):
         return "XBOM"
 
-    # Index symbols (^...): a few US ones, otherwise Indian in this universe.
-    if t.startswith("^"):
-        return "XNYS" if tu in _US_INDEX_SYMBOLS else "XBOM"
+    # Suffix-encoded home exchanges (.NS, .L, .DE, .SS, .HK, …).
+    for suf, mic in _SUFFIX_MIC.items():
+        if tu.endswith(suf):
+            return mic
 
-    # Bare symbol → US equity.
+    # Index symbols (^...): US explicit, foreign explicit, Indian by prefix, else
+    # the safe weekday fallback (never a guessed calendar).
+    if t.startswith("^"):
+        if tu in _US_INDEX_SYMBOLS:
+            return "XNYS"
+        if tu in _FOREIGN_INDEX_MIC:
+            return _FOREIGN_INDEX_MIC[tu]
+        if tu.startswith(_INDIA_INDEX_PREFIXES):
+            return "XBOM"
+        return ""
+
+    # Bare symbol → US equity (NYSE/NASDAQ share a holiday calendar).
     if t and t.replace(".", "").replace("-", "").isalnum():
         return "XNYS"
 

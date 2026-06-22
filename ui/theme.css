@@ -1482,7 +1482,6 @@ footer {
     background: var(--glass);
     backdrop-filter: blur(8px);
     border: 1px solid var(--border);
-    border-left: 2px solid var(--cyan);
     border-radius: var(--r-md);
     padding: var(--sp-5) var(--sp-6);
     margin: var(--sp-6) 0;

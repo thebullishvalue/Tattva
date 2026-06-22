@@ -86,7 +86,6 @@ from ui.tabs.tab_aarambh import render_aarambh_tab
 from ui.tabs.tab_nirnay import render_nirnay_tab
 from ui.tabs.tab_diagnostics import render_diagnostics_tab
 from ui.tabs.tab_data import render_data_tab
-from ui.tabs.tab_precedent import render_precedent_tab
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 from data.fetcher import fetch_constituent_ohlcv, fetch_macro_live, fetch_commodity_dataset
@@ -103,7 +102,7 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -208,11 +207,7 @@ def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
     profile     = st.session_state.get("intelligence_active_profile")  # dict | None
     wf          = st.session_state.get("wf_results")                   # list[dict] | None
     div_events  = st.session_state.get("divergence_events")            # DataFrame | None
-    # Forecast horizon of the active Signal Horizon lens \u2014 for interpretation copy.
-    FWD_HORIZON = SIGNAL_HORIZONS.get(
-        st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
-        SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
-    )["horizon"]
+    FWD_HORIZON = 10  # Aarambh forecast horizon (trading days) \u2014 for interpretation copy
 
     # \u2500\u2500 Headline: calibrated model \u2192 normalized consensus \u2192 Aarambh-only \u2500\u2500
     if calib is not None:
@@ -260,28 +255,6 @@ def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
         lead = (f"{source} reads **{direction}** ({sig}, {conv:+.2f}) over the next "
                 f"~{FWD_HORIZON} trading days.")
     parts = [lead, trust]
-
-    # \u2500\u2500 Precedent base rate \u2014 co-equal second opinion (the stronger directional
-    # read per hero_study.py). Agreement raises confidence; disagreement is flagged.
-    prec = st.session_state.get("precedent_summary")
-    if prec and prec.get("n"):
-        hero_sign = 1 if direction == "bullish" else -1 if direction == "bearish" else 0
-        p_dir, p_med, p_pos, p_h = prec["dir"], prec["median"], prec["positive_pct"], prec["horizon"]
-        p_word = "bullish" if p_dir > 0 else "bearish" if p_dir < 0 else "flat"
-        stub = f"similar past states returned {p_med:+.1f}% ({p_pos:.0f}% positive) at +{p_h}d"
-        # Reliability gate: when the analogs themselves are split (~coin-flip), don't
-        # claim agreement/divergence \u2014 say it's low-conviction.
-        if abs(p_pos - 50) < 15:
-            parts.append(f"Precedent is **split** ({stub}) \u2014 low conviction either way.")
-        elif hero_sign == 0:
-            parts.append(f"Precedent base rate leans **{p_word}** \u2014 {stub}.")
-        elif p_dir == hero_sign:
-            parts.append(f"Precedent **agrees** \u2014 {stub}, confirming the {direction} read.")
-        else:
-            parts.append(f"\u26a0 Precedent **diverges** ({p_word}) \u2014 {stub}; the analog base rate "
-                         f"(historically the stronger directional read) disagrees, so treat the "
-                         f"{direction} signal with caution.")
-
     if a_norm is not None and n_norm is not None:
         aligned = (a_norm < 0) == (n_norm < 0)
         parts.append(
@@ -565,33 +538,6 @@ def main():
                 unsafe_allow_html=True,
             )
 
-        # ── Signal Horizon (forecast lens) ──────────────────────────────────
-        # Pick how far ahead the engine reads. Daily bars throughout — this only
-        # lengthens the forward-return forecast horizon (and matching predictor-
-        # momentum window), so the long lens is for POSITIONING (where to be
-        # long/short) and the short lens for tactical hedging / quick trades. Both
-        # are cached per-config, so switching back and forth is instant after the
-        # first compute and the two reads coexist.
-        _horizon_names = list(SIGNAL_HORIZONS.keys())
-        st.session_state.setdefault("signal_horizon", DEFAULT_SIGNAL_HORIZON)
-        if st.session_state["signal_horizon"] not in _horizon_names:
-            st.session_state["signal_horizon"] = DEFAULT_SIGNAL_HORIZON
-        st.markdown('<div class="sidebar-title" style="margin-top:0.5rem;">Signal Horizon</div>', unsafe_allow_html=True)
-        _sel_horizon = st.selectbox(
-            "Signal Horizon", _horizon_names,
-            label_visibility="collapsed", key="signal_horizon",
-            help="How far ahead Aarambh forecasts. Daily data throughout — the long "
-                 "lens reads positioning (buy/sell interest), the short lens reads "
-                 "tactical hedging / short-term trades. Switching re-runs the engine "
-                 "(cached per lens, so flipping back is instant).",
-        )
-        st.markdown(
-            f'<div style="font-family:var(--data);font-size:0.58rem;'
-            f'color:var(--ink-tertiary);text-transform:uppercase;letter-spacing:0.08em;'
-            f'margin:-0.2rem 0 0.3rem 0;">{SIGNAL_HORIZONS[_sel_horizon]["blurb"]}</div>',
-            unsafe_allow_html=True,
-        )
-
         df = None
         has_data = "data" in st.session_state and "run_analysis" in st.session_state
 
@@ -737,35 +683,11 @@ def main():
                 st.session_state.pop("nishkarsh_result", None)
                 st.rerun()
 
-            # Force a live re-pull of the whole universe, then recompute — for when
-            # the data is stale/partial (the freshness notices point here). Reset =
-            # re-run on cached data (fast); Refresh = re-fetch live + re-run (slower).
-            # Snapshot-preserving: if the live pull fails (rate-limit / circuit open),
-            # the cache's stale fallback keeps the app working on last-good data.
-            if st.button("Refresh Data", type="secondary", use_container_width=True):
-                from data.cache import begin_force_refresh
-                begin_force_refresh()   # next fetches bypass TTL; disk snapshot kept
-                with st.spinner("Re-fetching live market data — full universe, ~30–60s…"):
-                    _rend = pd.Timestamp.today()
-                    _rdf, _rerr = fetch_commodity_dataset(_rend - pd.Timedelta(days=365 * 9), _rend)
-                if _rdf is not None:
-                    st.session_state["data"] = _rdf   # keep run_analysis → stay in results
-                for _k in ("engine", "engine_cache", "aarambh_engine", "aarambh_fit_key",
-                           "wf_results", "results_cache", "nishkarsh_result",
-                           "precedent_summary", "_prec_key", "conv_norm_params"):
-                    st.session_state.pop(_k, None)
-                for _k in [k for k in list(st.session_state) if str(k).startswith("conv_norm_params")]:
-                    st.session_state.pop(_k, None)
-                st.rerun()
-            st.caption("Force-fetch the latest market data, then recompute · slower than Reset.")
-
         # ── Model Passport (Sanket-style) ──────────────────────────────
         # Surfaces the active calibrated profile (Intelligence Mode). Each
-        # (target, forecast lens) pair keys its own profile — the lens tag must
-        # match the one used at calibration time (see _intel_index below).
+        # commodity target keys its own per-universe profile.
         _current_universe = st.session_state.get("active_target") or st.session_state.get("selected_commodity", "Gold")
-        _current_index = (f"{st.session_state.get('nishkarsh_index', _current_universe)}"
-                          f" · {st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}")
+        _current_index = st.session_state.get("nishkarsh_index", _current_universe)
         _render_model_passport_sidebar(_current_universe, _current_index)
 
         st.markdown('<hr style="margin: 1rem 0 0.75rem 0; opacity: 0.05;">', unsafe_allow_html=True)
@@ -787,17 +709,7 @@ def main():
     active_features = [f for f in active_features if f not in _excluded_feats]
     active_date = st.session_state.get("active_date_col", date_col)
 
-    # ─── Data freshness notice ──────────────────────────────────────────────
-    # Measured in TRADING days behind (weekends ignored) so Friday data read on a
-    # Sunday is "current", not stale. Tiered, design-consistent: a calm info note
-    # when 1–2 trading days behind (today's bar often isn't published yet), and a
-    # prominent warning once genuinely stale (source hasn't updated). The signal
-    # always reflects the as-of date shown, never "today".
-    # NOTE: np.busday_count uses a plain Mon–Fri mask with NO market-holiday table,
-    # so it can over-count "behind" by ~1 across a holiday → an occasional early
-    # stale notice. The PRIMARY, calendar-agnostic freshness signal is the
-    # partial-session check below (native coverage), which needs no holiday calendar;
-    # exact per-exchange calendars are future work.
+    # ─── Data staleness warning ────────────────────────────────────────────
     if active_date != "None" and active_date in df.columns:
         try:
             dates = pd.to_datetime(df[active_date], errors="coerce", dayfirst=True).dropna()
@@ -805,93 +717,17 @@ def main():
                 latest_date = dates.max().to_pydatetime()
                 if latest_date.tzinfo is not None:
                     latest_date = latest_date.replace(tzinfo=None)
-                today = datetime.now(timezone.utc).replace(tzinfo=None).date()
-                # trading days strictly after the data date, up to & including today
-                behind = int(np.busday_count(
-                    (latest_date.date() + timedelta(days=1)), (today + timedelta(days=1))))
-                ds = latest_date.strftime("%d %b %Y")
-                if behind >= STALENESS_DAYS:
+                now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                data_age = (now_utc - latest_date).days
+                if data_age > STALENESS_DAYS:
                     render_warning_box(
-                        title="Latest data unavailable",
-                        content=(f"Newest data is {ds} — {behind} trading days behind. The price source "
-                                 f"(yfinance) hasn't published more recent data, so every signal below "
-                                 f"reflects {ds}, not today. Use Refresh Data in the sidebar to pull the "
-                                 f"latest once the source updates."),
+                        title="Stale Data",
+                        content=f"Last data point is from {latest_date.strftime('%d %b %Y')} ({data_age} days ago). Analysis may be outdated."
                     )
-                elif behind >= 1:
-                    render_info_box(
-                        "Data freshness",
-                        f"Signals are as of {ds} ({behind} trading day"
-                        f"{'s' if behind > 1 else ''} behind — today's bar may not be published yet).",
-                    )
-
-                # Session completeness: is the LATEST row a broadly-fresh session, or
-                # a PARTIAL one the ff-fill makes look complete? Native freshness =
-                # fraction of numeric columns that changed vs the prior row (continuous
-                # prices move every session; ff-filled columns don't). This is
-                # calendar-agnostic (no holiday table needed) and catches the case
-                # where e.g. Indian markets posted but US hasn't yet.
-                num = df.select_dtypes(include=[np.number])
-                if len(num) >= 2:
-                    last_r = num.iloc[-1].to_numpy(dtype=np.float64)
-                    prev_r = num.iloc[-2].to_numpy(dtype=np.float64)
-                    ok = np.isfinite(last_r) & np.isfinite(prev_r)
-                    fresh_frac = float(((last_r != prev_r) & ok).sum() / max(int(ok.sum()), 1))
-                    if fresh_frac < SESSION_FRESH_FLOOR:
-                        render_warning_box(
-                            title="Partial latest session",
-                            content=(f"Only {fresh_frac:.0%} of inputs have posted for {ds} — the rest "
-                                     f"(e.g. US markets, on a timezone/publish lag) are forward-filled from the "
-                                     f"prior session, so the macro predictors and constituent breadth behind the "
-                                     f"latest signal are stale. Treat it as provisional; use Refresh Data in the "
-                                     f"sidebar once those markets close."),
-                        )
-
-                # Per-source freshness for the ACTIVE target specifically — it can
-                # lag the macro universe (sheet behind, or its market shut on a
-                # holiday) with the gap forward-filled. Find its true last update:
-                #   • sheet target  → exact, from the source series.
-                #   • yfinance/other → detect the ff-filled tail (continuous prices
-                #     don't repeat, so a run of identical closes = forward-filled days).
-                try:
-                    from data.sheets import SHEET_SOURCES, fetch_sheet_series
-                    t_last = None
-                    if active_target in SHEET_SOURCES:
-                        s = fetch_sheet_series(active_target)
-                        if s is not None and len(s):
-                            t_last = pd.Timestamp(s.index.max()).to_pydatetime()
-                    elif active_target in df.columns and active_date in df.columns:
-                        tv = pd.to_numeric(df[active_target], errors="coerce").to_numpy()
-                        tdates = pd.to_datetime(df[active_date], errors="coerce", dayfirst=True)
-                        j = len(tv) - 1
-                        while j > 0 and np.isfinite(tv[j]) and tv[j] == tv[j - 1]:
-                            j -= 1
-                        if j < len(tv) - 1 and pd.notna(tdates.iloc[j]):
-                            t_last = pd.Timestamp(tdates.iloc[j]).to_pydatetime()
-                    if t_last is not None:
-                        t_behind = int(np.busday_count(
-                            (t_last.date() + timedelta(days=1)), (today + timedelta(days=1))))
-                        if t_behind >= 1:
-                            render_warning_box(
-                                title=f"{active_target} data is lagging",
-                                content=(f"This target last updated {t_last.strftime('%d %b %Y')} "
-                                         f"({t_behind} trading day{'s' if t_behind > 1 else ''} behind the macro "
-                                         f"universe) — more recent rows are forward-filled from that value, so "
-                                         f"its latest signal may be stale."),
-                            )
-                except Exception:
-                    pass
         except Exception:
             pass
 
     # ─── Clean & Fit Engine ────────────────────────────────────────────────
-    # Guard: a selected target whose column failed to fetch (e.g. a sheet/source
-    # outage on a later run, while it stays selected) is silently dropped by the
-    # column filter below and would KeyError at the per-column coercion. Fail clean.
-    if active_target not in df.columns:
-        st.error(f"'{active_target}' data is currently unavailable (its source fetch failed). "
-                 f"Pick another target, or re-run once the source is back online.")
-        return
     cols = [active_target] + active_features + ([active_date] if active_date != "None" and active_date in df.columns else [])
     data = df[[c for c in cols if c in df.columns]].copy()
     if active_date != "None" and active_date in data.columns:
@@ -908,14 +744,6 @@ def main():
     if not active_features:
         st.error("No valid features found after data cleaning.")
         return
-    # Returns-based forecasting takes log() of the target → it must be strictly
-    # positive. Every shipped target is (prices/levels/ratios), but a future target
-    # (a spread, a net position, a yield differential) could go ≤0; fail clean
-    # rather than silently producing all-NaN forecasts.
-    if (pd.to_numeric(data[active_target], errors="coerce") <= 0).any():
-        st.error(f"'{active_target}' has non-positive values — the returns-based engine needs a "
-                 f"strictly positive series (it forecasts log-returns).")
-        return
 
     # ── Predictive representation: FORECAST the forward return from lagged
     # macro MOMENTUM (ex-ante), rather than explaining the same-day return.
@@ -928,15 +756,8 @@ def main():
     # The engine runs in forward_signal mode: conviction is driven by the
     # prediction (expected forward return), and R²/R²-vs-RW measure real
     # out-of-sample forecast skill.
-    # Forecast lens chosen in the sidebar (Signal Horizon). Daily bars throughout;
-    # this only sets how far ahead we forecast and the matching predictor-momentum
-    # window. Default preset reproduces the historical 10d/20d behaviour exactly.
-    _horizon_cfg = SIGNAL_HORIZONS.get(
-        st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
-        SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
-    )
-    FWD_HORIZON = _horizon_cfg["horizon"]   # forecast horizon (trading days)
-    FWD_MOM_K = _horizon_cfg["momentum"]    # trailing momentum window for predictors
+    FWD_HORIZON = 10   # forecast horizon (trading days)
+    FWD_MOM_K = 20     # trailing momentum window for predictors
     _lvl = data[[active_target] + active_features].astype(float)
     _ret = np.log(_lvl.where(_lvl > 0)).diff().replace([np.inf, -np.inf], np.nan)
     _mom = _ret[active_features].rolling(FWD_MOM_K, min_periods=FWD_MOM_K).sum()
@@ -1053,7 +874,7 @@ def main():
             progress_bar(progress_container, 40, "Aarambh Engine Reused", "Cached walk-forward fit")
         else:
             engine = FairValueEngine()
-            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, purge=FWD_HORIZON, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
+            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
             # Carry the raw price LEVEL on the engine output (returns-space
             # modeling otherwise leaves only return-scale columns). Used by the
             # Aarambh tab for price display and by the Intelligence tuner.
@@ -1104,10 +925,8 @@ def main():
                     has_macro = len([c for c in macro_cols_list if c in merged.columns])
 
                     result_df, _ = run_full_analysis(
-                        merged, length=NIRNAY_MSF_LENGTH, roc_len=NIRNAY_ROC_LEN,
-                        regime_sensitivity=NIRNAY_REGIME_SENSITIVITY, base_weight=NIRNAY_BASE_WEIGHT,
-                        num_vars=NIRNAY_MMR_NUM_VARS,
-                        oversold=NIRNAY_OVERSOLD, overbought=NIRNAY_OVERBOUGHT,
+                        merged, length=20, roc_len=14,
+                        regime_sensitivity=1.5, base_weight=0.6,
                         macro_columns=macro_cols_list,
                     )
                     nirnay_constituent_dfs[sym] = result_df
@@ -1133,24 +952,6 @@ def main():
                 if _polarity < 0:
                     nirnay_daily = apply_polarity(nirnay_daily, _polarity)
                     console.item("Polarity", f"{_polarity} (basket inverted to target)")
-
-                # Carry the basket forward onto the TARGET's trading calendar. The
-                # constituents (often global / US-listed) trade on a different calendar
-                # than the target — on a Monday-morning IST run, or when the target's
-                # market is open but the basket's is on holiday, the basket's last close
-                # IS its current value. Reindexing it onto the target's dates (ff-fill)
-                # lets the SIGNAL, cards and plots all reach the target's latest session
-                # instead of truncating to the slowest constituent. We record the
-                # basket's true last-native date so the UI can flag how much is carried
-                # over (the partial-session notice covers the row-level staleness).
-                st.session_state["nirnay_native_last"] = pd.Timestamp(nirnay_daily.index.max())
-                if active_date in data.columns:
-                    _cal = pd.DatetimeIndex(sorted(pd.to_datetime(
-                        data[active_date], errors="coerce").dropna().dt.normalize().unique()))
-                    _nd = nirnay_daily.copy()
-                    _nd.index = pd.to_datetime(_nd.index).normalize()
-                    _nd = _nd[~_nd.index.duplicated(keep="last")].sort_index()
-                    nirnay_daily = _nd.reindex(_cal, method="ffill").dropna(how="all")
                 console.item("Trading Days", len(nirnay_daily))
                 if len(nirnay_daily) > 0:
                     last = nirnay_daily.iloc[-1]
@@ -1177,11 +978,7 @@ def main():
         # factory defaults — no calibration runs.
         from convergence import intelligence as _intel_mod
         _intel_universe = active_target
-        # Fold the active forecast lens into the profile key so each Signal Horizon
-        # keeps its OWN calibrated weights on disk — a Tactical and a Positional
-        # profile for the same target must not clobber each other.
-        _intel_index = (f"{st.session_state.get('nishkarsh_index', _intel_universe)}"
-                        f" · {st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}")
+        _intel_index = st.session_state.get("nishkarsh_index", _intel_universe)
         _intel_enabled = bool(st.session_state.get("intelligence_mode", True))
         if _intel_enabled:
             _prior_w, _prior_t, _prior_profile = _intel_mod.resolve_active(_intel_universe, _intel_index)
@@ -1285,13 +1082,7 @@ def main():
             "DDM Filter · Prior Weights" if (_intel_enabled and _prior_profile is not None) else "DDM Filter · Default Weights",
         )
         convergence_df = validator.get_convergence_series()
-        # DDM smoothing tuned to the active lens — longer horizons turn over
-        # slower, so they get longer DDM memory (lower leak_rate).
-        conviction_model = UnifiedConvictionModel(
-            leak_rate=_horizon_cfg["ddm_leak"],
-            drift_scale=_horizon_cfg["ddm_drift"],
-            long_run_var=_horizon_cfg["ddm_lrv"],
-        )
+        conviction_model = UnifiedConvictionModel()
         results = conviction_model.fit(
             convergence_df["convergence_score"].tolist(),
             convergence_df.index.tolist(),
@@ -1323,7 +1114,6 @@ def main():
                     convergence_df, aarambh_ts,
                     universe=_intel_universe, selected_index=_intel_index,
                     target_col="Price",
-                    horizons=tuple(_horizon_cfg["hold"]),  # validate at the traded lens
                 )
                 console.item("TPE Trials", _n_trials)
                 console.item("Objective", f"{tuner.n_cv_folds}-fold CV (purged) · L2 {tuner.l2_alpha}")
@@ -1386,12 +1176,7 @@ def main():
                 "Post-Calibration DDM Pass",
             )
             # Re-fit the conviction model with the new convergence_score
-            # (same lens-tuned DDM as the initial pass).
-            conviction_model = UnifiedConvictionModel(
-                leak_rate=_horizon_cfg["ddm_leak"],
-                drift_scale=_horizon_cfg["ddm_drift"],
-                long_run_var=_horizon_cfg["ddm_lrv"],
-            )
+            conviction_model = UnifiedConvictionModel()
             results = conviction_model.fit(
                 convergence_df["convergence_score"].tolist(),
                 convergence_df.index.tolist(),
@@ -1447,11 +1232,10 @@ def main():
         console.section("Walk-Forward Validation")
         progress_bar(progress_container, 93, "Walk-Forward Validation", "Rolling OOS IC · Re-Calibration")
         try:
-            _hold_grid = tuple(_horizon_cfg["hold"])  # IC durability at the traded lens
             _wf_frame = _intel_mod._build_calibration_frame(
-                convergence_df, aarambh_ts, target_col="Price", horizons=_hold_grid,
+                convergence_df, aarambh_ts, target_col="Price", horizons=_intel_mod.HOLD_HORIZONS,
             )
-            _wf_results = _intel_mod.walk_forward_ic(_wf_frame, horizons=_hold_grid)
+            _wf_results = _intel_mod.walk_forward_ic(_wf_frame, horizons=_intel_mod.HOLD_HORIZONS)
             st.session_state["wf_results"] = _wf_results
             _wf_ics = [r["ic"] for r in _wf_results if r["ic"] == r["ic"]]  # drop NaN
             if _wf_ics:
@@ -1565,41 +1349,6 @@ def main():
     nishkarsh_norm = st.session_state.get("nishkarsh_conv_normalized")
     agreement = st.session_state.get("last_agreement", 0)
 
-    # ─── Precedent base rate for the hero (co-equal second opinion) ────────
-    # A 33-target non-overlapping study (hero_study.py) found the analog precedent
-    # is the STRONGER directional read (IC +0.226 vs the convergence's +0.158) and
-    # adds genuine, independent value — while the plot markers add nothing (they ARE
-    # the convergence's own inputs). So the hero reads the precedent alongside its
-    # signal: agreement raises confidence, disagreement is flagged as a divergence.
-    # Content-aware key (not just row count): include the latest Price so an intraday
-    # refresh that updates the last bar without adding a row still recomputes.
-    _plast = float(ts["Price"].iloc[-1]) if "Price" in ts.columns and len(ts) else 0.0
-    _pkey = f"{active_target}|{st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}|{len(ts)}|{_plast:.6g}"
-    if st.session_state.get("_prec_key") != _pkey:   # recompute only when inputs change
-        _prec_summary = None
-        try:
-            from analytics.analogs import find_similar_periods as _fsp, summarize_forward as _sf
-            _hlens = SIGNAL_HORIZONS.get(
-                st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
-                SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
-            )
-            _hold = tuple(_hlens["hold"])
-            _analogs = _fsp(ts, active_target, hold_horizons=_hold, mom_window=_hlens["momentum"])
-            _ps = _sf(_analogs, _hold) if _analogs else {}
-            _hp = max(_hold)                         # lens primary horizon
-            _row = _ps.get(int(_hp))
-            if _row:
-                _med = _row["median"]
-                _prec_summary = {
-                    "horizon": int(_hp), "median": float(_med),
-                    "positive_pct": float(_row["positive_pct"]), "n": int(_row["n"]),
-                    "dir": 1 if _med > 0 else -1 if _med < 0 else 0,
-                }
-        except Exception:
-            _prec_summary = None
-        st.session_state["precedent_summary"] = _prec_summary
-        st.session_state["_prec_key"] = _pkey
-
     # ─── Primary Signal (Above Tabs, Always Visible) ───────────────────────
     _render_primary_signal(nishkarsh_norm, agreement, signal)
 
@@ -1698,8 +1447,8 @@ def main():
     # Get current active tab from URL hash or default to 0
     active_tab_idx = 0  # Streamlit doesn't expose active tab index directly, so we render on demand
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "CONVERGENCE", "AARAMBH", "NIRNAY", "PRECEDENT", "DIAGNOSTICS", "DATA",
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "CONVERGENCE", "AARAMBH", "NIRNAY", "DIAGNOSTICS", "DATA",
     ])
 
     # Error boundary wrapper
@@ -1720,13 +1469,6 @@ def main():
                 unsafe_allow_html=True,
             )
 
-    # Active Signal-Horizon lens → the Precedent analog horizons/momentum window
-    # follow the same lens chosen in the sidebar (full-history `ts`, not filtered).
-    _lens = SIGNAL_HORIZONS.get(
-        st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
-        SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
-    )
-
     with tab1:
         st.session_state.rendered_tabs.add(0)
         _safe_render("Convergence", lambda: render_convergence_tab(ts_filtered))
@@ -1738,13 +1480,9 @@ def main():
         _safe_render("Nirnay", lambda: render_nirnay_tab(selected_tf=selected_tf))
     with tab4:
         st.session_state.rendered_tabs.add(3)
-        _safe_render("Precedent", lambda: render_precedent_tab(
-            ts, active_target, tuple(_lens["hold"]), _lens["momentum"], _lens["horizon"]))
+        _safe_render("Diagnostics", lambda: render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats))
     with tab5:
         st.session_state.rendered_tabs.add(4)
-        _safe_render("Diagnostics", lambda: render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats))
-    with tab6:
-        st.session_state.rendered_tabs.add(5)
         _safe_render("Data", lambda: render_data_tab(ts_filtered, ts, active_target))
 
     _render_footer()

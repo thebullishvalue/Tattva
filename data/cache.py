@@ -25,6 +25,12 @@ log = logging.getLogger(__name__)
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "tattva"
 DEFAULT_TTL_SECONDS = 3600  # 1 hour
 
+# Force-refresh window. While ``time.time() < _FORCE_UNTIL`` every ``Cache.get``
+# returns None (→ live re-fetch) but the disk snapshot is preserved as a fallback.
+# Set via ``begin_force_refresh()`` from the UI "Refresh Data" action. Bounded by a
+# window so it self-clears after one pipeline run (≈ covers a full universe re-pull).
+_FORCE_UNTIL = 0.0
+
 
 class Cache:
     """TTL cache with memory tier, disk tier, and stale-fallback.
@@ -63,7 +69,18 @@ class Cache:
         return hashlib.md5(raw.encode()).hexdigest()
 
     def get(self, *args: Any) -> Any | None:
-        """Return cached value if fresh (within TTL), else None."""
+        """Return cached value if fresh (within TTL), else None.
+
+        During a user-triggered force-refresh window (``begin_force_refresh``) this
+        returns ``None`` so the caller re-fetches live — WITHOUT deleting the disk
+        snapshot, so ``get_stale`` still serves last-good data if the live fetch
+        fails (rate limit / circuit open). That's the safety the naive "clear cache"
+        lacks: a failed forced refresh degrades to stale, never to empty.
+        """
+        if time.time() < _FORCE_UNTIL:
+            with self._lock:
+                self.misses += 1
+            return None
         key = self._key(*args)
         with self._lock:
             if key in self._memory:
@@ -168,7 +185,16 @@ ohlcv_cache = Cache(ttl=3600, version="v1", namespace="ohlcv")
 macro_cache = Cache(ttl=3600, version="v1", namespace="macro")
 
 
+def begin_force_refresh(window: float = 300.0) -> None:
+    """Open a force-refresh window: for ``window`` seconds, every ``Cache.get``
+    misses (→ live re-fetch) while disk snapshots stay intact as a failure fallback.
+    Self-clearing — covers one full pipeline re-pull, then normal TTL resumes."""
+    global _FORCE_UNTIL
+    _FORCE_UNTIL = time.time() + window
+
+
 def all_caches() -> list[Cache]:
-    """Return all module-level cache instances for diagnostics."""
-    from data.sheets import sheets_cache  # local import avoids a cycle
-    return [ohlcv_cache, macro_cache, sheets_cache]
+    """Return all module-level cache instances for diagnostics + force-refresh."""
+    from data.sheets import sheets_cache       # local imports avoid an import cycle
+    from data.universe import _constituent_cache
+    return [ohlcv_cache, macro_cache, sheets_cache, _constituent_cache]

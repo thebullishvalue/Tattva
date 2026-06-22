@@ -32,6 +32,14 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 _REPORTS = _HERE / "reports"
 
+# Preflight sufficiency floors. Every study pulls the SAME 9-year universe via
+# fetch_commodity_dataset (cache→live), so one thin/rate-limited fetch would silently
+# corrupt the whole multi-hour run. We warm + validate it ONCE up front: a healthy
+# universe is ~150+ numeric columns and well over MIN_DATA_POINTS rows; these floors
+# are loose enough never to fail a good fetch, tight enough to catch a broken one.
+_PREFLIGHT_MIN_COLS = 50
+_PREFLIGHT_MIN_TARGET_FRAC = 0.6
+
 # key → (script, title, rough ETA minutes).
 # ORDER IS DELIBERATE — it walks the system bottom-up, each tier tuned before the
 # layers that consume it (so when you read the report top-to-bottom, every later
@@ -90,6 +98,73 @@ _NOISE = ("Numba", "numba", "UserWarning", "FutureWarning", "HTTP Error",
           "Failed download", "delisted", "possibly delisted", "YFTz", "unavailable after backfill")
 
 
+def _preflight(warn_only: bool = False) -> bool:
+    """Fetch + validate the shared universe ONCE before the suite runs.
+
+    Warms the exact 9-year fetch every study reads (same cache key), then asserts the
+    pull is deep and broad enough to tune on. Returns True to proceed. With
+    ``warn_only`` a failure prints a loud warning but still proceeds; otherwise it
+    returns False so the caller aborts before wasting hours on a thin pull.
+    """
+    import numpy as np
+    import pandas as pd
+    from core.config import MIN_DATA_POINTS, ALL_TARGETS
+    from data.fetcher import fetch_commodity_dataset
+
+    print("Preflight — fetching/validating the shared universe (this also warms the "
+          "cache for every study)…", flush=True)
+    end = pd.Timestamp.today()
+    start = end - pd.Timedelta(days=365 * 9)
+    t0 = time.time()
+    try:
+        df, err = fetch_commodity_dataset(start, end)
+    except Exception as e:  # noqa: BLE001
+        df, err = None, f"fetch raised: {e}"
+
+    problems: list[str] = []
+    n_rows = n_cols = n_tgt = 0
+    span = ""
+    if df is None or df.empty:
+        problems.append(f"fetch returned no data ({err})")
+    else:
+        n_rows = len(df)
+        n_cols = int(df.select_dtypes(include=[np.number]).shape[1])
+        n_tgt = sum(1 for t in ALL_TARGETS if t in df.columns)
+        if "DATE" in df.columns:
+            span = f"{pd.to_datetime(df['DATE']).min():%Y-%m-%d} … {pd.to_datetime(df['DATE']).max():%Y-%m-%d}"
+        if n_rows < MIN_DATA_POINTS:
+            problems.append(f"only {n_rows} rows (< MIN_DATA_POINTS={MIN_DATA_POINTS}) — "
+                            "walk-forward can't run")
+        if n_cols < _PREFLIGHT_MIN_COLS:
+            problems.append(f"only {n_cols} numeric columns (universe looks partial; "
+                            "a healthy pull is ~150+)")
+        need_tgt = int(len(ALL_TARGETS) * _PREFLIGHT_MIN_TARGET_FRAC)
+        if n_tgt < need_tgt:
+            problems.append(f"only {n_tgt}/{len(ALL_TARGETS)} targets present "
+                            f"(need ≥ {need_tgt}) — multi-target studies compromised")
+
+    dt = time.time() - t0
+    if problems:
+        head = "PREFLIGHT FAILED" if not warn_only else "PREFLIGHT WARNING"
+        print("\n" + "!" * 90)
+        print(f"  {head} (checked in {dt:.0f}s) — got {n_rows} rows · {n_cols} cols · "
+              f"{n_tgt} targets {('· ' + span) if span else ''}")
+        for p in problems:
+            print(f"    - {p}")
+        print("\n  Almost always a yfinance rate-limit / partial pull. Wait a few minutes and "
+              "retry, or\n  run the app's 'Refresh Data' once to repopulate ~/.cache/tattva. "
+              "Every study shares\n  this fetch, so a thin pull would corrupt the entire run. "
+              "(Note: this checks the macro/\n  target spine; Nirnay constituent baskets are "
+              "fetched per-study with their own fallback.)")
+        print("  Bypass with --skip-preflight (or --preflight-warn to proceed anyway).")
+        print("!" * 90 + "\n", flush=True)
+        return bool(warn_only)
+
+    print(f"Preflight OK ({dt:.0f}s) — {n_rows} rows · {n_cols} numeric cols · "
+          f"{n_tgt}/{len(ALL_TARGETS)} targets · {span}\n", flush=True)
+    return True
+
+
 def _list():
     total = sum(e for _, _, _, e in SUITE)
     print(f"\nTattva tuning suite — {len(SUITE)} studies (~{total} min / ~{total/60:.1f}h total)\n")
@@ -145,6 +220,10 @@ def main():
     ap.add_argument("--list", action="store_true", help="show the suite and exit")
     ap.add_argument("--only", default="", help="comma-separated study keys to run")
     ap.add_argument("--skip", default="", help="comma-separated study keys to skip")
+    ap.add_argument("--skip-preflight", action="store_true",
+                    help="skip the up-front data sufficiency check")
+    ap.add_argument("--preflight-warn", action="store_true",
+                    help="run the preflight but only WARN (don't abort) on failure")
     args = ap.parse_args()
 
     if args.list:
@@ -159,6 +238,11 @@ def main():
         keys = [k for k in keys if k not in drop]
     if not keys:
         print("No studies selected. Use --list to see keys."); return
+
+    if not args.skip_preflight:
+        if not _preflight(warn_only=args.preflight_warn):
+            print("Aborted before running any study (preflight). Nothing was tuned.")
+            return
 
     eta = sum(_BY_KEY[k][2] for k in keys)
     _REPORTS.mkdir(exist_ok=True)

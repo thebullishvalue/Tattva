@@ -15,7 +15,19 @@ python3 research/run_tuning.py --list          # show the suite + ETAs (~4h full
 python3 research/run_tuning.py                 # run everything → one report
 python3 research/run_tuning.py --only analog,analog_confirm
 python3 research/run_tuning.py --skip aarambh_full     # skip the ~2h sweep
+python3 research/run_tuning.py --skip-preflight        # bypass the data check
+python3 research/run_tuning.py --preflight-warn        # check, but warn (don't abort)
 ```
+
+**Preflight.** Every study pulls the *same* 9-year universe via `fetch_commodity_dataset`
+(cache → live), so a single thin/rate-limited fetch would silently corrupt the whole
+multi-hour run. Before any tier runs, `run_tuning.py` warms that fetch **once** and
+asserts it's deep and broad enough — `≥ MIN_DATA_POINTS` rows, `≥ 50` numeric columns,
+and `≥ 60%` of targets present. On failure it aborts immediately (nothing is tuned)
+with a hint to wait out a rate-limit or run the app's "Refresh Data". Bypass with
+`--skip-preflight`, or downgrade to a warning with `--preflight-warn`. (Scope: the
+macro/target spine; Nirnay constituent baskets are fetched per-study with their own
+fallback.)
 
 Output: a consolidated, timestamped report in `research/reports/`, ending with a
 **current-vs-validated reference** for every tuned constant (live value · which

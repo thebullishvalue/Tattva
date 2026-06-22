@@ -19,6 +19,11 @@ optuna>=3.5.0
 # Data Sources (yfinance pulls requests transitively)
 yfinance>=0.2.31
 
+# Per-exchange trading calendars for holiday-aware data-freshness counting
+# (data/calendars.py). Offline, keyless — ships its own holiday tables. OPTIONAL:
+# if absent, freshness degrades gracefully to a plain Mon–Fri busday count.
+exchange_calendars>=4.5
+
 # HTML parsers for index-constituent scraping (pandas.read_html, data/universe.py).
 # lxml is the primary parser; html5lib is a lenient fallback for malformed markup.
 lxml>=4.9.0

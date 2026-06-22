@@ -91,6 +91,7 @@ from ui.tabs.tab_precedent import render_precedent_tab
 # ── Data ─────────────────────────────────────────────────────────────────────
 from data.fetcher import fetch_constituent_ohlcv, fetch_macro_live, fetch_commodity_dataset
 from data.constituents import get_commodity_basket
+from data.calendars import trading_days_behind
 
 # ── Engines ──────────────────────────────────────────────────────────────────
 from engines.aarambh import FairValueEngine
@@ -793,11 +794,11 @@ def main():
     # when 1–2 trading days behind (today's bar often isn't published yet), and a
     # prominent warning once genuinely stale (source hasn't updated). The signal
     # always reflects the as-of date shown, never "today".
-    # NOTE: np.busday_count uses a plain Mon–Fri mask with NO market-holiday table,
-    # so it can over-count "behind" by ~1 across a holiday → an occasional early
-    # stale notice. The PRIMARY, calendar-agnostic freshness signal is the
-    # partial-session check below (native coverage), which needs no holiday calendar;
-    # exact per-exchange calendars are future work.
+    # "Trading days behind" is counted on the TARGET's own exchange calendar via
+    # data.calendars.trading_days_behind — holiday-aware when exchange_calendars is
+    # installed (so Diwali/Thanksgiving no longer over-count by ~1), else it degrades
+    # to the exact legacy Mon–Fri busday count. The partial-session check below remains
+    # the calendar-agnostic primary freshness signal (native coverage).
     if active_date != "None" and active_date in df.columns:
         try:
             dates = pd.to_datetime(df[active_date], errors="coerce", dayfirst=True).dropna()
@@ -813,9 +814,10 @@ def main():
                 # staleness. Genuine staleness (≥ STALENESS_DAYS) and the exact
                 # partial-session gate below still fire normally.
                 today = min(datetime.now(timezone.utc).date(), datetime.now().date())
-                # trading days strictly after the data date, up to & including today
-                behind = max(0, int(np.busday_count(
-                    (latest_date.date() + timedelta(days=1)), (today + timedelta(days=1)))))
+                # trading days strictly after the data date, up to & including today,
+                # on the target exchange's calendar (holiday-aware when available).
+                _tgt_ticker = ALL_TARGETS.get(active_target)
+                behind = trading_days_behind(_tgt_ticker, latest_date.date(), today)
                 ds = latest_date.strftime("%d %b %Y")
                 if behind >= STALENESS_DAYS:
                     render_warning_box(
@@ -876,8 +878,7 @@ def main():
                         if j < len(tv) - 1 and pd.notna(tdates.iloc[j]):
                             t_last = pd.Timestamp(tdates.iloc[j]).to_pydatetime()
                     if t_last is not None:
-                        t_behind = max(0, int(np.busday_count(
-                            (t_last.date() + timedelta(days=1)), (today + timedelta(days=1)))))
+                        t_behind = trading_days_behind(_tgt_ticker, t_last.date(), today)
                         if t_behind >= 1:
                             render_warning_box(
                                 title=f"{active_target} data is lagging",

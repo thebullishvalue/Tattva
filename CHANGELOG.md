@@ -11,6 +11,25 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ## [Unreleased]
 
+### Added
+- **Per-exchange trading calendars — holiday-aware data freshness (Phase 1).** New
+  `data/calendars.py` resolves each target ticker to its exchange (`.NS/.BO`→XBOM,
+  `=F`→CMES, `=X`→FX weekday, `^`→XNYS/XBOM, sheet/NCDEX sentinels→XBOM, bare→XNYS)
+  and counts "trading days behind" on that exchange's actual session calendar via the
+  `exchange_calendars` library. This retires the ~1-day over-count the old Mon–Fri
+  `busday_count` produced across market holidays (Diwali, Thanksgiving, Juneteenth,
+  15 Aug…) — the freshness notices no longer flash a premature "behind" across a
+  closed session. Wired into both the dataset and per-target freshness notices in
+  `app.py`. The partial-session gate remains the calendar-agnostic *primary* signal.
+  - **Graceful, optional dependency.** The import is guarded: if `exchange_calendars`
+    is absent (or a calendar can't be built / a date is out of bounds), every count
+    degrades to the *exact* legacy `busday_count` — the app never breaks and is never
+    worse than before, only better when the lib is present. Added to `requirements.txt`.
+  - Verified end-to-end by `research/test_calendars.py`: all 35 targets resolve to a
+    known exchange; holiday-aware counts are strictly lower than the naive mask across
+    real US/India holidays and equal on plain weeks; FX equals the weekday mask; the
+    forced no-library path reproduces `busday_count` byte-for-byte.
+
 ### Fixed
 - **Aarambh tab — conviction card vs DDM plot now agree (single source of truth).**
   The DDM-Filtered Conviction chart drew the *unbounded* `ConvictionScore` line/fills

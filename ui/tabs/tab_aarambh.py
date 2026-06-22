@@ -185,17 +185,17 @@ def _render_ddm_conviction_chart(ts_filtered, x_axis, signal):
             showlegend=False, hoverinfo="skip",
         ))
     fig_conv.add_trace(go.Scatter(
-        x=x_axis, y=ts_filtered["ConvictionScore"].clip(lower=0),
+        x=x_axis, y=ts_filtered["ConvictionBounded"].clip(lower=0),
         fill="tozeroy", fillcolor="rgba(251,113,133,0.06)",
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig_conv.add_trace(go.Scatter(
-        x=x_axis, y=ts_filtered["ConvictionScore"].clip(upper=0),
+        x=x_axis, y=ts_filtered["ConvictionBounded"].clip(upper=0),
         fill="tozeroy", fillcolor="rgba(52,211,153,0.06)",
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig_conv.add_trace(go.Scatter(
-        x=x_axis, y=ts_filtered["ConvictionScore"], mode="lines", name="DDM Conviction",
+        x=x_axis, y=ts_filtered["ConvictionBounded"], mode="lines", name="DDM Conviction",
         line=dict(color=SLATE, width=2),
     ))
     fig_conv.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5)

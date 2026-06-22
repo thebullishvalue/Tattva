@@ -41,6 +41,16 @@ later result rests on decisions already settled above it.
 | **T5 · interpretation** | `markers` | `markers_study.py` | `UI_CONSENSUS_*`/`UI_CONVRAW_*`/`UI_NIRNAY_AVG_THRESHOLD` |
 | | `hero` | `hero_study.py` | hero interpretation (convergence vs +markers vs +precedent) |
 
+## Correctness tests (not tuning)
+
+Fast, assertion-based regression tests for edge-case paths that ship unexercised by
+the live universe. Run directly (`PYTHONPATH=. python3 research/<name>.py`):
+
+| Test | Covers |
+| --- | --- |
+| `test_polarity.py` | `engines.nirnay.apply_polarity` inverse-basket path (`TARGET_POLARITY = -1`): pair swaps, sign negation, neutral-column preservation, no-op, involution, breadth conservation — no live target sets `-1` yet. |
+| `test_calendars.py` | `data.calendars` freshness counting: every target resolves to a known exchange; holiday-aware counts beat the naive Mon–Fri mask across real holidays; weekday fallback reproduces `busday_count` byte-for-byte. |
+
 ## Shared conventions
 
 - **Honest metric:** non-overlapping (stride = horizon) OOS Spearman IC, reported

@@ -1482,7 +1482,6 @@ footer {
     background: var(--glass);
     backdrop-filter: blur(8px);
     border: 1px solid var(--border);
-    border-left: 2px solid var(--cyan);
     border-radius: var(--r-md);
     padding: var(--sp-5) var(--sp-6);
     margin: var(--sp-6) 0;
@@ -2761,7 +2760,6 @@ footer {
 .warning-box {
     background: rgba(212, 168, 83, 0.04);
     border: 1px solid rgba(212, 168, 83, 0.12);
-    border-left: 2px solid var(--amber);
     border-radius: var(--r-md);
     padding: var(--sp-4) var(--sp-5);
     margin-bottom: var(--sp-5);
@@ -3621,7 +3619,6 @@ footer {
 }
 
 .info-box::before,
-.warning-box::before,
 .interp-card::before {
     content: "";
     position: absolute;
@@ -3630,10 +3627,6 @@ footer {
     bottom: 0;
     width: 3px;
     background: linear-gradient(180deg, var(--amber), var(--cyan));
-}
-
-.warning-box::before {
-    background: linear-gradient(180deg, var(--rose), var(--orange));
 }
 
 /* ================================================================
@@ -4620,4 +4613,282 @@ div[data-multi-file-uploader] > div {
 
 .tab-bg.diagnostics {
     background: radial-gradient(ellipse 50% 50% at 60% 30%, rgba(251, 113, 133, 0.2) 0%, transparent 70%);
+}
+
+/* ================================================================
+   Tattva — Precedent (Analog Period) cards
+   Ported from Arthagati. Extends .position-card with an analog layout:
+     · eyebrow + date "symbol" + tier badge
+     · 3-col stat row (Similarity / Extension Z / Price)
+     · forward-return tile grid (signed-coloured)
+     · footer similarity progress bar
+   ================================================================ */
+.analog-card {
+    padding: var(--sp-5) var(--sp-6) var(--sp-4);
+    /* Left-edge tier accent strip suppressed by user preference — the
+       tier badge on the card head + the conviction bar in the footer
+       already communicate sentiment direction. */
+}
+
+.analog-card::before {
+    display: none;
+}
+
+.analog-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--sp-4);
+    padding-bottom: var(--sp-4);
+    border-bottom: 1px solid var(--border-subtle);
+    margin-bottom: var(--sp-4);
+}
+
+.analog-card-id {
+    display: flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    min-width: 0;
+}
+
+.analog-eyebrow {
+    font-family: var(--data);
+    font-size: 0.56rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--ink-tertiary);
+}
+
+.analog-symbol {
+    font-family: var(--display);
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--ink-primary);
+    letter-spacing: 0.01em;
+    line-height: 1.15;
+}
+
+/* ── Stat row (3 columns: Similarity · Mood · NIFTY) ────────────────── */
+.analog-stat-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--sp-3);
+    margin-bottom: var(--sp-5);
+}
+
+.analog-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.analog-stat-label {
+    font-family: var(--data);
+    font-size: 0.56rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-tertiary);
+}
+
+.analog-stat-value {
+    font-family: var(--display);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--ink-primary);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+    line-height: 1;
+}
+
+.analog-stat-value.amber {
+    color: var(--amber-bright);
+    text-shadow: 0 0 18px var(--amber-glow);
+}
+
+.analog-stat-value.pos {
+    color: var(--emerald-bright);
+    text-shadow: 0 0 16px var(--emerald-glow);
+}
+
+.analog-stat-value.neg {
+    color: var(--rose-bright);
+    text-shadow: 0 0 16px var(--rose-glow);
+}
+
+.analog-stat-value.neutral {
+    color: var(--ink-secondary);
+}
+
+/* ── Forward NIFTY return block ─────────────────────────────────────── */
+.analog-fwd-block {
+    margin-bottom: var(--sp-4);
+}
+
+.analog-fwd-block-label {
+    font-family: var(--data);
+    font-size: 0.56rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-tertiary);
+    margin-bottom: var(--sp-2);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+}
+
+.analog-fwd-block-label::before {
+    content: "";
+    flex: 0 0 14px;
+    height: 1px;
+    background: linear-gradient(90deg, var(--amber-dim) 0%, transparent 100%);
+}
+
+.analog-fwd-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--sp-2);
+}
+
+.analog-fwd-tile {
+    --tile-accent: var(--ink-tertiary);
+    --tile-glow: rgba(255, 255, 255, 0.04);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+    padding: var(--sp-3) var(--sp-3);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.02) 0%, rgba(0, 0, 0, 0.12) 100%);
+    position: relative;
+    overflow: hidden;
+    transition: transform 250ms cubic-bezier(0.16, 1, 0.3, 1),
+                border-color 250ms ease,
+                box-shadow 250ms ease;
+}
+
+.analog-fwd-tile::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent 0%, var(--tile-accent) 50%, transparent 100%);
+    opacity: 0.55;
+}
+
+.analog-fwd-tile:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.10);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25), 0 0 12px var(--tile-glow);
+}
+
+.analog-fwd-tile.pos {
+    --tile-accent: var(--emerald);
+    --tile-glow: var(--emerald-glow);
+    background: linear-gradient(145deg, rgba(45, 212, 168, 0.05) 0%, rgba(17, 24, 39, 0.4) 100%);
+    border-color: rgba(45, 212, 168, 0.18);
+}
+
+.analog-fwd-tile.neg {
+    --tile-accent: var(--rose);
+    --tile-glow: var(--rose-glow);
+    background: linear-gradient(145deg, rgba(232, 85, 90, 0.05) 0%, rgba(17, 24, 39, 0.4) 100%);
+    border-color: rgba(232, 85, 90, 0.18);
+}
+
+.analog-fwd-tile.neutral {
+    opacity: 0.55;
+}
+
+.analog-fwd-label {
+    font-family: var(--data);
+    font-size: 0.55rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-tertiary);
+}
+
+.analog-fwd-value {
+    font-family: var(--display);
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-primary);
+}
+
+.analog-fwd-tile.pos .analog-fwd-value { color: var(--emerald-bright); }
+.analog-fwd-tile.neg .analog-fwd-value { color: var(--rose-bright); }
+.analog-fwd-tile.neutral .analog-fwd-value { color: var(--ink-tertiary); }
+
+/* ── Footer: similarity progress bar ────────────────────────────────── */
+.analog-card-foot {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding-top: var(--sp-3);
+    border-top: 1px solid var(--border-subtle);
+}
+
+.analog-foot-label {
+    font-family: var(--data);
+    font-size: 0.56rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-tertiary);
+    flex-shrink: 0;
+}
+
+.analog-card-foot .conviction-bar {
+    flex: 1;
+    margin-top: 0;
+}
+
+.analog-foot-pct {
+    font-family: var(--data);
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--ink-secondary);
+    font-variant-numeric: tabular-nums;
+    min-width: 38px;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+/* Position-card hover override for analog-card — tier accent + glow */
+.position-card.analog-card:hover {
+    transform: translateX(0) translateY(-3px);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28), 0 0 22px rgba(212, 168, 83, 0.10);
+}
+
+.position-card.analog-card.tier-strong-buy:hover {
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28), 0 0 22px var(--emerald-glow);
+}
+.position-card.analog-card.tier-buy:hover {
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28), 0 0 22px var(--emerald-glow);
+}
+.position-card.analog-card.tier-hold:hover {
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28), 0 0 22px var(--amber-glow);
+}
+.position-card.analog-card.tier-caution:hover {
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28), 0 0 22px var(--rose-glow);
+}
+
+/* Compact form on narrow screens — stack stat row to 2 cols */
+@media (max-width: 480px) {
+    .analog-stat-row,
+    .analog-fwd-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .analog-fwd-tile {
+        padding: var(--sp-2) var(--sp-3);
+    }
 }

@@ -276,9 +276,10 @@ def render_header(title: str, tagline: str) -> None:
 
 
 def render_info_box(title: str, content: str, color: str = "cyan") -> None:
-    """Render an info box."""
+    """Render an info box. ``color`` is applied as a modifier class (cyan / amber /
+    emerald / rose / violet) so callers can theme it; was previously ignored."""
     st.markdown(
-        f'<div class="info-box">'
+        f'<div class="info-box {html_mod.escape(color)}">'
         f"<h4>{html_mod.escape(title)}</h4>"
         f"<p>{html_mod.escape(content)}</p>"
         f"</div>",

@@ -737,6 +737,28 @@ def main():
                 st.session_state.pop("nishkarsh_result", None)
                 st.rerun()
 
+            # Force a live re-pull of the whole universe, then recompute — for when
+            # the data is stale/partial (the freshness notices point here). Reset =
+            # re-run on cached data (fast); Refresh = re-fetch live + re-run (slower).
+            # Snapshot-preserving: if the live pull fails (rate-limit / circuit open),
+            # the cache's stale fallback keeps the app working on last-good data.
+            if st.button("Refresh Data", type="secondary", use_container_width=True):
+                from data.cache import begin_force_refresh
+                begin_force_refresh()   # next fetches bypass TTL; disk snapshot kept
+                with st.spinner("Re-fetching live market data — full universe, ~30–60s…"):
+                    _rend = pd.Timestamp.today()
+                    _rdf, _rerr = fetch_commodity_dataset(_rend - pd.Timedelta(days=365 * 9), _rend)
+                if _rdf is not None:
+                    st.session_state["data"] = _rdf   # keep run_analysis → stay in results
+                for _k in ("engine", "engine_cache", "aarambh_engine", "aarambh_fit_key",
+                           "wf_results", "results_cache", "nishkarsh_result",
+                           "precedent_summary", "_prec_key", "conv_norm_params"):
+                    st.session_state.pop(_k, None)
+                for _k in [k for k in list(st.session_state) if str(k).startswith("conv_norm_params")]:
+                    st.session_state.pop(_k, None)
+                st.rerun()
+            st.caption("Force-fetch the latest market data, then recompute · slower than Reset.")
+
         # ── Model Passport (Sanket-style) ──────────────────────────────
         # Surfaces the active calibrated profile (Intelligence Mode). Each
         # (target, forecast lens) pair keys its own profile — the lens tag must
@@ -793,7 +815,8 @@ def main():
                         title="Latest data unavailable",
                         content=(f"Newest data is {ds} — {behind} trading days behind. The price source "
                                  f"(yfinance) hasn't published more recent data, so every signal below "
-                                 f"reflects {ds}, not today. Re-run once the source updates."),
+                                 f"reflects {ds}, not today. Use Refresh Data in the sidebar to pull the "
+                                 f"latest once the source updates."),
                     )
                 elif behind >= 1:
                     render_info_box(
@@ -820,8 +843,8 @@ def main():
                             content=(f"Only {fresh_frac:.0%} of inputs have posted for {ds} — the rest "
                                      f"(e.g. US markets, on a timezone/publish lag) are forward-filled from the "
                                      f"prior session, so the macro predictors and constituent breadth behind the "
-                                     f"latest signal are stale. Treat it as provisional; re-run once those "
-                                     f"markets close."),
+                                     f"latest signal are stale. Treat it as provisional; use Refresh Data in the "
+                                     f"sidebar once those markets close."),
                         )
 
                 # Per-source freshness for the ACTIVE target specifically — it can

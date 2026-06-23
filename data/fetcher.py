@@ -141,7 +141,7 @@ def _backfill_missing_columns(combined: pd.DataFrame, tickers: tuple[str, ...]) 
     """Refill columns yfinance dropped/rate-limited (absent or all-NaN) from the most
     recent prior snapshot that has them.
 
-    yfinance routinely rate-limits a handful of tickers per batch (e.g. GC=F, BUNL.L)
+    yfinance routinely rate-limits a handful of tickers per batch (e.g. GC=F)
     while the rest succeed. The partial frame is non-empty, so it bypasses the
     all-or-nothing stale fallback and gets cached — silently dropping a TARGET column
     (Gold = GC=F) and failing the walk-forward with "Need 1500+ data points". Backfilling

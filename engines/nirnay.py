@@ -172,7 +172,7 @@ def calculate_mmr(
     for ticker in available_macros:
         x = df[ticker].ffill().fillna(0)
         x_mean = x.rolling(length, min_periods=1).mean().shift(1).fillna(0)
-        x_std = x.rolling(length, min_periods=1).std().shift(1).fillna(x.std())
+        x_std = x.rolling(length, min_periods=1).std().shift(1).fillna(1.0)
 
         # Pearson correlation shifted (only prior data used to estimate relationship)
         roll_corr = x.rolling(length, min_periods=length).corr(target).shift(1).fillna(0)

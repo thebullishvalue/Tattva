@@ -78,8 +78,8 @@ def zscore_clipped(series: pd.Series, window: int, clip: float = 3.0) -> pd.Seri
     clip : float
         Maximum absolute z-score before clipping.
     """
-    roll_mean = series.rolling(window).mean()
-    roll_std = series.rolling(window).std()
+    roll_mean = series.rolling(window).mean().shift(1)
+    roll_std = series.rolling(window).std().shift(1)
     z = (series - roll_mean) / roll_std.replace(0, np.nan)
     return z.clip(-clip, clip).fillna(0)
 

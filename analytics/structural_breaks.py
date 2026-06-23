@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 import numpy as np
+import pandas as pd
 
 try:
     from statsmodels.tsa.regime_switching.bai_perron import BaiPerronTest  # type: ignore[import-not-found]
@@ -69,28 +70,36 @@ def _rolling_mean_breaks(
     max_breaks: int,
     trim: float,
 ) -> list[int]:
-    """Heuristic change-point detection via rolling mean divergence."""
+    """Heuristic change-point detection via trailing rolling mean divergence.
+
+    Uses a strictly causal trailing window so each break position is
+    determined solely from data up to and including that point.
+    """
     n = len(series)
     window = max(int(n * trim), 5)
     trim_n = int(n * trim)
 
-    rolling_mean = np.convolve(series, np.ones(window) / window, mode="valid")
-    diffs = np.abs(np.diff(rolling_mean))
+    # Causal trailing mean: index t uses only obs[t-window+1 … t].
+    s = pd.Series(series)
+    rolling_mean = s.rolling(window, min_periods=window).mean().to_numpy()
 
-    # Mask out trim regions
-    pad = window // 2
-    diffs[: trim_n - pad] = 0
-    diffs[-(trim_n - pad):] = 0
+    # diff[t] = |mean[t] - mean[t-1]|; NaN rows (warm-up) → 0.
+    diffs = np.abs(np.diff(np.nan_to_num(rolling_mean, nan=0.0)))
 
-    # Pick top-k peaks
+    # Mask out trim regions (both ends of the usable range).
+    diffs[:trim_n] = 0
+    if trim_n > 0:
+        diffs[-trim_n:] = 0
+
+    # Pick top-k non-adjacent peaks; break index maps directly back to the
+    # original series (diff[t] reflects the change arriving at t+1).
     break_indices = []
     diffs_copy = diffs.copy()
     for _ in range(max_breaks):
         peak = int(np.argmax(diffs_copy))
         if diffs_copy[peak] == 0:
             break
-        break_indices.append(peak + pad)
-        # Suppress nearby peaks
+        break_indices.append(peak + 1)
         lo = max(0, peak - window)
         hi = min(len(diffs_copy), peak + window)
         diffs_copy[lo:hi] = 0

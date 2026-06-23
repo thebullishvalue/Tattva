@@ -51,7 +51,7 @@ def drift_diffusion_filter(
     if n == 0:
         return np.array([]), np.array([]), np.array([])
 
-    state = float(np.mean(obs[: min(20, n)])) if n > 0 else 0.0
+    state = float(obs[0]) if n > 0 else 0.0
     var_est = long_run_var
 
     filtered = np.zeros(n)

@@ -75,12 +75,12 @@ TOOLTIPS = {
         "model is uncertain. Use this (not raw conviction) for trade decisions."
     ),
     "oversold_breadth": (
-        "Share of lookback windows where the idiosyncratic spread is stretched low — the metal "
+        "Share of lookback windows where the idiosyncratic spread is stretched low — the target "
         "has underperformed its macro-implied path. Above 60% = broadly cheap vs macro, a bullish "
         "signal when it starts to turn up."
     ),
     "overbought_breadth": (
-        "Share of lookback windows where the idiosyncratic spread is stretched high — the metal "
+        "Share of lookback windows where the idiosyncratic spread is stretched high — the target "
         "has outrun its macro-implied path. Above 60% = broadly rich vs macro, a caution signal "
         "when it starts to turn down."
     ),
@@ -281,14 +281,14 @@ def _render_market_state_cards(signal, regime_stats, ts):
     with c1:
         render_metric_card(
             "OVERSOLD BREADTH", f'{signal["oversold_breadth"]:.0f}%',
-            "Fraction of models that see cheap valuation. Rising = bullish pressure building.",
+            "Fraction of lookback windows that see cheap valuation. Rising = bullish pressure building.",
             "success" if signal["oversold_breadth"] > UI_BREADTH_HIGH else "neutral",
             tooltip=TOOLTIPS["oversold_breadth"],
         )
     with c2:
         render_metric_card(
             "OVERBOUGHT BREADTH", f'{signal["overbought_breadth"]:.0f}%',
-            "Fraction of models that see expensive valuation. Rising = caution strengthening.",
+            "Fraction of lookback windows that see expensive valuation. Rising = caution strengthening.",
             "danger" if signal["overbought_breadth"] > UI_BREADTH_HIGH else "neutral",
             tooltip=TOOLTIPS["overbought_breadth"],
         )
@@ -427,8 +427,11 @@ def _render_model_quality_cards(model_stats, signal, is_forward=False):
 def _render_fair_value_chart(engine, ts_filtered, x_axis, ts, active_target):
     """Section: Price + Aarambh signal panel.
 
-    Top panel always shows the commodity's price level. The bottom panel adapts
-    to the engine mode:
+    Top panel always shows the target's price level. In PREDICTIVE mode it also
+    carries a forward expected-PRICE projection: the latest expected forward
+    return is interpolated to an implied target h days out, with an RMSE-sized
+    uncertainty cone anchored at the last close. The bottom panel adapts to the
+    engine mode:
       • forward_signal (PREDICTIVE): the model's Expected Forward Return — the
         directional forecast (positive = bullish). This IS the tradeable signal.
       • cumulative_residual (relative-value): the idiosyncratic spread (mean-
@@ -450,6 +453,45 @@ def _render_fair_value_chart(engine, ts_filtered, x_axis, ts, active_target):
         x=x_axis, y=top_series, mode="lines", name=f"{active_target} Price",
         line=dict(color=SLATE, width=1.6),
     ), row=1, col=1)
+
+    # ── Forward expected-PRICE projection (predictive mode) ──
+    # Turns the latest expected forward return into a price path, so the panel
+    # shows where the model expects price to GO — not just a history of past
+    # leans. The h-day expected log-return is interpolated linearly in log space
+    # to an implied target anchored at the last close; the shaded cone is the OOS
+    # RMSE of the return forecast, widened ~√(k/h) over the horizon. Anchored at
+    # k=0 (last price, zero band) so it emanates cleanly from the actual line.
+    if forward and has_price and pd.api.types.is_datetime64_any_dtype(x_axis):
+        from pandas import bdate_range
+        _h = max(int(getattr(engine, "purge", 0) or 0), 1)
+        _fv = ts_filtered["FairValue"].to_numpy()
+        _p_last = float(top_series.iloc[-1])
+        if _h >= 2 and len(_fv) and np.isfinite(_fv[-1]) and np.isfinite(_p_last) and _p_last > 0:
+            _R = float(_fv[-1])                                   # expected h-day log return
+            _rmse = float((getattr(engine, "model_stats", {}) or {}).get("rmse_oos", 0.0) or 0.0)
+            _k = np.arange(0, _h + 1)
+            _r_path = _R * (_k / _h)                              # linear-in-log to target
+            _band = _rmse * np.sqrt(_k / _h)                      # 1σ cone, widening
+            _proj_dates = bdate_range(start=x_axis.iloc[-1], periods=_h + 1)
+            _p_path = _p_last * np.exp(_r_path)
+            _p_up = _p_last * np.exp(_r_path + _band)
+            _p_dn = _p_last * np.exp(_r_path - _band)
+            _bull = _R >= 0
+            _proj_color = EMERALD if _bull else ROSE
+            _cone = "rgba(52,211,153,0.10)" if _bull else "rgba(251,113,133,0.10)"
+            fig.add_trace(go.Scatter(x=_proj_dates, y=_p_up, mode="lines", line=dict(width=0),
+                                     showlegend=False, hoverinfo="skip"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=_proj_dates, y=_p_dn, mode="lines", line=dict(width=0),
+                                     fill="tonexty", fillcolor=_cone, showlegend=False,
+                                     hoverinfo="skip"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=_proj_dates, y=_p_path, mode="lines", name=f"Expected +{_h}d",
+                                     line=dict(color=_proj_color, width=1.4, dash="dot"),
+                                     hovertemplate="%{y:.2f}<extra>Expected path</extra>"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=[_proj_dates[-1]], y=[float(_p_path[-1])], mode="markers",
+                                     marker=dict(color=_proj_color, size=7, line=dict(color="#0A0E17", width=1)),
+                                     showlegend=False,
+                                     hovertemplate=f"Implied target +{_h}d: %{{y:.2f}} ({_R * 100:+.1f}%)<extra></extra>"),
+                          row=1, col=1)
 
     # ── Bottom panel ──
     if forward:
@@ -594,12 +636,14 @@ def render_aarambh_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats
 
     # ── Phase 2: ANCHOR ────────────────────────────────────────────────
     _is_forward = bool(getattr(engine, "forward_signal", False))
+    _h_fwd = max(int(getattr(engine, "purge", 0) or 0), 1)
     render_section_header(
         "Price & Forecast Signal" if _is_forward else "Price & Idiosyncratic Spread",
         (
-            "Top: the target's price. Bottom: the model's expected forward return — a "
-            "directional forecast from lagged macro momentum. Above zero (green) = bullish, "
-            "below (red) = bearish."
+            f"Top: the target's price with the model's expected path over the next ~{_h_fwd} "
+            f"trading days (dotted, shaded by forecast uncertainty) → an implied target. "
+            f"Bottom: the expected forward return driving it — above zero (green) = bullish, "
+            f"below (red) = bearish."
             if _is_forward else
             "Top: the target's price. Bottom: the part of its return the macro factor model "
             "can't explain, accumulated into a mean-reverting relative-value spread."

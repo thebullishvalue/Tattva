@@ -200,7 +200,13 @@ def _render_individual_constituents(nirnay_constituent_dfs):
             cdf = nirnay_constituent_dfs[sym].iloc[-100:].copy()
             if isinstance(cdf.columns, pd.MultiIndex):
                 cdf.columns = [c[0] for c in cdf.columns]
-            cols_show = [c for c in ["Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition", "Regime"] if c in cdf.columns]
+            # Surface the full regime-intelligence stack per constituent: MSF/MMR
+            # oscillators + the HMM/GARCH(Vol_Regime)/CUSUM(Change_Point) outputs that
+            # the engine computes but the aggregate view doesn't expose.
+            cols_show = [c for c in [
+                "Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition",
+                "Regime", "Vol_Regime", "Change_Point", "Confidence",
+            ] if c in cdf.columns]
             st.dataframe(cdf[cols_show] if cols_show else cdf, width='stretch')
 
 
@@ -287,7 +293,7 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
                            tooltip=TOOLTIPS["overbought_pct"])
     with c3:
         v = df_n["Avg_Signal"].iloc[-1]
-        render_metric_card("AVG UNIFIED SIGNAL", f"{v:.2f}", "<-2 bullish · >+2 bearish", "success" if v < -1 else "danger" if v > 1 else "neutral",
+        render_metric_card("AVG UNIFIED SIGNAL", f"{v:.2f}", "<-2 bullish · >+2 bearish", "success" if v < -2 else "danger" if v > 2 else "neutral",
                            tooltip=TOOLTIPS["avg_signal"])
     with c4:
         v = int(df_n["Buy_Signals"].iloc[-1])
@@ -306,7 +312,7 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
     # ── Phase 2: REGIME ────────────────────────────────────────────────
     render_section_header(
         "HMM State Probabilities",
-        "Probability the index is in a bull or bear regime. P > 0.5 = regime confidence. Frequent crossings = uncertainty.",
+        "Basket-average probability of a bull vs bear regime (mean of per-constituent HMM states). P > 0.5 = regime confidence. Frequent crossings = uncertainty.",
         icon="eye",
         accent="violet",
     )

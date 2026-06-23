@@ -167,6 +167,7 @@ def progress_bar(slot, pct: int, label: str, sub: str = "") -> None:
     is_complete = pct >= 100
     bar_color = COLOR_GREEN if is_complete else COLOR_AMBER if pct > 50 else COLOR_CYAN
     dot_class = "pulse-dot complete" if is_complete else "pulse-dot"
+    fill_class = "progress-fill" if is_complete else "progress-fill working"
     slot.markdown(
         f"""
     <div class="progress-card">
@@ -175,7 +176,7 @@ def progress_bar(slot, pct: int, label: str, sub: str = "") -> None:
         </div>
         {f'<div class="progress-sub">{sub}</div>' if sub else ''}
         <div class="progress-track">
-            <div class="progress-fill" style="width:{pct}%;background:{bar_color};box-shadow:0 0 10px {bar_color};"></div>
+            <div class="{fill_class}" style="width:{pct}%;background:{bar_color};box-shadow:0 0 10px {bar_color};"></div>
         </div>
         <div class="progress-pct">{pct}%</div>
     </div>

@@ -941,6 +941,9 @@ def main():
     for col in [active_target] + active_features:
         data[col] = pd.to_numeric(data[col], errors="coerce")
     data[[active_target] + active_features] = data[[active_target] + active_features].ffill()
+    # Drop features that are entirely NaN after ffill (failed fetch with no snapshot).
+    # Keeping them would cause dropna to wipe every row and fail the walk-forward.
+    active_features = [f for f in active_features if f in data.columns and data[f].notna().any()]
     data = data.dropna(subset=[active_target] + active_features).reset_index(drop=True)
     # Phase 3 — target-exchange session spine. The fetched matrix is a Mon–Fri spine
     # (FX trades every weekday), so a row on the TARGET's own market holiday carries
@@ -1305,9 +1308,9 @@ def main():
                     "oversold_pct": float(row_n.get("Oversold_Pct", 50)),
                     "overbought_pct": float(row_n.get("Overbought_Pct", 50)),
                     "avg_unified_osc": float(row_n.get("Avg_Signal", 0)),
-                    "regime_bull": float(row_n.get("Regime_Bull_Pct", 33)),
+                    "regime_bull_pct": float(row_n.get("Regime_Bull_Pct", 33)),
                     "regime_weak_bull": 0,
-                    "regime_bear": float(row_n.get("Regime_Bear_Pct", 33)),
+                    "regime_bear_pct": float(row_n.get("Regime_Bear_Pct", 33)),
                     "regime_weak_bear": 0,
                     "regime_neutral": float(row_n.get("Regime_Neutral", 34)),
                     "num_constituents": int(row_n.get("Total_Analyzed", 0)),
@@ -1316,7 +1319,7 @@ def main():
             else:
                 nirnay_stats = {
                     "oversold_pct": 50, "overbought_pct": 50, "avg_unified_osc": 0,
-                    "regime_bull": 33, "regime_weak_bull": 0, "regime_bear": 33,
+                    "regime_bull_pct": 33, "regime_weak_bull": 0, "regime_bear_pct": 33,
                     "regime_weak_bear": 0, "regime_neutral": 34, "num_constituents": 0,
                 }
             validator.compute_convergence(aarambh_sig, nirnay_stats, date_str)

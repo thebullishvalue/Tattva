@@ -338,7 +338,7 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
     # ── Phase 4: SIGNALS ───────────────────────────────────────────────
     render_section_header(
         "Signal Counts Over Time",
-        "Daily regime-change signal count. Clusters across basket instruments often precede commodity reversals.",
+        "Daily regime-change signal count. Clusters across basket instruments often precede target reversals.",
         icon="zap",
         accent="rose",
     )

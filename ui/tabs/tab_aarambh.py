@@ -597,11 +597,11 @@ def render_aarambh_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats
     render_section_header(
         "Price & Forecast Signal" if _is_forward else "Price & Idiosyncratic Spread",
         (
-            "Top: the commodity's price. Bottom: the model's expected forward return — a "
+            "Top: the target's price. Bottom: the model's expected forward return — a "
             "directional forecast from lagged macro momentum. Above zero (green) = bullish, "
             "below (red) = bearish."
             if _is_forward else
-            "Top: the commodity's price. Bottom: the part of its return the macro factor model "
+            "Top: the target's price. Bottom: the part of its return the macro factor model "
             "can't explain, accumulated into a mean-reverting relative-value spread."
         ),
         icon="trending",

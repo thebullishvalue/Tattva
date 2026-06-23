@@ -898,19 +898,28 @@ def main():
                             t_last = pd.Timestamp(tdates.iloc[j]).to_pydatetime()
                     if t_last is not None:
                         t_behind = trading_days_behind(_tgt_ticker, t_last.date(), today)
-                        # Suppress when t_behind == 1 AND today is a live session for
-                        # this exchange: the prior-close being carried forward is normal
-                        # intraday behaviour until the market closes and yfinance
-                        # publishes the final settlement bar.
-                        _today_is_session = is_session(_tgt_ticker, today)
-                        if t_behind >= 2 or (t_behind == 1 and not _today_is_session):
-                            render_warning_box(
-                                title=f"{active_target} data is lagging",
-                                content=(f"This target last updated {t_last.strftime('%d %b %Y')} "
-                                         f"({t_behind} trading day{'s' if t_behind > 1 else ''} behind the macro "
-                                         f"universe) — more recent rows are forward-filled from that value, so "
-                                         f"its latest signal may be stale."),
-                            )
+                        if t_behind >= 1:
+                            _today_is_session = is_session(_tgt_ticker, today)
+                            if _today_is_session and t_behind == 1:
+                                # Market is open but today's bar is forward-filled —
+                                # most likely yfinance rate-limited this ticker during
+                                # the last fetch and the backfill used a prior snapshot.
+                                # Prompt a manual refresh rather than crying "stale".
+                                render_info_box(
+                                    f"{active_target} price not yet updated",
+                                    (f"Today's bar is carried forward from {t_last.strftime('%d %b %Y')} — "
+                                     f"the {active_target} market is open but yfinance may have rate-limited "
+                                     f"this ticker during the last fetch. Use Refresh Data in the sidebar "
+                                     f"to pull the latest price."),
+                                )
+                            else:
+                                render_warning_box(
+                                    title=f"{active_target} data is lagging",
+                                    content=(f"This target last updated {t_last.strftime('%d %b %Y')} "
+                                             f"({t_behind} trading day{'s' if t_behind > 1 else ''} behind the macro "
+                                             f"universe) — more recent rows are forward-filled from that value, so "
+                                             f"its latest signal may be stale."),
+                                )
                 except Exception:
                     pass
         except Exception:

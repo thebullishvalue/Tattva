@@ -75,10 +75,7 @@ def ornstein_uhlenbeck_estimate(
     residuals = x_curr - a * x_lag - b
     sigma_sq = np.var(residuals)
 
-    if a > 0.98:
-        sigma = max(float(np.std(residuals)) * np.sqrt(2 * max(theta, 1e-4)), 1e-6)
-    else:
-        sigma = np.sqrt(max(sigma_sq * 2 * theta / (1 - a**2), 1e-12))
+    sigma = np.sqrt(max(sigma_sq * 2 * theta / max(1 - a**2, 0.001), 1e-12))
 
     return max(float(theta), 1e-4), float(mu), max(float(sigma), 1e-6)
 

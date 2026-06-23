@@ -229,14 +229,15 @@ def _regime_loop_njit(sig: np.ndarray):
         cvals[i] = filtered
         nc = i + 1
         if nc >= 3:
-            w = 20 if nc >= 20 else nc
-            lo = i + 1 - w
+            # Window [lo, i) excludes current point — causal z-score
+            w = min(20, nc - 1)
+            lo = i - w
             csum = 0.0
-            for j in range(lo, i + 1):
+            for j in range(lo, i):
                 csum += cvals[j]
             run_mean = csum / w
             cv = 0.0
-            for j in range(lo, i + 1):
+            for j in range(lo, i):
                 d = cvals[j] - run_mean
                 cv += d * d
             sd = np.sqrt(cv / w)
@@ -636,9 +637,10 @@ class CUSUMDetector:
         self.value_history.append(value)
 
         if len(self.value_history) >= 3:
-            recent = self.value_history[-min(20, len(self.value_history)) :]
+            prior = self.value_history[:-1]  # exclude just-appended value — causal z-score
+            recent = prior[-min(20, len(prior)):]
             self.running_mean = np.mean(recent)
-            self.running_std = max(np.std(recent), 0.1)
+            self.running_std = max(np.std(recent) if len(recent) > 1 else 0.0, 0.1)
 
         z = (value - self.running_mean) / self.running_std
 

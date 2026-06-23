@@ -361,7 +361,13 @@ class FairValueEngine:
             self.model_spread[t] = 0.0
 
         decay_rate = np.log(2) / 252.0
-        global_weights = np.exp(-decay_rate * np.arange(MAX_TRAIN_SIZE - 1, -1, -1))
+        # Size the recency-weight array to the LARGEST possible training window.
+        # The window is capped at MAX_TRAIN_SIZE but floored at MIN_TRAIN_SIZE, so in
+        # the (degenerate, tuning-sweep) case MIN > MAX the window can reach MIN — and
+        # `global_weights[-n_samples:]` must still have n_samples elements, else the
+        # sample_weight length mismatches X_train and the Ridge/PCA-OLS fits fail.
+        _wf_window = max(int(MAX_TRAIN_SIZE), int(MIN_TRAIN_SIZE))
+        global_weights = np.exp(-decay_rate * np.arange(_wf_window - 1, -1, -1))
         # We use the configured REFIT_INTERVAL (e.g. 21 days / 1 month)
         # which drastically speeds up the walk-forward vs refitting every few days.
         dynamic_refit = max(1, int(REFIT_INTERVAL))

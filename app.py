@@ -862,7 +862,11 @@ def main():
                     denom = int(judged.sum())
                     if denom >= 3:   # need a few open markets before judging completeness
                         fresh_frac = float(((last_r != prev_r) & judged).sum() / denom)
-                        if fresh_frac < SESSION_FRESH_FLOOR:
+                        # Skip the warning when latest_date is today: the session is
+                        # still in progress, so most prices are forward-filled by
+                        # design — that is expected, not a data problem.
+                        _session_is_live = (latest_date.date() >= today)
+                        if fresh_frac < SESSION_FRESH_FLOOR and not _session_is_live:
                             render_warning_box(
                                 title="Partial latest session",
                                 content=(f"Only {fresh_frac:.0%} of the markets open on {ds} have posted — the "

@@ -343,7 +343,7 @@ def render_convergence_tab(ts_filtered=None):
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5, row=1, col=1)
 
     # ── Row 2: Base Conviction ────────────────────────────────────────
-    conv_vals = [v if v is not None else None for v in aligned_conv_raw]
+    conv_vals = [float(v) if v is not None else np.nan for v in aligned_conv_raw]
     conv_colors, conv_sizes = [], []
     for v in aligned_conv_raw:
         if v is None:

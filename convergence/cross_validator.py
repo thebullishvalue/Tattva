@@ -141,7 +141,7 @@ class CrossValidator:
 
         # ── Dimension 3: Magnitude Alignment ────────────────────────────
         aarambh_mag = abs(float(aarambh_signal.get("conviction_score", 0)))
-        nirnay_mag = abs(float(nirnay_day_stats.get("avg_unified_osc", 0))) * 10
+        nirnay_mag = abs(float(nirnay_day_stats.get("avg_unified_osc", 0)))
         aarambh_mag_norm = min(aarambh_mag / 100.0, 1.0)
         nirnay_mag_norm = min(nirnay_mag / 10.0, 1.0)
         magnitude_alignment = 1.0 - abs(aarambh_mag_norm - nirnay_mag_norm)
@@ -149,8 +149,8 @@ class CrossValidator:
 
         # ── Dimension 4: Regime Consistency ─────────────────────────────
         aarambh_regime = str(aarambh_signal.get("regime", "NEUTRAL"))
-        nirnay_bull_pct = float(nirnay_day_stats.get("regime_bull", 0))
-        nirnay_bear_pct = float(nirnay_day_stats.get("regime_bear", 0))
+        nirnay_bull_pct = float(nirnay_day_stats.get("regime_bull_pct", 0))
+        nirnay_bear_pct = float(nirnay_day_stats.get("regime_bear_pct", 0))
 
         aarambh_bullish = "OVERSOLD" in aarambh_regime
         aarambh_bearish = "OVERBOUGHT" in aarambh_regime

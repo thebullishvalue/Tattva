@@ -291,7 +291,7 @@ GLOBAL_MACRO_MAP = {
     "International Corporate Bonds":     "IBND",
     "Eurozone Government Bond":          "IEGA.L",
     "Eurozone Corporate Bond (IG)":      "IEAC.L",
-    "Germany Govt Bonds (Bunds/Long)":   "BUNL.L",
+    "Germany Govt Bonds (Bunds/Long)":   "IBGL.L",
     "Germany Short-Term (Schatz)":       "SDEU.L",
     "UK Gilts":                          "IGLT.L",
     "UK Gilts (Inflation-Linked)":       "INXG.L",

@@ -940,7 +940,7 @@ def main():
         data = data.dropna(subset=[active_date]).sort_values(active_date)
     for col in [active_target] + active_features:
         data[col] = pd.to_numeric(data[col], errors="coerce")
-    data[[active_target] + active_features] = data[[active_target] + active_features].ffill().bfill()
+    data[[active_target] + active_features] = data[[active_target] + active_features].ffill()
     data = data.dropna(subset=[active_target] + active_features).reset_index(drop=True)
     # Phase 3 — target-exchange session spine. The fetched matrix is a Mon–Fri spine
     # (FX trades every weekday), so a row on the TARGET's own market holiday carries
@@ -997,10 +997,13 @@ def main():
     # Keep only rows with fully-formed momentum features (drop the warmup head);
     # the forward-target NaN tail is retained for live forecasting.
     _valid = _mom.notna().all(axis=1).to_numpy()
+    _label_valid = _fwd.loc[_valid].notna().to_numpy()   # False for last FWD_HORIZON rows (no real label)
+    _valid_dates = _fwd.loc[_valid].index
+    _date_range = f"{_valid_dates[0].date()}_{_valid_dates[-1].date()}"
     data = data.loc[_valid].reset_index(drop=True)
     X = _mom.loc[_valid].to_numpy()
     y = np.nan_to_num(_fwd.loc[_valid].to_numpy(), nan=0.0)
-    cache_key = f"fwd{FWD_HORIZON}m{FWD_MOM_K}|{active_target}|{'|'.join(sorted(active_features))}|{len(data)}"
+    cache_key = f"fwd{FWD_HORIZON}m{FWD_MOM_K}|{active_target}|{'|'.join(sorted(active_features))}|{_date_range}"
     if st.session_state.get("engine_cache") != cache_key:
         # ── Restore from the per-config result cache if this exact config was
         # already computed this session (e.g. the user switched commodities and
@@ -1106,7 +1109,7 @@ def main():
             progress_bar(progress_container, 40, "Aarambh Engine Reused", "Cached walk-forward fit")
         else:
             engine = FairValueEngine()
-            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, purge=FWD_HORIZON, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
+            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, purge=FWD_HORIZON, label_mask=_label_valid, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
             # Carry the raw price LEVEL on the engine output (returns-space
             # modeling otherwise leaves only return-scale columns). Used by the
             # Aarambh tab for price display and by the Intelligence tuner.

@@ -504,6 +504,13 @@ def main():
     )
     inject_css()
 
+    # Single main-area progress slot, created up front (outside the sidebar) so the
+    # SAME themed progress bar drives everything from the moment "Run Analysis" is
+    # clicked — the fetch, the data-prep spine, the engines, convergence — instead of
+    # a sidebar spinner that then hands off to a separate bar with a gap between them.
+    # Empty (invisible) until the first progress_bar() call; cleared when a run ends.
+    progress_container = st.empty()
+
     # ─── Sidebar ──────────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown(
@@ -607,23 +614,31 @@ def main():
             # is target-agnostic — the chosen commodity only selects Aarambh's
             # target column and Nirnay's basket.
             if st.button("Run Analysis", type="primary"):
-                with st.spinner("Fetching commodity data and running analysis..."):
-                    _end = pd.Timestamp.today()
-                    # Walk-forward needs MIN_DATA_POINTS (1500) daily observations.
-                    # ~9 years of calendar history clears that with headroom.
-                    _start = _end - pd.Timedelta(days=365 * 9)
-                    df, error = fetch_commodity_dataset(_start, _end)
-                    if error or df is None:
-                        st.error(f"Failed: {error}")
-                        return
-                    st.session_state.pop("engine", None)
-                    st.session_state.pop("engine_cache", None)
-                    st.session_state["data"] = df
-                    st.session_state["selected_commodity"] = selected_commodity
-                    st.session_state["active_target"] = selected_commodity
-                    st.session_state["nishkarsh_index"] = selected_commodity
-                    st.session_state["run_analysis"] = True
-                    st.rerun()
+                # No spinner — drive the main-area progress bar from the very first
+                # click. The fetch is one blocking call, so we show the stage before it
+                # (3%) and after it (15%); the analysis picks the bar up from there on
+                # the rerun, so the experience reads as one continuous progress bar.
+                progress_bar(progress_container, 3, "Fetching Market Data",
+                             "yfinance · global macro universe · ~9y daily history")
+                _end = pd.Timestamp.today()
+                # Walk-forward needs MIN_DATA_POINTS (1500) daily observations.
+                # ~9 years of calendar history clears that with headroom.
+                _start = _end - pd.Timedelta(days=365 * 9)
+                df, error = fetch_commodity_dataset(_start, _end)
+                if error or df is None:
+                    progress_container.empty()
+                    st.error(f"Failed: {error}")
+                    return
+                progress_bar(progress_container, 15, "Market Data Loaded",
+                             f"{df.shape[1]} series × {df.shape[0]} rows · preparing analysis…")
+                st.session_state.pop("engine", None)
+                st.session_state.pop("engine_cache", None)
+                st.session_state["data"] = df
+                st.session_state["selected_commodity"] = selected_commodity
+                st.session_state["active_target"] = selected_commodity
+                st.session_state["nishkarsh_index"] = selected_commodity
+                st.session_state["run_analysis"] = True
+                st.rerun()
         else:
             df = st.session_state["data"]
             # Post-load target switch — re-runs the engines on the already
@@ -752,11 +767,18 @@ def main():
             if st.button("Refresh Data", type="secondary", use_container_width=True):
                 from data.cache import begin_force_refresh
                 begin_force_refresh()   # next fetches bypass TTL; disk snapshot kept
-                with st.spinner("Re-fetching live market data — full universe, ~30–60s…"):
-                    _rend = pd.Timestamp.today()
-                    _rdf, _rerr = fetch_commodity_dataset(_rend - pd.Timedelta(days=365 * 9), _rend)
+                # Same main-area progress bar as Run Analysis (no spinner) — the recompute
+                # on rerun picks it up from ~15%, so refresh reads as one continuous bar.
+                progress_bar(progress_container, 3, "Re-fetching Live Market Data",
+                             "yfinance · full universe · bypassing cache · ~30–60s")
+                _rend = pd.Timestamp.today()
+                _rdf, _rerr = fetch_commodity_dataset(_rend - pd.Timedelta(days=365 * 9), _rend)
                 if _rdf is not None:
+                    progress_bar(progress_container, 15, "Live Data Refreshed",
+                                 f"{_rdf.shape[1]} series × {_rdf.shape[0]} rows · recomputing…")
                     st.session_state["data"] = _rdf   # keep run_analysis → stay in results
+                else:
+                    progress_container.empty()
                 for _k in ("engine", "engine_cache", "aarambh_engine", "aarambh_fit_key",
                            "wf_results", "results_cache", "nishkarsh_result",
                            "precedent_summary", "_prec_key", "conv_norm_params"):
@@ -1113,12 +1135,12 @@ def main():
         # so the pipeline has no dark spots — printed once per new computation.
         _log_prep(stage="complete")
 
-        # Custom styled progress container
-        progress_container = st.empty()
+        # Reuse the hoisted main-area progress slot (created at the top of main())
+        # so the bar continues from where the fetch left it (~15%) with no gap.
 
         # ── Phase 1: Data Loading ─────────────────────────────────────────
         console.start_phase("DATA ACQUISITION", 1, 5)
-        progress_bar(progress_container, 2, "Resolving Basket", f"{active_target} · related ETFs & miners")
+        progress_bar(progress_container, 16, "Resolving Basket", f"{active_target} · related producers / constituents / sector ETFs")
 
         console.section("Basket Resolution")
         constituents, src_msg = get_commodity_basket(active_target)
@@ -1128,7 +1150,7 @@ def main():
         if constituents:
             console.item("Symbols", f"{', '.join(constituents[:3])}...")
         console.success(f"Resolved {len(constituents)}-instrument {active_target} basket")
-        progress_bar(progress_container, 5, "Fetching Macro Data", "yfinance · Global Macro ETFs · FX · Commodities")
+        progress_bar(progress_container, 17, "Fetching Nirnay Macro Data", "yfinance · Global Macro ETFs · FX · Commodities · ~9y")
 
         console.section("Macro Data")
         end_date = pd.Timestamp.today()
@@ -1144,7 +1166,7 @@ def main():
             console.success(f"Macro data: {len(macro_df.columns)} symbols × {len(macro_df)} rows")
         else:
             console.warning("No macro data available")
-        progress_bar(progress_container, 10, "Fetching OHLCV Data", f"yfinance · {len(constituents)} constituents")
+        progress_bar(progress_container, 18, "Fetching Constituent OHLCV", f"yfinance · {len(constituents)} basket constituents")
 
         console.section("Constituent OHLCV")
         constituent_ohlcv = {}
@@ -1156,7 +1178,7 @@ def main():
                 sample = list(constituent_ohlcv.items())[0]
                 console.item("Sample", f"{sample[0]}: {len(sample[1])} rows")
             console.success(f"OHLCV data for {len(constituent_ohlcv)} constituents")
-        progress_bar(progress_container, 15, "Assembling Macro Indicators", "yfinance · Global Macro ETFs · FX · Commodities")
+        progress_bar(progress_container, 19, "Assembling Macro Indicators", f"{len(constituent_ohlcv)} constituents downloaded · aligning macro frame")
 
         console.section("Nirnay Macro Assembly")
         nirnay_macro_df = macro_df.copy() if macro_df is not None and not macro_df.empty else pd.DataFrame()

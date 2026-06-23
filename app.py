@@ -1012,8 +1012,15 @@ def main():
     # the forward-target NaN tail is retained for live forecasting.
     _valid = _mom.notna().all(axis=1).to_numpy()
     _label_valid = _fwd.loc[_valid].notna().to_numpy()   # False for last FWD_HORIZON rows (no real label)
-    _valid_dates = _fwd.loc[_valid].index
-    _date_range = f"{_valid_dates[0].date()}_{_valid_dates[-1].date()}"
+    # Date-range fingerprint for the cache key. `data` carries a RangeIndex (reset at
+    # load), so the real dates live in the active_date column, not the index — using
+    # the index here would be integers (AttributeError on .date()). Fall back to a
+    # valid-row-count surrogate when there's no date column.
+    if active_date != "None" and active_date in data.columns:
+        _vd = pd.to_datetime(data.loc[_valid, active_date], errors="coerce").dropna()
+        _date_range = f"{_vd.iloc[0].date()}_{_vd.iloc[-1].date()}" if len(_vd) else f"n{int(_valid.sum())}"
+    else:
+        _date_range = f"n{int(_valid.sum())}"
     data = data.loc[_valid].reset_index(drop=True)
     X = _mom.loc[_valid].to_numpy()
     y = np.nan_to_num(_fwd.loc[_valid].to_numpy(), nan=0.0)

@@ -103,7 +103,12 @@ def _matrix(target, h, mom):
     data = data.dropna(subset=["DATE"]).sort_values("DATE")
     for c in [target] + feats:
         data[c] = pd.to_numeric(data[c], errors="coerce")
-    data[[target] + feats] = data[[target] + feats].ffill().bfill()
+    data[[target] + feats] = data[[target] + feats].ffill()
+    # Causal fill only — NO bfill (backfilling leading NaNs injects FUTURE values, a
+    # look-ahead that biases early-window OOS IC). Drop predictors lacking real history
+    # so the dropna below doesn't collapse the window — matches the live app pipeline.
+    _win = min(MIN_DATA_POINTS, len(data)) if len(data) else 0
+    feats = [c for c in feats if _win and data[c].tail(_win).notna().all()]
     data = data.dropna(subset=[target] + feats).reset_index(drop=True)
     if len(data) < MIN_DATA_POINTS:
         _MAT[key] = None; return None

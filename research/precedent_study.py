@@ -75,7 +75,12 @@ def build_engine_ts(fwd_horizon: int, fwd_mom_k: int) -> pd.DataFrame:
     data = data.dropna(subset=["DATE"]).sort_values("DATE")
     for c in [TARGET] + features:
         data[c] = pd.to_numeric(data[c], errors="coerce")
-    data[[TARGET] + features] = data[[TARGET] + features].ffill().bfill()
+    data[[TARGET] + features] = data[[TARGET] + features].ffill()
+    # Causal fill only — NO bfill (backfilling leading NaNs injects FUTURE values, a
+    # look-ahead). Drop predictors lacking real history so the dropna doesn't collapse
+    # the window — matches the live app pipeline.
+    _win = min(MIN_DATA_POINTS, len(data)) if len(data) else 0
+    features = [c for c in features if _win and data[c].tail(_win).notna().all()]
     data = data.dropna(subset=[TARGET] + features).reset_index(drop=True)
     if len(data) < MIN_DATA_POINTS:
         raise SystemExit(f"Only {len(data)} rows (<{MIN_DATA_POINTS}).")

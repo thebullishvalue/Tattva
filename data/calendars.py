@@ -140,18 +140,23 @@ _CAL_CACHE: dict[str, object | None] = {}
 
 
 def _get_calendar(mic: str):
-    """Lazily build & cache an exchange_calendars calendar; None on any failure."""
+    """Lazily build & cache an exchange_calendars calendar; None on any failure.
+
+    Failures are NOT cached so a transient cold-start error (memory pressure,
+    lib hiccup) retries on the next call rather than permanently disabling the
+    exchange calendar for the process lifetime.
+    """
     if not _HAVE_EC or not mic or mic == _FX:
         return None
     if mic in _CAL_CACHE:
         return _CAL_CACHE[mic]
-    cal = None
     try:
         cal = _ec.get_calendar(mic)  # type: ignore[union-attr]
-    except Exception as e:  # unknown MIC / lib hiccup → weekday fallback
+        _CAL_CACHE[mic] = cal        # only cache confirmed successful builds
+        return cal
+    except Exception as e:           # unknown MIC / lib hiccup → weekday fallback, retryable
         log.debug("calendar %s unavailable (%s); using weekday fallback", mic, e)
-    _CAL_CACHE[mic] = cal
-    return cal
+        return None
 
 
 def is_session(ticker: str | None, day) -> bool:
@@ -189,11 +194,15 @@ def session_mask(ticker: str | None, dates) -> np.ndarray:
     if cal is None:
         return weekday
     try:
-        lo, hi = dts.min(), dts.max()
-        if lo < cal.first_session or hi > cal.last_session:
+        in_bounds = (dts >= cal.first_session) & (dts <= cal.last_session)
+        if not in_bounds.any():
             return weekday
-        sess = cal.sessions_in_range(lo, hi)
-        return np.asarray(dts.isin(sess))
+        lo_ib = dts[in_bounds].min()
+        hi_ib = dts[in_bounds].max()
+        sess = cal.sessions_in_range(lo_ib, hi_ib)
+        result = weekday.copy()
+        result[in_bounds] = np.asarray(dts[in_bounds].isin(sess))
+        return result
     except Exception:
         return weekday
 

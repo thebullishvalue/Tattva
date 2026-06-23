@@ -159,7 +159,7 @@ def _backfill_missing_columns(combined: pd.DataFrame, tickers: tuple[str, ...]) 
     for snap in _load_macro_snapshots_newest_first():
         if not missing:
             break
-        snap_aligned = snap.reindex(combined.index).ffill().bfill()
+        snap_aligned = snap.reindex(combined.index).ffill()
         for t in list(missing):
             if t in snap_aligned.columns and not snap_aligned[t].isna().all():
                 combined[t] = snap_aligned[t]

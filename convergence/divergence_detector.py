@@ -196,11 +196,11 @@ class CrossSystemDivergenceDetector:
         """Classify Aarambh's directional stance."""
         if conviction < -60 and oversold_breadth > 70:
             return "EXTREME_BULLISH"
-        if conviction < -20 or oversold_breadth > 50:
+        if conviction < -20 and oversold_breadth > 60:
             return "BULLISH"
         if conviction > 60 and oversold_breadth < 30:
             return "EXTREME_BEARISH"
-        if conviction > 20 or oversold_breadth < 50:
+        if conviction > 20 and oversold_breadth < 40:
             return "BEARISH"
         return "NEUTRAL"
 

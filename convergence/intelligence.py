@@ -277,10 +277,15 @@ def _build_calibration_frame(
         a_dedup = a_dedup[~a_dedup.index.isna()]
     a_dedup = a_dedup.sort_index()
 
-    target = a_dedup[target_col].astype(float).reindex(conv.index, method="ffill")
+    # Reindex without forward-fill first so we can detect carry-forward rows.
+    target_raw = a_dedup[target_col].astype(float).reindex(conv.index)
+    is_carried = target_raw.isna()  # True = date has no genuine Aarambh price
+    target = target_raw.ffill()
 
-    # Forward log-returns at each horizon
+    # Forward log-returns at each horizon; mask rows where price was carried
+    # forward (no genuine observation) so mis-stated labels are excluded.
     log_target = np.log(target.replace(0, np.nan)).ffill()
+    log_target = log_target.where(~is_carried)
     out = conv.copy()
     for h in horizons:
         out[f"Ret_{h}b"] = log_target.shift(-h) - log_target
@@ -575,14 +580,24 @@ def _optimize_frame(
         return DEFAULT_WEIGHTS.copy(), DEFAULT_THRESHOLDS.copy()
 
     # Pre-rank the fold returns ONCE (constant across all trials).
+    # Purge gap: trim the last max(horizons) rows from each non-final fold so
+    # its forward-return labels don't overlap with the next fold's data points.
     n = len(train)
+    _purge = max(horizons) if horizons else 0
     if n < n_cv_folds * 10:
         _folds = [_PreparedFrame(train, horizons)]
         _single = True
     else:
         _edges = np.linspace(0, n, n_cv_folds + 1).astype(int)
-        _folds = [_PreparedFrame(train.iloc[_edges[i]:_edges[i + 1]], horizons)
-                  for i in range(n_cv_folds)]
+        _folds = [
+            _PreparedFrame(
+                train.iloc[_edges[i]: max(_edges[i] + 1, _edges[i + 1] - _purge)]
+                if i < n_cv_folds - 1
+                else train.iloc[_edges[i]: _edges[i + 1]],
+                horizons,
+            )
+            for i in range(n_cv_folds)
+        ]
         _single = False
 
     def _cv_score(w: dict, t: dict) -> float:
@@ -793,13 +808,17 @@ class ConvergenceTuner:
 
         # Generic fallback (arbitrary frames): original per-call path.
         n = len(frame)
+        _purge = max(self.horizons) if self.horizons else 0
         if n < self.n_cv_folds * 10:
             return _score_frame(frame, w, t, self.horizons)
         edges = np.linspace(0, n, self.n_cv_folds + 1).astype(int)
         ics = []
         scores = []
         for i in range(self.n_cv_folds):
-            sub = frame.iloc[edges[i]:edges[i + 1]]
+            if i < self.n_cv_folds - 1:
+                sub = frame.iloc[edges[i]: max(edges[i] + 1, edges[i + 1] - _purge)]
+            else:
+                sub = frame.iloc[edges[i]: edges[i + 1]]
             ic, sc = _score_frame(sub, w, t, self.horizons)
             if not np.isnan(sc):
                 ics.append(ic)
@@ -815,13 +834,21 @@ class ConvergenceTuner:
             return cached
         frame = self.opt_frame
         n = len(frame)
+        _purge = max(self.horizons) if self.horizons else 0
         if n < self.n_cv_folds * 10:
             folds = ([_PreparedFrame(frame, self.horizons)], True)
         else:
             edges = np.linspace(0, n, self.n_cv_folds + 1).astype(int)
             folds = (
-                [_PreparedFrame(frame.iloc[edges[i]:edges[i + 1]], self.horizons)
-                 for i in range(self.n_cv_folds)],
+                [
+                    _PreparedFrame(
+                        frame.iloc[edges[i]: max(edges[i] + 1, edges[i + 1] - _purge)]
+                        if i < self.n_cv_folds - 1
+                        else frame.iloc[edges[i]: edges[i + 1]],
+                        self.horizons,
+                    )
+                    for i in range(self.n_cv_folds)
+                ],
                 False,
             )
         self._opt_folds_cache = folds

@@ -91,7 +91,7 @@ from ui.tabs.tab_precedent import render_precedent_tab
 # ── Data ─────────────────────────────────────────────────────────────────────
 from data.fetcher import fetch_constituent_ohlcv, fetch_macro_live, fetch_commodity_dataset
 from data.constituents import get_commodity_basket
-from data.calendars import trading_days_behind, is_session, session_mask
+from data.calendars import trading_days_behind, is_session, session_mask, resolve_exchange
 
 # ── Engines ──────────────────────────────────────────────────────────────────
 from engines.aarambh import FairValueEngine
@@ -930,16 +930,61 @@ def main():
     # outage on a later run, while it stays selected) is silently dropped by the
     # column filter below and would KeyError at the per-column coercion. Fail clean.
     if active_target not in df.columns:
+        console.failure("Target column missing", f"'{active_target}' not in fetched dataset — its source fetch failed.")
         st.error(f"'{active_target}' data is currently unavailable (its source fetch failed). "
                  f"Pick another target, or re-run once the source is back online.")
         return
+    # Data-preparation diagnostics — collected at each stage so the terminal can
+    # show exactly how the row count evolves (no "dark spots"), and so a failure
+    # explains itself instead of a bare "Need 1500+". Emitted via _log_prep() below.
+    _prep = {"target": active_target, "min_required": MIN_DATA_POINTS}
+    _tgt_ticker_prep = ALL_TARGETS.get(active_target)
+    _tgt_exch_prep = resolve_exchange(_tgt_ticker_prep) or "weekday"
+
+    def _log_prep(stage: str = "complete") -> None:
+        """Print the data-prep pipeline to the terminal (visible on success & failure)."""
+        console.section("DATA PREPARATION")
+        console.item("Target", f"{active_target}  (ticker={_tgt_ticker_prep or 'n/a'}, exch={_tgt_exch_prep})")
+        console.item("Horizon", f"forecast {_prep.get('fwd_h','?')}d · momentum {_prep.get('fwd_k','?')}d")
+        console.item("Rows · fetched", _prep.get("rows_initial", "?"))
+        console.item("Rows · after session spine", f"{_prep.get('rows_session','?')}  ({_prep.get('sessions_dropped','?')} non-session rows removed)")
+        console.item("Features · requested", _prep.get("feats_requested", "?"))
+        console.item("Features · dropped (short history)", f"{len(_prep.get('feats_dropped', []))}"
+                     + (f" → {', '.join(_prep['feats_dropped'][:6])}{'…' if len(_prep.get('feats_dropped', [])) > 6 else ''}" if _prep.get("feats_dropped") else ""))
+        console.item("Features · kept", _prep.get("feats_kept", "?"))
+        console.item("Rows · after dropna (final spine)", _prep.get("rows_final", "?"))
+        if "valid_rows" in _prep:
+            console.item("Rows · usable (momentum warmup trimmed)", _prep["valid_rows"])
+            console.item("Labels · real (tail forecasts excluded)", _prep["label_valid"])
+        if stage == "complete":
+            console.checkpoint(f"Data spine ≥ {MIN_DATA_POINTS}", "OK")
+
     cols = [active_target] + active_features + ([active_date] if active_date != "None" and active_date in df.columns else [])
     data = df[[c for c in cols if c in df.columns]].copy()
+    _prep["rows_initial"] = len(data)
+    _prep["feats_requested"] = len(active_features)
     if active_date != "None" and active_date in data.columns:
         data[active_date] = pd.to_datetime(data[active_date], errors="coerce", dayfirst=True)
         data = data.dropna(subset=[active_date]).sort_values(active_date)
     for col in [active_target] + active_features:
         data[col] = pd.to_numeric(data[col], errors="coerce")
+    _rows_pre_session = len(data)
+    # Phase 3 — target-exchange session spine, applied FIRST so every filter below
+    # operates in the target's real trading-session space (not the US-weekday spine).
+    # The fetched matrix is a Mon–Fri spine (FX trades every weekday), so a row on the
+    # TARGET's own market holiday carries its last close forward: a fake no-change bar
+    # with stale predictors. Restricting to genuine sessions up front matters because
+    # the feature-history guard and dropna below count rows — measuring them on the US
+    # spine while the walk-forward actually runs on (fewer) India/exchange sessions can
+    # leave a target just under MIN_DATA_POINTS (India indices have more holidays, so
+    # ~1582 US weekdays = ~1496 NSE sessions). No-op for 24×5 FX and under the weekday
+    # fallback (lib absent); the `.any()` guard refuses to blank the frame on misfire.
+    if active_date != "None" and active_date in data.columns and len(data):
+        _smask = session_mask(ALL_TARGETS.get(active_target), data[active_date])
+        if _smask.any():
+            data = data[_smask].reset_index(drop=True)
+    _prep["rows_session"] = len(data)
+    _prep["sessions_dropped"] = max(0, _rows_pre_session - len(data))
     data[[active_target] + active_features] = data[[active_target] + active_features].ffill()
     # Drop features with insufficient real history. We ffill (causal: carry last known
     # value forward) but deliberately do NOT bfill — backfilling leading NaNs would inject
@@ -947,32 +992,42 @@ def main():
     # near-empty series (e.g. a just-listed ETF, or a ticker yfinance returned ~nothing for)
     # keeps its leading NaNs, and dropna(subset=all features) would then collapse the whole
     # window to the intersection — as little as 1 row. So drop any feature still carrying a
-    # NaN within the most recent MIN_DATA_POINTS rows: those can't support the walk-forward
-    # window without backfilled fakery. Survivors are non-null over the tail, so the dropna
-    # below retains >= MIN_DATA_POINTS rows whenever the target itself has the history.
+    # NaN within the most recent MIN_DATA_POINTS *target-session* rows: those can't support
+    # the walk-forward window without backfilled fakery. Measuring the tail in session space
+    # (after the restriction above) means a feature too young for THIS target's calendar
+    # (e.g. SGOV, listed 2020, vs an NSE target) is dropped, extending the usable window back
+    # rather than capping it. Survivors are non-null over the tail, so the dropna below
+    # retains >= MIN_DATA_POINTS rows whenever the target itself has the history.
     _win = min(MIN_DATA_POINTS, len(data)) if len(data) else 0
+    _feats_before_guard = list(active_features)
     active_features = [
         f for f in active_features
         if f in data.columns and _win and data[f].tail(_win).notna().all()
     ]
+    _prep["feats_dropped"] = [f for f in _feats_before_guard if f not in active_features]
+    _prep["feats_kept"] = len(active_features)
     data = data.dropna(subset=[active_target] + active_features).reset_index(drop=True)
-    # Phase 3 — target-exchange session spine. The fetched matrix is a Mon–Fri spine
-    # (FX trades every weekday), so a row on the TARGET's own market holiday carries
-    # the target's last close forward: a fake no-change bar with stale predictors.
-    # Restrict to the target exchange's real sessions so the walk-forward trains on
-    # genuine bars and the forward-return horizon counts true target trading days.
-    # No-op for 24×5 FX and under the weekday fallback (lib absent), so those paths
-    # are byte-identical to before; the `.any()` guard refuses to blank the frame if
-    # the ticker→calendar mapping ever misfires.
-    if active_date != "None" and active_date in data.columns and len(data):
-        _smask = session_mask(ALL_TARGETS.get(active_target), data[active_date])
-        if _smask.any():
-            data = data[_smask].reset_index(drop=True)
+    _prep["rows_final"] = len(data)
     if len(data) < MIN_DATA_POINTS:
-        st.error(f"Need {MIN_DATA_POINTS}+ data points for walk-forward analysis.")
+        # Explain the shortfall on the terminal — which stage cost the rows.
+        _log_prep(stage="fail")
+        console.failure(
+            "Insufficient data spine for walk-forward",
+            f"{active_target}: {len(data)} usable {_tgt_exch_prep} sessions after cleaning, "
+            f"need ≥{MIN_DATA_POINTS}. Fetched {_prep['rows_initial']} rows → "
+            f"{_prep['rows_session']} after session spine → {len(data)} after dropna "
+            f"({_prep['feats_kept']} features kept, {len(_prep['feats_dropped'])} dropped for short history).",
+        )
+        st.error(
+            f"Need {MIN_DATA_POINTS}+ data points for walk-forward analysis — "
+            f"'{active_target}' yielded only {len(data)} usable {_tgt_exch_prep} trading sessions "
+            f"after cleaning. Try a longer history, a target with more data, or fewer young predictors."
+        )
         return
     active_features = [f for f in active_features if f in data.columns]
     if not active_features:
+        _log_prep(stage="fail")
+        console.failure("No valid features", f"{active_target}: every predictor was dropped for short history.")
         st.error("No valid features found after data cleaning.")
         return
     # Returns-based forecasting takes log() of the target → it must be strictly
@@ -980,6 +1035,8 @@ def main():
     # (a spread, a net position, a yield differential) could go ≤0; fail clean
     # rather than silently producing all-NaN forecasts.
     if (pd.to_numeric(data[active_target], errors="coerce") <= 0).any():
+        _log_prep(stage="fail")
+        console.failure("Non-positive target", f"{active_target}: contains values ≤ 0; log-return engine needs a strictly positive series.")
         st.error(f"'{active_target}' has non-positive values — the returns-based engine needs a "
                  f"strictly positive series (it forecasts log-returns).")
         return
@@ -1004,6 +1061,7 @@ def main():
     )
     FWD_HORIZON = _horizon_cfg["horizon"]   # forecast horizon (trading days)
     FWD_MOM_K = _horizon_cfg["momentum"]    # trailing momentum window for predictors
+    _prep["fwd_h"], _prep["fwd_k"] = FWD_HORIZON, FWD_MOM_K
     _lvl = data[[active_target] + active_features].astype(float)
     _ret = np.log(_lvl.where(_lvl > 0)).diff().replace([np.inf, -np.inf], np.nan)
     _mom = _ret[active_features].rolling(FWD_MOM_K, min_periods=FWD_MOM_K).sum()
@@ -1012,6 +1070,8 @@ def main():
     # the forward-target NaN tail is retained for live forecasting.
     _valid = _mom.notna().all(axis=1).to_numpy()
     _label_valid = _fwd.loc[_valid].notna().to_numpy()   # False for last FWD_HORIZON rows (no real label)
+    _prep["valid_rows"] = int(_valid.sum())
+    _prep["label_valid"] = int(_label_valid.sum())
     # Date-range fingerprint for the cache key. `data` carries a RangeIndex (reset at
     # load), so the real dates live in the active_date column, not the index — using
     # the index here would be integers (AttributeError on .date()). Fall back to a
@@ -1049,6 +1109,9 @@ def main():
             "Predictors": f"{len(active_features)} columns",
             "Date Range": f"{data.shape[0]} observations",
         })
+        # Full data-preparation trace (row evolution, session spine, dropped features)
+        # so the pipeline has no dark spots — printed once per new computation.
+        _log_prep(stage="complete")
 
         # Custom styled progress container
         progress_container = st.empty()

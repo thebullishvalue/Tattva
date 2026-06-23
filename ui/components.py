@@ -101,6 +101,21 @@ def section_gap() -> None:
     st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
 
 
+def render_control_hint(text: str) -> None:
+    """Render the canonical terse helper caption beneath a control.
+
+    This is the single source of truth for the "sub-control hint" tier — the
+    uppercase micro-caption used by e.g. the "Nirnay basket · producer
+    cross-section" and Signal-Horizon hints. Use it instead of ``st.caption``
+    for control helper text so the sidebar/tab fine-print stays one coherent
+    visual hierarchy. Keep the text terse and ``·``-separated.
+    """
+    st.markdown(
+        f'<div class="control-hint">{html_mod.escape(text)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_metric_card(
     label: str,
     value: str,

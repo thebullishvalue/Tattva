@@ -3003,6 +3003,33 @@ footer {
     transform: rotate(180deg);
 }
 
+/* ================================================================
+   Control hint — canonical terse helper caption beneath a control
+   (the "Nirnay basket · producer cross-section" tier). One coherent
+   fine-print hierarchy across sidebar, main page and tabs.
+   ================================================================ */
+.control-hint {
+    font-family: var(--data);
+    font-size: 0.58rem;
+    color: var(--ink-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    line-height: 1.5;
+    margin: -0.1rem 0 0.4rem 0;
+}
+
+/* Theme Streamlit's default caption so any remaining inline data-notes
+   (e.g. "120 overlapping trading days") share the palette/font — sentence
+   case (not uppercased), one tier below .control-hint. Harmless if the
+   testid differs across Streamlit versions (selector simply won't match). */
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] p {
+    font-family: var(--data) !important;
+    color: var(--ink-tertiary) !important;
+    font-size: 0.66rem !important;
+    letter-spacing: 0.01em;
+}
+
 @keyframes slideHint {
     from {
         opacity: 0;

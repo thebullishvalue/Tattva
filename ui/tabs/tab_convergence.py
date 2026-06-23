@@ -15,11 +15,7 @@ from plotly.subplots import make_subplots
 
 from ui.theme import chart_layout, style_axes
 from ui.components import render_metric_card, render_section_header, section_gap, render_info_box
-from convergence.normalization import (
-    align_aarambh_nirnay,
-    compute_norm_params,
-    zscore_clip,
-)
+from convergence.normalization import align_aarambh_nirnay
 from core.config import (
     COLOR_GREEN,
     COLOR_RED,
@@ -113,23 +109,41 @@ def render_convergence_tab(ts_filtered=None):
     norm_a = norm_n = norm_avg = np.array([], dtype=np.float64)
     aligned_conv_raw: list = []
     if has_overlap:
-        # Key the cached μ/σ by the ACTIVE TARGET — otherwise the first target's
-        # normalization params get reused for every later target after a switch,
-        # silently mis-normalizing their Row-1 plot + TATTVA card.
-        _np_key = f"conv_norm_params::{st.session_state.get('active_target', '')}"
+        # Key by the full engine config (target + features + horizon + date range) so
+        # switching predictor sets with the same target never reuses stale z-scores.
+        _np_key = f"conv_norm_causal::{st.session_state.get('engine_cache', st.session_state.get('active_target', ''))}"
         if _np_key not in st.session_state:
-            _, full_a, full_n = align_aarambh_nirnay(aarambh_ts, nirnay_daily)
-            _p = compute_norm_params(full_a, full_n)
-            # Record the full-overlap sample size: the z-score σ is estimated from it
-            # (not the zoomable display slice), so it gates whether normalization is
-            # stable enough to plot — see the short-history guard below.
-            _p["_n"] = len(full_a)
+            # Compute per-date CAUSAL expanding-window z-scores over the FULL aligned
+            # series.  Applying terminal-point μ/σ to a historical slice is look-ahead
+            # bias: earlier bars appear less extreme than they were at the time because
+            # σ is estimated from data that didn't yet exist.
+            _full_dates, full_a, full_n = align_aarambh_nirnay(aarambh_ts, nirnay_daily)
+            fa = np.array(full_a, dtype=np.float64)
+            fn = np.array(full_n, dtype=np.float64)
+            sa, sn = pd.Series(fa), pd.Series(fn)
+            na_full = np.clip(
+                (fa - sa.expanding().mean().to_numpy())
+                / sa.expanding().std().clip(lower=1e-10).fillna(1.0).to_numpy()
+                / 3.0, -1.0, 1.0,
+            )
+            nn_full = np.clip(
+                (fn - sn.expanding().mean().to_numpy())
+                / sn.expanding().std().clip(lower=1e-10).fillna(1.0).to_numpy()
+                / 3.0, -1.0, 1.0,
+            )
+            def _dk(d):
+                return str(d.date()) if hasattr(d, "date") else str(d)
+            _p = {
+                "a": {_dk(d): v for d, v in zip(_full_dates, na_full)},
+                "n": {_dk(d): v for d, v in zip(_full_dates, nn_full)},
+                "_n": len(full_a),
+            }
             st.session_state[_np_key] = _p
         params = st.session_state[_np_key]
-        arr_a = np.array(aligned_aarambh_raw, dtype=np.float64)
-        arr_n = np.array(aligned_nirnay_raw, dtype=np.float64)
-        norm_a = zscore_clip(arr_a, params["mu_a"], params["sigma_a"])
-        norm_n = zscore_clip(arr_n, params["mu_n"], params["sigma_n"])
+        def _dk(d):
+            return str(d.date()) if hasattr(d, "date") else str(d)
+        norm_a = np.array([params["a"].get(_dk(d), 0.0) for d in aligned_dates])
+        norm_n = np.array([params["n"].get(_dk(d), 0.0) for d in aligned_dates])
         norm_avg = (norm_a + norm_n) / 2.0
         at_dedup = aarambh_ts[~aarambh_ts.index.duplicated(keep="last")] if aarambh_ts is not None else None
         for d in aligned_dates:

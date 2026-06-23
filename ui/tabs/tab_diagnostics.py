@@ -219,11 +219,17 @@ def render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_s
     )
 
     c1, c2 = st.columns(2)
+    try:
+        from analytics.regime import GARCHState, HMMState
+        _hmm_persist = f"{HMMState().transition_matrix[0, 0]:.2f}"
+        _garch_shrink = f"{GARCHState().omega:.0e}"
+    except Exception:
+        _hmm_persist, _garch_shrink = "0.98", "1e-4"
     with c1:
-        render_metric_card("COVARIANCE SHRINKAGE", "1e-4", "Regularization strength", "warning",
+        render_metric_card("COVARIANCE SHRINKAGE", _garch_shrink, "Regularization strength", "warning",
                            tooltip=TOOLTIPS["hmm_cov_shrinkage"])
     with c2:
-        render_metric_card("REGIME PERSISTENCE", "0.98", "Probability regime holds next period", "info",
+        render_metric_card("REGIME PERSISTENCE", _hmm_persist, "Probability regime holds next period", "info",
                            tooltip=TOOLTIPS["viterbi_persist"])
 
     nirnay_df = st.session_state.get("nirnay_results", pd.DataFrame())

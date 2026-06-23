@@ -133,7 +133,7 @@ _RESULTS_CACHE_MAX = 3  # keep the last N configs (≈ the 3 commodities)
 def _render_header() -> None:
     render_header(
         title=f"{PRODUCT_NAME}",
-        tagline="Commodity Fair-Value + Basket Regime Intelligence  |  Unified Convergence"
+        tagline="Cross-Asset Fair-Value + Basket Regime Intelligence  |  Unified Convergence"
     )
 
 
@@ -148,9 +148,9 @@ def _render_landing_page() -> None:
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
                 AARAMBH
             </h3>
-            <p>Walk-forward ensemble regression on the selected target (commodities & FX) vs the macro/FX universe, with conformal z-scores and DDM filtering.</p>
+            <p>Walk-forward ensemble regression on the selected target (commodities, FX, indices & ETFs) vs the macro/FX universe, with conformal z-scores and DDM filtering.</p>
             <div class='spec'>
-                <span>Ensemble:</span> Ridge + Huber + ENet + WLS<br>
+                <span>Ensemble:</span> PCA-OLS + Huber<br>
                 <span>Validation:</span> Walk-forward OOS<br>
                 <span>Bounds:</span> Conformal prediction
             </div>
@@ -165,9 +165,9 @@ def _render_landing_page() -> None:
             </h3>
             <p>Per-instrument MSF + MMR analysis across a basket of related ETFs & miners, with HMM/GARCH/CUSUM regime intelligence aggregation.</p>
             <div class='spec'>
-                <span>Regime:</span> HMM Probabilities<br>
-                <span>Projection:</span> 90D Path + Bands<br>
-                <span>Trend:</span> DFA Hurst exponent
+                <span>Signal:</span> MSF + MMR oscillator<br>
+                <span>Breadth:</span> Oversold / Overbought %<br>
+                <span>Regime:</span> HMM · GARCH · CUSUM
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -180,7 +180,7 @@ def _render_landing_page() -> None:
             </h3>
             <p>Adaptive-weighted composite of 4 dimensions: Direction, Breadth, Magnitude, Regime — with DDM.</p>
             <div class='spec'>
-                <span>Scope:</span> Multi-temporal<br>
+                <span>Fusion:</span> Aarambh + Nirnay<br>
                 <span>Smoothing:</span> Leaky DDM<br>
                 <span>Range:</span> Soft \u00b1100 limit
             </div>

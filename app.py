@@ -941,9 +941,20 @@ def main():
     for col in [active_target] + active_features:
         data[col] = pd.to_numeric(data[col], errors="coerce")
     data[[active_target] + active_features] = data[[active_target] + active_features].ffill()
-    # Drop features that are entirely NaN after ffill (failed fetch with no snapshot).
-    # Keeping them would cause dropna to wipe every row and fail the walk-forward.
-    active_features = [f for f in active_features if f in data.columns and data[f].notna().any()]
+    # Drop features with insufficient real history. We ffill (causal: carry last known
+    # value forward) but deliberately do NOT bfill — backfilling leading NaNs would inject
+    # future values into the past (look-ahead bias). The consequence is that a young or
+    # near-empty series (e.g. a just-listed ETF, or a ticker yfinance returned ~nothing for)
+    # keeps its leading NaNs, and dropna(subset=all features) would then collapse the whole
+    # window to the intersection — as little as 1 row. So drop any feature still carrying a
+    # NaN within the most recent MIN_DATA_POINTS rows: those can't support the walk-forward
+    # window without backfilled fakery. Survivors are non-null over the tail, so the dropna
+    # below retains >= MIN_DATA_POINTS rows whenever the target itself has the history.
+    _win = min(MIN_DATA_POINTS, len(data)) if len(data) else 0
+    active_features = [
+        f for f in active_features
+        if f in data.columns and _win and data[f].tail(_win).notna().all()
+    ]
     data = data.dropna(subset=[active_target] + active_features).reset_index(drop=True)
     # Phase 3 — target-exchange session spine. The fetched matrix is a Mon–Fri spine
     # (FX trades every weekday), so a row on the TARGET's own market holiday carries

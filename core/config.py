@@ -509,12 +509,12 @@ COMMODITY_TARGETS = {
 COMMODITY_BASKETS = {
     "Gold": [
         "NEM", "GOLD", "AEM", "KGC", "AU", "GFI", "HMY", "BTG", "IAG",
-        "EGO", "AGI", "SSRM", "EQX", "NGD",     # producers
+        "EGO", "AGI", "SSRM", "EQX",            # producers (NGD removed — unfetchable on yfinance)
         "OR", "WPM", "FNV", "RGLD",             # royalty / streamers
     ],
     "Silver": [
         "PAAS", "HL", "AG", "CDE", "FSM",
-        "MAG", "SVM", "EXK", "ASM",             # silver producers
+        "SVM", "EXK", "ASM",                    # silver producers (MAG removed — unfetchable on yfinance)
         "WPM",                                  # streamer
     ],
     "Copper": [
@@ -563,7 +563,7 @@ COMMODITY_BASKETS = {
     # proxies (USO) — those double-count or duplicate the target.
     "Brent Crude": [
         "XOM", "CVX", "COP", "BP", "SHEL", "TTE", "EQNR",   # integrated majors
-        "EOG", "OXY", "DVN", "FANG", "HES", "CTRA",         # E&P producers
+        "EOG", "OXY", "DVN", "FANG", "CTRA",                # E&P producers (HES removed — delisted, Chevron acquisition)
         "SLB", "HAL", "BKR",                                # oilfield services
     ],
     # Jeera (NCDEX cumin) has NO listed pure-play producers — same problem as

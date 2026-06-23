@@ -1,6 +1,6 @@
 # TATTVA — तत्त्व
 
-**Unified Convergence Engine** · v2.3.0 · *@thebullishvalue*
+**Unified Convergence Engine** · v2.4.0 · *@thebullishvalue*
 
 > *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality": the underlying
 > truth distilled from the convergence of evidence.
@@ -165,8 +165,9 @@ constant. It reports only — config is applied by hand after review.
 ## Interpreting the output
 
 - **Hero card** — normalized convergence signal and the Aarambh / Nirnay contributions.
-- **Aarambh tab** — price + expected-forward-return forecast; model quality shows
-  **Val IC** and the train→val gap (overfit detector).
+- **Aarambh tab** — price with the model's forward expected-price projection (an
+  implied target + uncertainty cone) and the expected-forward-return forecast driving
+  it; model quality shows **Val IC** and the train→val gap (overfit detector).
 - **Precedent tab** — the most statistically-similar historical states (Mahalanobis)
   and what the target did next, at the lens horizons; an empirical base rate to read
   *alongside* Aarambh (agreement strengthens conviction, disagreement is a divergence).

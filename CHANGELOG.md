@@ -13,6 +13,88 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [2.4.0] — 2026-06-23 — *Data-pipeline recovery · forward price projection · UI fidelity, motion & logging*
+
+Restores end-to-end runnability after the leakage hardening (removing a look-ahead
+`bfill` had a latent consequence that collapsed datasets), gets **every** asset class
+across the walk-forward floor, turns the Aarambh price panel into a genuine forecast,
+and runs a full **fidelity pass** so the UI describes the system exactly as it behaves.
+Backward compatible — no config or data-format changes.
+
+### Fixed
+- **Total dataset collapse to a single row ("Need 1500+ data points").** Removing the
+  look-ahead `.bfill()` from the predictor fill (a correctness fix) left near-empty
+  columns all-NaN; a target retained for selection but returned ~empty by yfinance
+  (e.g. `^CNXSC` / Nifty Smallcap 100) leaked into the predictor set, and
+  `dropna(subset=all features)` then wiped every row. Added a **per-feature history
+  guard**: after the causal `ffill`, any predictor still NaN within the most recent
+  `MIN_DATA_POINTS` target-session rows is dropped (it can't support the walk-forward) —
+  without ever re-introducing `bfill`. The window now settles on real data above the floor.
+- **India indices and the ETF universe failed the 1500-row floor while US/commodity
+  targets passed.** The history guard and `dropna` were measured on the US-weekday spine,
+  but the walk-forward runs on the target's exchange sessions — NSE's heavier holiday
+  calendar turned ~1582 weekdays into only ~1496 sessions. The Phase-3 `session_mask`
+  restriction now runs **first**, so all row-filtering happens in target-session space;
+  the guard then drops predictors too young for *that* calendar (e.g. SGOV vs an NSE
+  target), extending the usable window back (Nifty 50: 1496 → 1598 sessions).
+- **`AttributeError: 'int' object has no attribute 'date'` while building the result
+  cache key.** The date-range fingerprint called `.date()` on the frame index, which is a
+  `RangeIndex` (integers) after load. It now derives the range from the `DATE` column,
+  with a row-count surrogate fallback when no date column is present.
+- **Dead macro ticker.** `BUNL.L` (delisted) → `IBGL.L` (iShares € Govt Bond 15–30yr,
+  the renamed ISIN-equivalent) — restores the Germany-Bunds/long predictor (history to 2008).
+- **CUSUM change-point self-reference (look-ahead).** Both the Numba kernel
+  (`analytics/regime.py`) and the Python `CUSUMDetector` included the current observation
+  in the running mean/σ used to z-score that same observation. The window now excludes the
+  current point.
+- **Nirnay MMR warm-up leak.** The per-driver `x_std` warm-up fill used the full-series
+  std (`fillna(x.std())`) — a look-ahead; replaced with a neutral `1.0`.
+- **Convergence magnitude dimension saturated.** A spurious `×10` on the Nirnay oscillator
+  magnitude in `CrossSystemValidator` pinned the magnitude-alignment score at its ceiling;
+  removed.
+- **OU σ under-estimated near a unit root.** The `a > 0.98` branch dropped the `1/(1−a²)`
+  factor; unified to a single formula across all `a`.
+- **Convergence tab crash guard.** `None` values in the conviction series are coerced to
+  `np.nan` before `np.clip` (previously a `TypeError`).
+- **Convergence regime-key naming.** `regime_bull`/`regime_bear` → `regime_bull_pct`/
+  `regime_bear_pct` on both writer (`app.py`) and reader (`cross_validator.py`), so the
+  percentage scale is explicit.
+
+### Added
+- **Forward expected-price projection (Aarambh).** The Price & Forecast panel turns the
+  latest expected forward return into a price path — an implied target *h* days out with
+  an OOS-RMSE uncertainty cone, anchored at the last close (emerald = bullish, rose =
+  bearish). The section is now a genuine forecast, not a history of past leans.
+- **Full per-constituent regime stack surfaced (Nirnay).** The engine runs
+  Kalman→GARCH→HMM→CUSUM but only HMM reached the UI. The constituent drill-down now also
+  shows `Vol_Regime` (GARCH), `Change_Point` (CUSUM) and `Confidence` — making the
+  advertised "HMM · GARCH · CUSUM" true at the tab level.
+- **Continuous progress bar + data-prep telemetry.** A single main-area progress bar now
+  drives the whole run from the first click (fetch → data spine → engines → convergence),
+  replacing the sidebar spinners. A "DATA PREPARATION" terminal trace logs the row
+  evolution (fetched → session spine → features dropped → final), and every early-exit now
+  prints a specific failure reason instead of a silent "Need 1500+".
+
+### Changed
+- **Landing/tab copy corrected to the actual system.** Aarambh ensemble shown as
+  **PCA-OLS + Huber** (the default; Ridge/ENet/WLS are off); the Nirnay card spec fixed to
+  MSF+MMR · Oversold/Overbought % · HMM·GARCH·CUSUM (the OU-90d projection and DFA Hurst it
+  had listed are *Aarambh* features); Convergence card now "Fusion: Aarambh + Nirnay".
+  Tagline broadened to **Cross-Asset**; generic "commodity" copy → "target" across tabs.
+- **Aarambh breadth cards** now read "fraction of **lookback windows**" (not "models" —
+  breadth is across windows); the **Nirnay HMM** header is clarified as the basket-average
+  of per-constituent states; the **Avg Unified Signal** card's color thresholds align to
+  ±2 (matching its label and chart).
+- **Unified control-hint typography.** A single `.control-hint` style + `render_control_hint`
+  helper replaces ad-hoc `st.caption` sidebar hints, so the sidebar/tab fine-print is one
+  coherent tier; a subtle "working" sheen was added to the progress fill.
+
+### Docs
+- README: version, and the Aarambh-tab description now notes the forward price projection.
+- Refreshed the `_render_fair_value_chart` docstring to describe the new projection.
+
+---
+
 ## [2.3.0] — 2026-06-22 — *Per-exchange calendars · global macro universe · leakage & freshness hardening*
 
 Takes data freshness from heuristic to calendar-exact: holiday-aware **per-exchange

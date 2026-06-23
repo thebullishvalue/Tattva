@@ -80,6 +80,7 @@ from ui.components import (
     render_chart_skeleton,
     render_collapsible_section,
     render_collapsible_section_close,
+    render_control_hint,
     section_gap,
 )
 from ui.tabs.tab_aarambh import render_aarambh_tab
@@ -572,12 +573,7 @@ def main():
             _arch_label = {"producer": "producer cross-section",
                            "hybrid": "agribusiness + futures", "proxy": "cross-asset proxy",
                            "index": "index constituents"}.get(_arch, _arch)
-            st.markdown(
-                f'<div style="font-family:var(--data);font-size:0.58rem;'
-                f'color:var(--ink-tertiary);text-transform:uppercase;letter-spacing:0.08em;'
-                f'margin:-0.2rem 0 0.3rem 0;">Nirnay basket · {_arch_label}</div>',
-                unsafe_allow_html=True,
-            )
+            render_control_hint(f"Nirnay basket · {_arch_label}")
 
         # ── Signal Horizon (forecast lens) ──────────────────────────────────
         # Pick how far ahead the engine reads. Daily bars throughout — this only
@@ -599,12 +595,7 @@ def main():
                  "tactical hedging / short-term trades. Switching re-runs the engine "
                  "(cached per lens, so flipping back is instant).",
         )
-        st.markdown(
-            f'<div style="font-family:var(--data);font-size:0.58rem;'
-            f'color:var(--ink-tertiary);text-transform:uppercase;letter-spacing:0.08em;'
-            f'margin:-0.2rem 0 0.3rem 0;">{SIGNAL_HORIZONS[_sel_horizon]["blurb"]}</div>',
-            unsafe_allow_html=True,
-        )
+        render_control_hint(SIGNAL_HORIZONS[_sel_horizon]["blurb"])
 
         df = None
         has_data = "data" in st.session_state and "run_analysis" in st.session_state
@@ -708,7 +699,7 @@ def main():
             st.session_state["active_features"] = tuple(valid_defaults or available[:3])
 
         with st.expander("Predictor Columns", expanded=False):
-            st.caption("Select predictors, then click Apply to recompute.")
+            render_control_hint("Select predictors · click Apply to recompute")
             staging_features = st.multiselect(
                 "Predictor Columns", options=available,
                 default=[f for f in st.session_state["active_features"] if f in available],
@@ -730,7 +721,7 @@ def main():
                     parts.append(f"+{len(added)} added")
                 if removed:
                     parts.append(f"−{len(removed)} removed")
-                st.caption(f"Pending: {', '.join(parts)}")
+                render_control_hint(f"Pending · {' · '.join(parts)}")
 
             if st.button("Apply Configuration" if has_changes else "No changes", disabled=not has_changes, type="primary" if has_changes else "secondary"):
                 if has_changes:
@@ -786,7 +777,7 @@ def main():
                 for _k in [k for k in list(st.session_state) if str(k).startswith("conv_norm_params")]:
                     st.session_state.pop(_k, None)
                 st.rerun()
-            st.caption("Force-fetch the latest market data, then recompute · slower than Reset.")
+            render_control_hint("Force-fetch live data · recompute · slower than Reset")
 
         # ── Model Passport (Sanket-style) ──────────────────────────────
         # Surfaces the active calibrated profile (Intelligence Mode). Each

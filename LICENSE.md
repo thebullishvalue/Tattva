@@ -1,7 +1,7 @@
 # LICENSE
 
 **TATTVA (तत्त्व) — Unified Convergence Engine**
-**Version 2.3.0**
+**Version 2.4.0**
 
 ---
 
@@ -89,6 +89,7 @@ to terminate this licence at any time for breach of terms.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 2.4.0 | 2026-06-23 | Data-pipeline recovery (sparse-feature guard after bfill removal; session-space row-filtering so India/ETF targets clear the walk-forward floor; cache-key fix; `BUNL.L`→`IBGL.L`), look-ahead fixes (CUSUM self-reference, MMR warm-up, OU σ), forward expected-price projection on the Aarambh panel, per-constituent GARCH/CUSUM surfaced, continuous progress bar + data-prep logging, and a UI fidelity pass aligning all copy to the system |
 | 2.3.0 | 2026-06-22 | Per-exchange trading calendars (holiday-aware freshness, partial-session gate, target-session model spine; optional `exchange_calendars` with Mon–Fri fallback), global macro universe (EU/Asia/AU indices + bonds), predictor→target leakage fixes (INR crosses, Copper/DBB), tuning-orchestrator preflight data check |
 | 2.2.0 | 2026-06-19 | Signal Horizon lenses (Tactical 10d / Positional 20d, data-chosen), Precedent analog-matching tab (Mahalanobis, ported from Arthagati), leakage-free purged Aarambh walk-forward, Jeera (NCDEX) target + data-backed baskets |
 | 2.1.0 | 2026-06-17 | Multi-asset universe (India/US equity indices + FX alongside commodities), `ols+huber` ensemble default, uncapped constituents, macro-fetch backfill, dead-code/version cleanup |

@@ -894,7 +894,12 @@ def main():
                             t_last = pd.Timestamp(tdates.iloc[j]).to_pydatetime()
                     if t_last is not None:
                         t_behind = trading_days_behind(_tgt_ticker, t_last.date(), today)
-                        if t_behind >= 1:
+                        # Suppress when t_behind == 1 AND today is a live session for
+                        # this exchange: the prior-close being carried forward is normal
+                        # intraday behaviour until the market closes and yfinance
+                        # publishes the final settlement bar.
+                        _today_is_session = is_session(_tgt_ticker, today)
+                        if t_behind >= 2 or (t_behind == 1 and not _today_is_session):
                             render_warning_box(
                                 title=f"{active_target} data is lagging",
                                 content=(f"This target last updated {t_last.strftime('%d %b %Y')} "

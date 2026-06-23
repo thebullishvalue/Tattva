@@ -309,10 +309,12 @@ def fetch_commodity_dataset(
     renamed = macro_df[present].rename(columns=ticker_to_name)
 
     # Drop columns yfinance returned empty / near-empty: failed or delisted
-    # tickers (e.g. BUNL.L) come back as all-NaN. Such a column survives the
-    # app's ffill()+bfill() still all-NaN and would wipe every row at the
-    # subsequent dropna() step. Require ≥20% real coverage; always retain the
-    # commodity targets regardless.
+    # tickers (e.g. a renamed ETF) come back as all-NaN. Such a column survives the
+    # app's causal ffill() still all-NaN and would wipe every row at the subsequent
+    # dropna() step. Require ≥20% real coverage; always retain the target columns
+    # regardless (so they stay selectable). NOTE: a retained-but-sparse TARGET (e.g.
+    # ^CNXSC / Nifty Smallcap 100) still leaks into the predictor set when it is not
+    # the active target — the app's per-feature history guard drops it there.
     coverage = renamed.notna().mean()
     keep = [c for c in renamed.columns if coverage[c] >= 0.20]
     for tgt in ALL_TARGETS:  # always retain every target column (commodity/FX/index)

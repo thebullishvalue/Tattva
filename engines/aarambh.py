@@ -74,7 +74,7 @@ except ImportError:
 from analytics.ou_process import ornstein_uhlenbeck_estimate, andrews_median_unbiased_ar1
 from analytics.ddm_filter import drift_diffusion_filter
 from analytics.hurst import hurst_dfa
-from analytics.structural_breaks import detect_structural_breaks
+from analytics.structural_breaks import detect_structural_breaks, _rolling_mean_breaks
 from analytics.conformal import compute_conformal_zscores
 from analytics.utils import (
     _classify_zones,
@@ -147,6 +147,7 @@ class FairValueEngine:
         forward_signal: bool = False,
         n_pca_components: int | None = None,
         purge: int = 0,
+        label_mask: np.ndarray | None = None,
     ) -> "FairValueEngine":
         """Run the full walk-forward pipeline.
 
@@ -179,6 +180,7 @@ class FairValueEngine:
         self.forward_signal = forward_signal
         self.n_pca_components = n_pca_components
         self.purge = max(0, int(purge))
+        self.label_mask = label_mask  # shape (n_samples,) bool — False for zero-filled tail rows
 
         # Detect structural breaks
         self.break_dates = detect_structural_breaks(y)
@@ -309,7 +311,7 @@ class FairValueEngine:
             buy_changes: list[float] = []
             sell_changes: list[float] = []
 
-            for i in range(burn_in, len(ts) - period):
+            for i in range(burn_in, len(ts) - period, period):
                 score = ts["ConvictionScore"].iloc[i]
                 fwd = ts.get(f"FwdChg_{period}")
                 if fwd is None:
@@ -388,8 +390,12 @@ class FairValueEngine:
         self, t_start: int, t_end: int, X: np.ndarray, y: np.ndarray,
         global_weights: np.ndarray,
     ) -> tuple[int, int, np.ndarray, np.ndarray, dict, np.ndarray]:
-        valid_breaks = [b for b in self.break_dates if b < t_start]
-        last_break = valid_breaks[-1] if valid_breaks else 0
+        # Causal break detection: use only y[:t_start] so future data never
+        # influences the training window boundary at this step.  The cheap
+        # O(n) trailing-mean fallback is fast enough to run every chunk; the
+        # full-series self.break_dates is kept only for display/diagnostics.
+        _local_breaks = _rolling_mean_breaks(y[:t_start], max_breaks=3, trim=0.15)
+        last_break = _local_breaks[-1] if _local_breaks else 0
         max_lookback = max(0, t_start - MAX_TRAIN_SIZE)
 
         if last_break > max_lookback:
@@ -544,16 +550,19 @@ class FairValueEngine:
         preds_list: list[np.ndarray] = []
         weights: list[float] = []
 
-        def _add_safe_pred(arr_pred: np.ndarray) -> None:
+        def _add_safe_pred(arr_pred: np.ndarray, model: object = None) -> None:
             arr_clean = np.where(np.isfinite(arr_pred) & (np.abs(arr_pred) < 1e10), arr_pred, np.nan)
             if not np.all(np.isnan(arr_clean)):
                 preds_list.append(arr_clean)
-                if X_val is not None and len(X_val) > 0 and scaler is not None and _HAS_SKLEARN:
+                if (X_val is not None and y_val is not None and len(X_val) > 0
+                        and scaler is not None and model is not None and _HAS_SKLEARN):
                     try:
                         from sklearn.metrics import mean_absolute_error
                         val_scaled = scaler.transform(X_val[:, valid_cols])
-                        val_pred = arr_pred  # simplified: use same model
-                        mae = mean_absolute_error(y_val, val_pred[:len(y_val)]) if len(val_pred) >= len(y_val) else 1.0
+                        reducer = models.get("reducer")
+                        val_feat = reducer.transform(val_scaled) if reducer is not None else val_scaled
+                        val_pred = model.predict(val_feat)
+                        mae = float(mean_absolute_error(y_val, val_pred))
                         weights.append(max(1.0 / max(mae, 1e-6), 0.01))
                     except Exception:
                         weights.append(0.05)
@@ -572,16 +581,16 @@ class FairValueEngine:
                     m = models.get(key)
                     if m is not None:
                         try:
-                            _add_safe_pred(m.predict(X_feat))
+                            _add_safe_pred(m.predict(X_feat), model=m)
                         except Exception:
                             pass
                 if models.get("ols") is not None:
                     try:
                         if reducer is not None:
-                            _add_safe_pred(models["ols"].predict(X_feat))
+                            _add_safe_pred(models["ols"].predict(X_feat), model=models["ols"])
                         elif models.get("pca_wls") is not None:
                             X_pca_pred = models["pca_wls"].transform(X_scaled)
-                            _add_safe_pred(models["ols"].predict(X_pca_pred))
+                            _add_safe_pred(models["ols"].predict(X_pca_pred), model=models["ols"])
                     except Exception:
                         pass
             except Exception:
@@ -616,7 +625,14 @@ class FairValueEngine:
         oos_mask = np.arange(self.n_samples) >= MIN_TRAIN_SIZE
         y_oos = self.y[oos_mask]
         pred_oos = self.predictions[oos_mask]
-        valid = np.isfinite(pred_oos)
+        # Exclude rows where (a) prediction is non-finite or (b) the label is
+        # a zero-fill placeholder (last FWD_HORIZON rows have no real future data).
+        lm = self.label_mask
+        if lm is not None:
+            lm_oos = lm[oos_mask]
+            valid = np.isfinite(pred_oos) & np.isfinite(y_oos) & lm_oos
+        else:
+            valid = np.isfinite(pred_oos) & np.isfinite(y_oos)
         y_v, p_v = y_oos[valid], pred_oos[valid]
 
         if len(y_v) > 2 and _HAS_SKLEARN:
@@ -632,12 +648,19 @@ class FairValueEngine:
             mae = float(np.mean(np.abs(y_v - p_v)))
 
         if len(y_v) > 2:
-            rw_forecast = np.empty_like(y_v)
-            rw_forecast[0] = y_v[0]
-            rw_forecast[1:] = y_v[:-1]
-            ss_res = float(np.sum((y_v - p_v) ** 2))
-            ss_rw = float(np.sum((y_v - rw_forecast) ** 2))
-            r2_vs_rw = 1 - ss_res / max(ss_rw, 1e-10)
+            # Subsample at the label horizon stride so consecutive subsampled labels
+            # are non-overlapping, giving an unbiased random-walk baseline.
+            # self.purge is set to FWD_HORIZON by fit(); falls back to stride-1 when
+            # the engine is used in non-predictive mode (purge=0).
+            _stride = max(1, self.purge)
+            y_sub = y_v[::_stride]
+            p_sub = p_v[::_stride]
+            rw_fc = np.empty_like(y_sub)
+            rw_fc[0] = y_sub[0]
+            rw_fc[1:] = y_sub[:-1]
+            ss_res_sub = float(np.sum((y_sub - p_sub) ** 2))
+            ss_rw_sub = float(np.sum((y_sub - rw_fc) ** 2))
+            r2_vs_rw = 1 - ss_res_sub / max(ss_rw_sub, 1e-10)
         else:
             r2_vs_rw = 0.0
 
@@ -808,12 +831,12 @@ class FairValueEngine:
             self.ts_data.loc[conf_bottoms, "IsPivotBottom"] = True
 
     def _compute_forward_changes(self) -> None:
-        n = len(self.ts_data)
+        # Recover price level from cumulative log-returns so forward changes
+        # are clean non-overlapping returns, not sums of overlapping labels.
         y_series = pd.Series(self.y)
+        price = np.exp(y_series.cumsum())
         for period in (5, 10, 20):
-            # self.y is daily log-returns. The cumulative N-day forward return 
-            # is the rolling sum of the next N days.
-            fwd = y_series.rolling(window=period).sum().shift(-period) * 100
+            fwd = (price.shift(-period) / price - 1.0) * 100.0
             self.ts_data[f"FwdChg_{period}"] = np.clip(fwd.values, -100, 100)
 
     def _compute_ou_diagnostics(self) -> None:
@@ -870,7 +893,9 @@ class FairValueEngine:
 
     def _compute_hurst(self) -> None:
         oos_r = self.residuals[MIN_TRAIN_SIZE:]
-        if len(oos_r) > 30:
+        # DFA log-log regression needs ≥200 points for ≥5 scale pairs.
+        # Below that, the CI is ~±0.3 — meaningless — so report a neutral 0.5.
+        if len(oos_r) > 200:
             if self.ou_params.get("adf_pvalue", 1.0) > 0.05:
                 self.hurst = 0.5
             else:

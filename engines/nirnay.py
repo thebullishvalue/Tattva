@@ -35,8 +35,8 @@ def _sigmoid(x: np.ndarray | float, scale: float = 1.0) -> np.ndarray | float:
 def _zscore_clipped(series: pd.Series, window: int, clip: float = 3.0) -> pd.Series:
     """Rolling causal z-score with outlier clipping. Uses shift(1) to prevent today's outlier from biasing the denominator."""
     series_filled = series.ffill().fillna(0)
-    roll_mean = series_filled.rolling(window=window, min_periods=1).mean().shift(1).bfill()
-    roll_std = series_filled.rolling(window=window, min_periods=1).std().shift(1).bfill()
+    roll_mean = series_filled.rolling(window=window, min_periods=1).mean().shift(1).fillna(0)
+    roll_std = series_filled.rolling(window=window, min_periods=1).std().shift(1).fillna(0)
     z = (series_filled - roll_mean) / roll_std.replace(0, np.nan)
     return z.clip(-clip, clip).fillna(0)
 
@@ -162,8 +162,8 @@ def calculate_mmr(
     if len(df) < length + 10 or not available_macros:
         return (pd.Series(0.0, index=df.index), [], pd.Series(0.0, index=df.index))
 
-    y_mean = target.rolling(length, min_periods=1).mean().shift(1).bfill()
-    y_std = target.rolling(length, min_periods=1).std().shift(1).bfill()
+    y_mean = target.rolling(length, min_periods=1).mean().shift(1).fillna(float(target.iloc[0]))
+    y_std = target.rolling(length, min_periods=1).std().shift(1).fillna(1.0)
 
     preds_list = []
     r2_list = []
@@ -171,11 +171,11 @@ def calculate_mmr(
     # Vectorized causal rolling computations
     for ticker in available_macros:
         x = df[ticker].ffill().fillna(0)
-        x_mean = x.rolling(length, min_periods=1).mean().shift(1).bfill()
-        x_std = x.rolling(length, min_periods=1).std().shift(1).bfill()
-        
+        x_mean = x.rolling(length, min_periods=1).mean().shift(1).fillna(0)
+        x_std = x.rolling(length, min_periods=1).std().shift(1).fillna(x.std())
+
         # Pearson correlation shifted (only prior data used to estimate relationship)
-        roll_corr = x.rolling(length, min_periods=length).corr(target).shift(1).bfill().fillna(0)
+        roll_corr = x.rolling(length, min_periods=length).corr(target).shift(1).fillna(0)
         slope = roll_corr * (y_std / x_std.replace(0, np.nan)).fillna(0)
         intercept = y_mean - (slope * x_mean)
         
@@ -223,15 +223,18 @@ def calculate_mmr(
     mmr_signal = _sigmoid(mmr_z, 1.5)
     mmr_quality = pd.Series(np.sqrt(model_r2_arr), index=df.index).fillna(0)
 
-    # For display purposes (not trading logic), get the trailing global top drivers
+    # Top drivers from the causal per-row R² weights at the last bar (same
+    # weights that actually drove the MMR signal, not a trailing static corr).
     driver_details = []
-    if len(df) > length:
-        trailing_corr = df[available_macros].iloc[-length:].corrwith(target.iloc[-length:]).abs().sort_values(ascending=False)
-        for ticker in trailing_corr.head(num_vars).index:
-            driver_details.append({
-                "Symbol": ticker,
-                "Correlation": round(float(trailing_corr[ticker]), 4),
-            })
+    if len(all_r2) > 0:
+        last_r2 = all_r2.iloc[-1].dropna()
+        if len(last_r2) > 0:
+            top_r2 = last_r2.nlargest(num_vars)
+            for ticker in top_r2.index:
+                driver_details.append({
+                    "Symbol": ticker,
+                    "Correlation": round(float(np.sqrt(max(0.0, float(top_r2[ticker])))), 4),
+                })
 
     return mmr_signal, driver_details, mmr_quality
 
@@ -483,7 +486,7 @@ def aggregate_constituent_timeseries(
     # Regime_Neutral is the original "else" branch: not bull/bear/transition.
     ind["Regime_Neutral"] = (
         1 - ind["Regime_Bull"] - ind["Regime_Bear"] - ind["Regime_Transition"]
-    )
+    ).clip(lower=0)
 
     g = ind.groupby("Date", sort=True)
     sums = g[[

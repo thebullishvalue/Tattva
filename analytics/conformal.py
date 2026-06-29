@@ -8,7 +8,7 @@ ANALYTICS — Conformal prediction bounds for walk-forward regression residuals.
 from __future__ import annotations
 
 import numpy as np
-from analytics._njit_compat import njit
+from numba import njit
 
 
 @njit(cache=True)

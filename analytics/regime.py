@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from numba import njit
+from analytics._njit_compat import njit
 from analytics.utils import MathUtils
 
 @njit(cache=True)

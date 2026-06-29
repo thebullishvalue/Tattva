@@ -4,9 +4,13 @@
 # Core Framework
 streamlit>=1.30.0
 pandas>=2.1.0
-numpy>=1.24.0
+# numpy/numba are ABI-coupled: an unpinned `numba` + `numpy>=1.24` can resolve to
+# a numba built against a *different* numpy than the one installed, which segfaults
+# on Streamlit Cloud the moment numba touches numpy's C API (the "Segmentation
+# fault" in run-streamlit.sh at boot). Pin both to a known-compatible pair.
+numpy>=1.24.0,<2.1
 plotly>=5.18.0
-numba
+numba>=0.60.0,<0.62
 
 # Scientific Computing
 scipy>=1.11.0

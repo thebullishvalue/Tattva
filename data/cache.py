@@ -25,11 +25,36 @@ log = logging.getLogger(__name__)
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "tattva"
 DEFAULT_TTL_SECONDS = 3600  # 1 hour
 
-# Force-refresh window. While ``time.time() < _FORCE_UNTIL`` every ``Cache.get``
-# returns None (→ live re-fetch) but the disk snapshot is preserved as a fallback.
-# Set via ``begin_force_refresh()`` from the UI "Refresh Data" action. Bounded by a
-# window so it self-clears after one pipeline run (≈ covers a full universe re-pull).
-_FORCE_UNTIL = 0.0
+# Disk snapshot retention (data.fetcher's rate-limit column-backfill scans
+# these; keep enough that a multi-day gap still has something to fall back to
+# without the namespace growing forever — see B3 in the audit).
+_SNAPSHOT_RETENTION_DAYS = 7
+
+# Force-refresh window, PER SESSION. While a session's entry here is unexpired,
+# that session's ``Cache.get`` calls return None (-> live re-fetch) but the disk
+# snapshot is preserved as a fallback. Set via ``begin_force_refresh()`` from the
+# UI "Refresh Data" action.
+#
+# Streamlit serves every concurrent session from ONE process, so a single global
+# deadline (the previous implementation) meant one user's "Refresh Data" click
+# forced EVERY other concurrent session's next fetch to bypass cache too —
+# amplifying rate-limit exposure across unrelated users for no benefit to them
+# (audit finding B2). Keying by session ID scopes the bypass to the session that
+# actually asked for it. Falls back to a single shared key outside a Streamlit
+# run context (e.g. the research/ scripts, which don't have one) — identical to
+# the old global-window behaviour there, since there's only ever one "session".
+_FORCE_UNTIL: dict[str, float] = {}
+
+
+def _current_session_key() -> str:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        ctx = get_script_run_ctx()
+        if ctx is not None:
+            return ctx.session_id
+    except Exception:
+        pass
+    return "_no_session_"
 
 
 class Cache:
@@ -75,9 +100,13 @@ class Cache:
         returns ``None`` so the caller re-fetches live — WITHOUT deleting the disk
         snapshot, so ``get_stale`` still serves last-good data if the live fetch
         fails (rate limit / circuit open). That's the safety the naive "clear cache"
-        lacks: a failed forced refresh degrades to stale, never to empty.
+        lacks: a failed forced refresh degrades to stale, never to empty. The window
+        is scoped to the CALLING SESSION (see ``_current_session_key``), so one
+        user's forced refresh doesn't force every concurrent session's fetches to
+        bypass cache too.
         """
-        if time.time() < _FORCE_UNTIL:
+        _deadline = _FORCE_UNTIL.get(_current_session_key(), 0.0)
+        if time.time() < _deadline:
             with self._lock:
                 self.misses += 1
             return None
@@ -142,6 +171,29 @@ class Cache:
                 pickle.dump((value, ts), f)
         except Exception as e:
             log.warning("Cache disk write failed for %s: %s", key[:8], e)
+        self._prune_old_disk_entries()
+
+    def _prune_old_disk_entries(self) -> None:
+        """Delete disk entries older than ``_SNAPSHOT_RETENTION_DAYS``.
+
+        Namespaces whose key includes a rolling date (e.g. macro_cache, whose
+        args include an end-date that advances daily) accumulate one new
+        ~5-10MB pickle per day forever with no eviction (audit finding B3).
+        Keeps a retention window rather than pruning to just the newest file,
+        since data.fetcher's rate-limit backfill (_load_macro_snapshots_
+        newest_first) scans recent-but-not-latest snapshots for columns the
+        current fetch is missing.
+        """
+        cutoff = time.time() - _SNAPSHOT_RETENTION_DAYS * 86400
+        try:
+            for p in self._disk_dir.glob("*.pkl"):
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink()
+                except OSError:
+                    continue
+        except Exception as e:  # noqa: BLE001
+            log.debug("Cache prune skipped for %s: %s", self._disk_dir, e)
 
     def invalidate(self, *args: Any) -> None:
         key = self._key(*args)
@@ -186,11 +238,19 @@ macro_cache = Cache(ttl=3600, version="v1", namespace="macro")
 
 
 def begin_force_refresh(window: float = 300.0) -> None:
-    """Open a force-refresh window: for ``window`` seconds, every ``Cache.get``
-    misses (→ live re-fetch) while disk snapshots stay intact as a failure fallback.
-    Self-clearing — covers one full pipeline re-pull, then normal TTL resumes."""
-    global _FORCE_UNTIL
-    _FORCE_UNTIL = time.time() + window
+    """Open a force-refresh window for the CALLING SESSION: for ``window`` seconds,
+    every ``Cache.get`` call made from this session misses (→ live re-fetch) while
+    disk snapshots stay intact as a failure fallback. Self-clearing — covers one
+    full pipeline re-pull, then normal TTL resumes. Scoped per-session so it
+    doesn't force concurrent Streamlit sessions to bypass cache too (see
+    ``_current_session_key``).
+    """
+    # Opportunistic cleanup of expired entries so this dict doesn't grow
+    # unbounded across many sessions over a long-running server process.
+    now = time.time()
+    for k in [k for k, deadline in _FORCE_UNTIL.items() if deadline < now]:
+        del _FORCE_UNTIL[k]
+    _FORCE_UNTIL[_current_session_key()] = now + window
 
 
 def all_caches() -> list[Cache]:

@@ -124,8 +124,15 @@ _SNAPSHOTS: dict[str, list[str]] = {
         "GS", "HD", "HON", "IBM", "JNJ", "JPM", "KO", "MCD", "MRK", "MSFT",
         "NKE", "NVDA", "PG", "SHW", "TRV", "UNH", "V", "VZ", "WMT", "MMM",
     ],
-    # S&P 500 / Nasdaq 100 are uncapped (~500 / ~100 names); the snapshot only
-    # needs to cover the stride-cap (40), so the ~40 largest-weight names suffice.
+    # S&P 500 / Nasdaq 100 are uncapped (_DEFAULT_CAP = 0 — full constituent set,
+    # see CHANGELOG 2.1.0) so this ~40-name snapshot is NOT a representative
+    # sample of the index when live scrape + cache both fail; it's a small,
+    # deliberately-incomplete fallback (~8% of the S&P 500) chosen only to keep
+    # SOME cross-sectional signal alive rather than falling back to Aarambh-only
+    # (audit finding B4 — a prior comment here claimed it "covers the stride-cap",
+    # which stopped being true when the cap went 40 -> 0). The basket-source
+    # string returned by resolve_index_constituents (e.g. "snapshot (40)")
+    # documents the actual count used.
     "S&P 500": [
         "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "AVGO", "TSLA",
         "BRK-B", "JPM", "LLY", "V", "XOM", "UNH", "MA", "COST", "HD", "PG",
@@ -173,8 +180,14 @@ def _fetch_nse_csv(slug: str) -> list[str]:
     for host in ("archives.nseindia.com", "nsearchives.nseindia.com"):
         try:
             s = requests.Session()
-            s.get(f"https://{host}", headers=_HTTP_HEADERS, verify=False, timeout=10)
-            r = s.get(f"https://{host}/{_NSE_BASE}{slug}", headers=_HTTP_HEADERS, verify=False, timeout=15)
+            # TLS verification ON (default). Both hosts present valid certificate
+            # chains; disabling verification let a network-path attacker splice
+            # arbitrary tickers into the constituent list that's subsequently fed
+            # straight to yf.download — an integrity risk with no corresponding
+            # benefit (these are plain public HTTPS endpoints, no corporate-proxy
+            # MITM is assumed here).
+            s.get(f"https://{host}", headers=_HTTP_HEADERS, timeout=10)
+            r = s.get(f"https://{host}/{_NSE_BASE}{slug}", headers=_HTTP_HEADERS, timeout=15)
             r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text))
             col = next((c for c in df.columns if c.lower() == "symbol"), None)

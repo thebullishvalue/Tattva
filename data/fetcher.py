@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import pickle
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -137,6 +138,23 @@ def _load_macro_snapshots_newest_first() -> list[pd.DataFrame]:
     return snaps
 
 
+# Module-level registry of the most recent backfill's per-column staleness —
+# {ticker: last_native_date} for columns filled from a snapshot that was
+# itself older than STALE_BACKFILL_DAYS behind the current frame. Read by
+# app.py's freshness section (see B1 in the audit) to surface a warning
+# instead of silently ffilling a possibly weeks-old value across the whole
+# frame with no user-visible signal beyond a log line nobody sees on
+# Streamlit. Cleared/repopulated on every call to _backfill_missing_columns.
+STALE_BACKFILLS: dict[str, str] = {}
+
+# How many trading days a backfilled column's true last-native observation is
+# allowed to lag the frame's end before it's dropped instead of filled. A
+# stale snapshot ffilled across N weeks of rows would flatten that
+# predictor's momentum/PCA loading for the whole window — worse than not
+# having the column at all past this point.
+STALE_BACKFILL_DAYS = 10
+
+
 def _backfill_missing_columns(combined: pd.DataFrame, tickers: tuple[str, ...]) -> pd.DataFrame:
     """Refill columns yfinance dropped/rate-limited (absent or all-NaN) from the most
     recent prior snapshot that has them.
@@ -145,29 +163,62 @@ def _backfill_missing_columns(combined: pd.DataFrame, tickers: tuple[str, ...]) 
     while the rest succeed. The partial frame is non-empty, so it bypasses the
     all-or-nothing stale fallback and gets cached — silently dropping a TARGET column
     (Gold = GC=F) and failing the walk-forward with "Need 1500+ data points". Backfilling
-    the missing columns keeps the frame complete (tail is at most ~1 day stale) and
-    re-heals the cache. Scans newest→oldest so it recovers even a previously-poisoned
-    snapshot.
+    the missing columns keeps the frame complete and re-heals the cache. Scans
+    newest→oldest so it recovers even a previously-poisoned snapshot.
+
+    A backfilled column's tail is usually only ~1 day stale (the snapshot
+    that just missed this ticker), but "newest snapshot" can itself be old
+    (e.g. after a multi-day gap in usage) — nothing previously enforced the
+    "~1 day" claim. A column whose TRUE last-native observation (before the
+    snapshot's own carry-forward) is more than STALE_BACKFILL_DAYS trading
+    days behind the frame's end is dropped rather than filled — flat
+    momentum ffilled across weeks would distort that predictor's PCA loading
+    silently. Columns backfilled from a snapshot within the threshold are
+    still recorded in STALE_BACKFILLS (with their true last-native date) so
+    the UI can surface which predictors were carried from a snapshot at all.
     """
     if combined.empty:
         return combined
     missing = [t for t in tickers if t not in combined.columns or combined[t].isna().all()]
+    STALE_BACKFILLS.clear()
     if not missing:
         return combined
 
+    frame_end = combined.index.max()
     filled: list[str] = []
+    dropped: list[str] = []
     for snap in _load_macro_snapshots_newest_first():
         if not missing:
             break
         snap_aligned = snap.reindex(combined.index).ffill()
         for t in list(missing):
             if t in snap_aligned.columns and not snap_aligned[t].isna().all():
+                # True last-native date for this ticker WITHIN the snapshot,
+                # before our own ffill/reindex — i.e. how old the underlying
+                # observation actually is, not how far we carried it forward.
+                native = snap[t].dropna()
+                last_native = native.index.max() if len(native) else None
+                if last_native is not None:
+                    days_behind = int(np.busday_count(
+                        pd.Timestamp(last_native).date(), pd.Timestamp(frame_end).date()
+                    ))
+                    if days_behind > STALE_BACKFILL_DAYS:
+                        dropped.append(t)
+                        missing.remove(t)
+                        continue
+                    STALE_BACKFILLS[t] = str(pd.Timestamp(last_native).date())
                 combined[t] = snap_aligned[t]
                 filled.append(t)
                 missing.remove(t)
 
     if filled:
         log.warning("Macro backfill from snapshot for rate-limited/missing tickers: %s", filled)
+    if dropped:
+        log.warning(
+            "Macro tickers dropped (snapshot backfill was > %d trading days stale): %s",
+            STALE_BACKFILL_DAYS, dropped,
+        )
+        combined = combined.drop(columns=dropped, errors="ignore")
     if missing:
         log.warning("Macro tickers still unavailable after backfill (no prior snapshot): %s", missing)
     return combined

@@ -49,11 +49,18 @@ import pandas as pd
 import streamlit as st
 
 # ── Warning suppression ──────────────────────────────────────────────────────
+# A blanket `category=RuntimeWarning` filter used to sit here — it silenced
+# every RuntimeWarning process-wide, including any GENUINE numeric issue
+# (overflow, invalid divide, degenerate log/sqrt) anywhere in the math stack,
+# not just the known-noisy sources it was meant to cover (audit finding C6).
+# The one legitimate source found by auditing (nanmean's "Mean of empty
+# slice" on the engine's own warm-up rows) is now scoped locally at its call
+# site (engines/aarambh.py's _compute_breadth_metrics) instead. FutureWarning
+# stays broadly suppressed — it's pandas/numpy API-deprecation noise, not a
+# correctness signal, so it doesn't carry the same risk of masking a real bug.
 warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", message=".*YF.download.*")
 warnings.filterwarnings("ignore", message=".*auto_adjust.*")
-warnings.filterwarnings("ignore", message=".*Mean of empty slice.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="yfinance")
 pd.options.mode.chained_assignment = None
 
@@ -74,12 +81,10 @@ from ui.tabs.tab_convergence import render_convergence_tab
 from ui.components import (
     render_header,
     render_info_box,
-    render_nishkarsh_signal_card,
+    build_hero_verdict,
+    render_hero_card,
     render_warning_box,
     render_metric_card,
-    render_chart_skeleton,
-    render_collapsible_section,
-    render_collapsible_section_close,
     render_control_hint,
     section_gap,
 )
@@ -105,7 +110,7 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT, UI_AGREEMENT_STRONG, UI_AGREEMENT_MODERATE
 from core.config import GLOBAL_MACRO_MAP, MACRO_SYMBOLS_YF, INDEX_TARGETS_MAP
 
 # Friendly column name → ticker, for resolving each predictor/target column to its
@@ -125,8 +130,20 @@ _BUNDLE_KEYS = (
     "nishkarsh_conv_normalized", "wf_results",
     "intelligence_active_weights", "intelligence_active_thresholds",
     "intelligence_active_profile",
+    # Per-target UI metadata that must travel with the result bundle —
+    # otherwise a cached target switch-back leaves the PREVIOUS target's
+    # value in session state (e.g. the Nirnay tab showing a stale
+    # "basket source: snapshot" hint for a target resolved live).
+    "nirnay_basket_source",
 )
-_RESULTS_CACHE_MAX = 3  # keep the last N configs (≈ the 3 commodities)
+# Keep the last N configs. The comment here previously said "the 3
+# commodities" — stale since the universe grew to 30+ targets (commodities,
+# FX, India/US indices, sector ETFs; audit finding E5). Each entry is a full
+# 5-phase pipeline result, so this stays modest rather than trying to cover
+# the whole universe; 6 covers a session that browses a handful of targets
+# (e.g. all commodities, or an index + its close comparators) without
+# recomputing.
+_RESULTS_CACHE_MAX = 6
 
 
 # ─── UI Rendering helpers ────────────────────────────────────────────────────
@@ -149,11 +166,11 @@ def _render_landing_page() -> None:
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
                 AARAMBH
             </h3>
-            <p>Walk-forward ensemble regression on the selected target (commodities, FX, indices & ETFs) vs the macro/FX universe, with conformal z-scores and DDM filtering.</p>
+            <p>Walk-forward ensemble regression on the selected target (commodities, FX, indices & ETFs) vs the macro/FX universe, with robust quantile z-scores and DDM filtering.</p>
             <div class='spec'>
                 <span>Ensemble:</span> PCA-OLS + Huber<br>
                 <span>Validation:</span> Walk-forward OOS<br>
-                <span>Bounds:</span> Conformal prediction
+                <span>Bounds:</span> Rolling robust quantiles
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -203,112 +220,48 @@ def _render_landing_page() -> None:
 def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
     """Render the hero Tattva convergence signal card.
 
-    The headline reflects the **calibrated convergence model** \u2014 the adaptive-
-    weighted 4-dimension composite (Direction / Breadth / Magnitude / Regime),
-    DDM-smoothed, scaled to ``[-1, +1]``. This is the object the Intelligence
-    **Val IC** actually validates, so the headline is paired with an honest trust
-    read (Val IC + walk-forward durability) \u2014 conviction is never shown without
-    its reliability. Falls back to the normalized 50/50 consensus (the Unified
-    Signal plot's average line) when no calibrated DDM result exists, and to the
-    Aarambh-only signal when there is no convergence at all.
+    All interpretation logic lives in ``ui.components.build_hero_verdict`` (a
+    pure, unit-testable function); this wrapper only gathers session-state
+    inputs and hands the verdict to ``render_hero_card``. The headline chain
+    is calibrated model -> normalized consensus -> Aarambh-only, always paired
+    with an honest trust read (non-overlapping Val IC + walk-forward
+    durability) and a minimum-n-gated precedent second opinion.
     """
     calib       = st.session_state.get("nishkarsh_result")            # UnifiedConvictionResult | None
     profile     = st.session_state.get("intelligence_active_profile")  # dict | None
     wf          = st.session_state.get("wf_results")                   # list[dict] | None
     div_events  = st.session_state.get("divergence_events")            # DataFrame | None
-    # Forecast horizon of the active Signal Horizon lens \u2014 for interpretation copy.
+    prec        = st.session_state.get("precedent_summary")            # dict | None
+    # Forecast horizon of the active Signal Horizon lens - for interpretation copy.
     FWD_HORIZON = SIGNAL_HORIZONS.get(
         st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
         SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
     )["horizon"]
 
-    # \u2500\u2500 Headline: calibrated model \u2192 normalized consensus \u2192 Aarambh-only \u2500\u2500
-    if calib is not None:
-        conv = float(calib.nishkarsh_conviction) / 100.0   # \u00b1100 \u2192 [-1,+1]
-        sig = calib.nishkarsh_signal
-        source = "Calibrated model" if profile else "Convergence model"
-    elif nishkarsh_norm:
-        conv = float(nishkarsh_norm["value"]); sig = nishkarsh_norm["signal"]
-        source = "System consensus (uncalibrated)"
-    else:
-        conv = float(aarambh_signal.get("conviction_score", 0)) / 100.0  # ±100 → [-1,+1]
-        sig = aarambh_signal.get("signal", "HOLD")
-        source = "Aarambh only (no basket convergence)"
-
-    # Normalized per-system reads (the plot's two component lines) \u2014 context.
-    a_norm = nishkarsh_norm.get("aarambh_norm") if nishkarsh_norm else None
-    n_norm = nishkarsh_norm.get("nirnay_norm") if nishkarsh_norm else None
-
-    # \u2500\u2500 Trust: Val IC (held-out) + walk-forward durability \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     val_ic = None
     if profile and profile.get("val_ic") is not None:
         try: val_ic = float(profile["val_ic"])
         except (TypeError, ValueError): val_ic = None
     wf_ics = [r["ic"] for r in wf if isinstance(r, dict) and r.get("ic") == r.get("ic")] if wf else []
     wf_pos = (sum(1 for v in wf_ics if v > 0) / len(wf_ics)) if wf_ics else None
-
-    # \u2500\u2500 Interpretation copy \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-    direction = "bullish" if "BUY" in sig else "bearish" if "SELL" in sig else "neutral"
-    agreement_text = "strong" if agreement > 0.7 else "moderate" if agreement > 0.5 else "weak"
     n_div = int(len(div_events)) if div_events is not None and hasattr(div_events, "__len__") else 0
 
-    if val_ic is not None:
-        if val_ic <= 0:        trust = f"No validated edge (Val IC {val_ic:+.3f}) \u2014 treat as noise."
-        elif val_ic < 0.02:    trust = f"Marginal edge (Val IC {val_ic:+.3f})."
-        elif val_ic < 0.05:    trust = f"Modest validated edge (Val IC {val_ic:+.3f})."
-        else:                  trust = f"Solid validated edge (Val IC {val_ic:+.3f})."
-        if wf_pos is not None:
-            trust += f" Walk-forward: {wf_pos:.0%} of windows positive."
-    else:
-        trust = "Edge not yet calibrated (run Intelligence Mode for a Val IC)."
-
-    if sig == "HOLD":
-        lead = f"{source}: {conv:+.2f} \u2014 no directional edge right now."
-    else:
-        lead = (f"{source} reads **{direction}** ({sig}, {conv:+.2f}) over the next "
-                f"~{FWD_HORIZON} trading days.")
-    parts = [lead, trust]
-
-    # \u2500\u2500 Precedent base rate \u2014 co-equal second opinion (the stronger directional
-    # read per hero_study.py). Agreement raises confidence; disagreement is flagged.
-    prec = st.session_state.get("precedent_summary")
-    if prec and prec.get("n"):
-        hero_sign = 1 if direction == "bullish" else -1 if direction == "bearish" else 0
-        p_dir, p_med, p_pos, p_h = prec["dir"], prec["median"], prec["positive_pct"], prec["horizon"]
-        p_word = "bullish" if p_dir > 0 else "bearish" if p_dir < 0 else "flat"
-        stub = f"similar past states returned {p_med:+.1f}% ({p_pos:.0f}% positive) at +{p_h}d"
-        # Reliability gate: when the analogs themselves are split (~coin-flip), don't
-        # claim agreement/divergence \u2014 say it's low-conviction.
-        if abs(p_pos - 50) < 15:
-            parts.append(f"Precedent is **split** ({stub}) \u2014 low conviction either way.")
-        elif hero_sign == 0:
-            parts.append(f"Precedent base rate leans **{p_word}** \u2014 {stub}.")
-        elif p_dir == hero_sign:
-            parts.append(f"Precedent **agrees** \u2014 {stub}, confirming the {direction} read.")
-        else:
-            parts.append(f"\u26a0 Precedent **diverges** ({p_word}) \u2014 {stub}; the analog base rate "
-                         f"(historically the stronger directional read) disagrees, so treat the "
-                         f"{direction} signal with caution.")
-
-    if a_norm is not None and n_norm is not None:
-        aligned = (a_norm < 0) == (n_norm < 0)
-        parts.append(
-            f"Aarambh {a_norm:+.2f} / Nirnay {n_norm:+.2f} ({agreement:.0%} agreement, {agreement_text}"
-            + ("; aligned)." if aligned else "; split \u2014 engines disagree).")
-        )
-    if n_div:
-        parts.append(f"{n_div} divergence event(s) flagged \u2014 see Convergence tab.")
-    explanation = " ".join(parts)
-
-    render_nishkarsh_signal_card(
-        signal=sig,
-        conviction=conv,
-        agreement=agreement,
-        explanation=explanation,
+    verdict = build_hero_verdict(
+        calib_conviction=(float(calib.nishkarsh_conviction) if calib is not None else None),
+        calib_signal=(calib.nishkarsh_signal if calib is not None else None),
+        has_profile=bool(profile),
+        consensus=nishkarsh_norm,
+        aarambh_signal=aarambh_signal,
+        agreement=float(agreement or 0.0),
         val_ic=val_ic,
         wf_pos=wf_pos,
-        source=source,
+        precedent=prec,
+        n_divergences=n_div,
+        horizon_days=FWD_HORIZON,
+        agreement_strong=UI_AGREEMENT_STRONG,
+        agreement_moderate=UI_AGREEMENT_MODERATE,
     )
+    render_hero_card(verdict)
     section_gap()
 
 
@@ -774,8 +727,15 @@ def main():
                            "wf_results", "results_cache", "nishkarsh_result",
                            "precedent_summary", "_prec_key", "conv_norm_params"):
                     st.session_state.pop(_k, None)
-                for _k in [k for k in list(st.session_state) if str(k).startswith("conv_norm_params")]:
-                    st.session_state.pop(_k, None)
+                # The convergence tab's actual per-config normalization cache key is
+                # "conv_norm_causal::<engine_cache>" (ui/tabs/tab_convergence.py) — the
+                # legacy "conv_norm_params" prefix below predates that rename and no
+                # longer matches anything, so those z-score caches survived every
+                # "Refresh Data" click unpruned (audit finding C1). Sweep both
+                # prefixes so a future rename doesn't reintroduce the same gap.
+                for _prefix in ("conv_norm_params", "conv_norm_causal::"):
+                    for _k in [k for k in list(st.session_state) if str(k).startswith(_prefix)]:
+                        st.session_state.pop(_k, None)
                 st.rerun()
             render_control_hint("Force-fetch live data · recompute · slower than Reset")
 
@@ -851,6 +811,24 @@ def main():
                         "Data freshness",
                         f"Signals are as of {ds} ({behind} trading day"
                         f"{'s' if behind > 1 else ''} behind — today's bar may not be published yet).",
+                    )
+
+                # Predictors carried from a snapshot backfill (data.fetcher's
+                # rate-limit recovery, audit finding B1): a rate-limited ticker
+                # this run was refilled from the most recent prior snapshot
+                # that HAD it, which may itself be stale. Surface which
+                # columns and how old, rather than a silent log.warning no
+                # one watching a Streamlit deploy will ever see.
+                from data.fetcher import STALE_BACKFILLS
+                if STALE_BACKFILLS:
+                    _sb_items = sorted(STALE_BACKFILLS.items(), key=lambda kv: kv[1])
+                    _sb_preview = ", ".join(f"{k} (as of {v})" for k, v in _sb_items[:5])
+                    _sb_more = f" +{len(_sb_items) - 5} more" if len(_sb_items) > 5 else ""
+                    render_info_box(
+                        "Predictors carried from snapshot",
+                        f"{len(_sb_items)} predictor(s) were rate-limited this fetch and refilled "
+                        f"from a prior cached snapshot: {_sb_preview}{_sb_more}. Their momentum is "
+                        f"flat until the next successful live fetch.",
                     )
 
                 # Session completeness (Phase 2 — exchange-aware): of the inputs whose
@@ -1135,6 +1113,12 @@ def main():
 
         console.section("Basket Resolution")
         constituents, src_msg = get_commodity_basket(active_target)
+        # Surfaced in the Nirnay tab (not just the console — audit finding B4):
+        # a "snapshot (N)" source means live scrape + cache both failed, and
+        # for an uncapped large index (S&P 500 / Nasdaq 100) N is a small
+        # fraction of the true index, so breadth there is read from a partial
+        # basket, not the full constituent set.
+        st.session_state["nirnay_basket_source"] = src_msg
         console.item("Target", active_target)
         console.item("Source", src_msg)
         console.item("Count", len(constituents))
@@ -1206,11 +1190,17 @@ def main():
             progress_bar(progress_container, 40, "Aarambh Engine Reused", "Cached walk-forward fit")
         else:
             engine = FairValueEngine()
-            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, purge=FWD_HORIZON, label_mask=_label_valid, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
-            # Carry the raw price LEVEL on the engine output (returns-space
+            # Pass the genuine price LEVEL into fit() so the forward-change
+            # table and divergence detection use real (non-overlapping) price
+            # differences instead of reconstructing a pseudo-price from the
+            # h-day FORWARD-return target y (which would sum each daily return
+            # up to h times — see FairValueEngine.fit's `price` docstring).
+            _price_level = data[active_target].to_numpy(dtype=np.float64)
+            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, purge=FWD_HORIZON, label_mask=_label_valid, price=_price_level, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
+            # Carry the raw price LEVEL on the engine output too (returns-space
             # modeling otherwise leaves only return-scale columns). Used by the
             # Aarambh tab for price display and by the Intelligence tuner.
-            engine.ts_data["Price"] = data[active_target].values
+            engine.ts_data["Price"] = _price_level
             st.session_state["aarambh_engine"] = engine
             st.session_state["aarambh_fit_key"] = cache_key
 
@@ -1384,6 +1374,7 @@ def main():
 
         console.section("Daily Convergence Scoring")
         overlap_count = 0
+        skipped_warmup = 0
         total_dates = len(aarambh_ts.index)
         for i, ts_idx in enumerate(aarambh_ts.index):
             ts_date = ts_idx.date() if hasattr(ts_idx, "date") else pd.Timestamp(ts_idx).date()
@@ -1391,6 +1382,15 @@ def main():
             row_a = aarambh_ts.loc[ts_idx]
             if isinstance(row_a, pd.DataFrame):
                 row_a = row_a.iloc[-1]
+            # Skip the engine's own [0, MIN_TRAIN_SIZE) warm-up rows — the
+            # `Valid` column (engines/aarambh.py) is False there because no
+            # genuine walk-forward forecast covers them (see A3 in the audit).
+            # Scoring them would feed the Intelligence calibration frame and
+            # the walk-forward IC a fabricated "neutral" convergence reading
+            # instead of genuinely excluding the unfit region.
+            if not bool(row_a.get("Valid", True)):
+                skipped_warmup += 1
+                continue
             aarambh_sig = {
                 "conviction_score": float(row_a.get("ConvictionBounded", 0)),
                 "oversold_breadth": float(row_a.get("OversoldBreadth", 50)),
@@ -1403,9 +1403,7 @@ def main():
                     "overbought_pct": float(row_n.get("Overbought_Pct", 50)),
                     "avg_unified_osc": float(row_n.get("Avg_Signal", 0)),
                     "regime_bull_pct": float(row_n.get("Regime_Bull_Pct", 33)),
-                    "regime_weak_bull": 0,
                     "regime_bear_pct": float(row_n.get("Regime_Bear_Pct", 33)),
-                    "regime_weak_bear": 0,
                     "regime_neutral": float(row_n.get("Regime_Neutral", 34)),
                     "num_constituents": int(row_n.get("Total_Analyzed", 0)),
                 }
@@ -1413,8 +1411,8 @@ def main():
             else:
                 nirnay_stats = {
                     "oversold_pct": 50, "overbought_pct": 50, "avg_unified_osc": 0,
-                    "regime_bull_pct": 33, "regime_weak_bull": 0, "regime_bear_pct": 33,
-                    "regime_weak_bear": 0, "regime_neutral": 34, "num_constituents": 0,
+                    "regime_bull_pct": 33, "regime_bear_pct": 33,
+                    "regime_neutral": 34, "num_constituents": 0,
                 }
             validator.compute_convergence(aarambh_sig, nirnay_stats, date_str)
             divergence_detector.detect(aarambh_sig, nirnay_stats, date_str)
@@ -1424,6 +1422,7 @@ def main():
                 progress_bar(progress_container, pct_val, "Computing Convergence", f"{i + 1}/{total_dates} Dates Scored")
 
         console.item("Total Aarambh Dates", len(aarambh_ts))
+        console.item("Skipped (warm-up, no genuine forecast)", skipped_warmup)
         console.item("Overlap Dates", overlap_count)
         console.success(f"Convergence scoring complete")
 
@@ -1462,6 +1461,27 @@ def main():
         # search learns optimal (weights, thresholds) for this universe,
         # persists them to disk, and we immediately re-apply them below
         # so the user's signals reflect the calibrated state on THIS run.
+        #
+        # Skip entirely when the Aarambh/Nirnay overlap is too thin (an
+        # Aarambh-only target with an empty/unresolvable basket, or a target
+        # whose basket barely overlaps the model's date range). With no
+        # overlap every date gets the same neutral nirnay_stats default
+        # (app.py's fallback above), so consensus_direction is always 0,
+        # convergence_score is a CONSTANT, and every dim score is constant —
+        # the tuner would still run its full trial budget scoring a
+        # degenerate, all-NaN-IC objective, then persist an arbitrary "best"
+        # (weights, thresholds) with val_ic == 0.0 that reads as a genuine,
+        # if marginal, calibration. 60 overlap dates is a low bar (~3 trading
+        # months) chosen only to exclude the genuinely-empty-basket case, not
+        # to second-guess a real but short-history calibration.
+        _MIN_OVERLAP_FOR_CALIBRATION = 60
+        if _intel_enabled and overlap_count < _MIN_OVERLAP_FOR_CALIBRATION:
+            console.warning(
+                f"Intelligence calibration skipped: only {overlap_count} Aarambh/Nirnay "
+                f"overlap dates (< {_MIN_OVERLAP_FOR_CALIBRATION}) — convergence_score would "
+                f"be a constant (no genuine Nirnay signal to calibrate against)."
+            )
+            _intel_enabled = False
         _final_profile: _intel_mod.IntelligenceProfile | None = None
         if _intel_enabled:
             console.section("Intelligence Calibration")
@@ -1720,10 +1740,18 @@ def main():
 
     # ─── Precedent base rate for the hero (co-equal second opinion) ────────
     # A 33-target non-overlapping study (hero_study.py) found the analog precedent
-    # is the STRONGER directional read (IC +0.226 vs the convergence's +0.158) and
-    # adds genuine, independent value — while the plot markers add nothing (they ARE
-    # the convergence's own inputs). So the hero reads the precedent alongside its
+    # is a STRONGER directional read than the convergence signal, and adds genuine,
+    # independent value — while the plot markers add nothing (they ARE the
+    # convergence's own inputs). So the hero reads the precedent alongside its
     # signal: agreement raises confidence, disagreement is flagged as a divergence.
+    # NOTE: the specific quoted numbers in the original study (IC +0.226 vs +0.158)
+    # were measured under a since-changed analog config (the old .55/.35/.10
+    # Mahalanobis/trajectory/recency blend, not the current pure-Mahalanobis 1/0/0 —
+    # see analytics.analogs.ANALOG_W_*) and with a look-ahead full-sample
+    # normalization the live tab avoids (causal expanding z-scores). Re-run
+    # hero_study.py with the shipped config before quoting a specific number again;
+    # the qualitative conclusion (precedent >= convergence, markers add nothing) is
+    # the part that's load-bearing here, not the exact ICs.
     # Content-aware key (not just row count): include the latest Price so an intraday
     # refresh that updates the last bar without adding a row still recomputes.
     _plast = float(ts["Price"].iloc[-1]) if "Price" in ts.columns and len(ts) else 0.0
@@ -1799,58 +1827,12 @@ def main():
     x_axis = ts_filtered["Date"]
     x_title = "Date" if active_date != "None" else "Index"
 
-    # ─── Keyboard Shortcuts Hint ─────────────────────────────────────────
-    from streamlit.components.v1 import html as st_html
-    st_html(
-        """
-        <div class="kbd-shortcuts" id="kbd-shortcuts">
-            <div class="shortcut-row"><kbd>1</kbd>–<kbd>5</kbd> Switch tabs</div>
-            <div class="shortcut-row"><kbd>R</kbd> Run analysis</div>
-            <div class="shortcut-row"><kbd>?</kbd> Toggle shortcuts</div>
-        </div>
-        <script>
-        (function() {
-            var shortcutsVisible = false;
-            var kbdEl = document.getElementById('kbd-shortcuts');
-            function showKbd() {
-                if (kbdEl) { kbdEl.classList.toggle('visible'); shortcutsVisible = !shortcutsVisible; }
-            }
-            document.addEventListener('keydown', function(e) {
-                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
-                if (e.key === '?') { e.preventDefault(); showKbd(); return; }
-                if (shortcutsVisible) return;
-                var tabKeys = Object();
-                tabKeys['1'] = 0; tabKeys['2'] = 1; tabKeys['3'] = 2; tabKeys['4'] = 3; tabKeys['5'] = 4;
-                if (e.key in tabKeys) {
-                    e.preventDefault();
-                    var tabs = document.querySelectorAll('[data-baseweb="tab"]');
-                    if (tabs[tabKeys[e.key]]) tabs[tabKeys[e.key]].click();
-                }
-                if (e.key === 'r' || e.key === 'R') {
-                    if (!e.ctrlKey && !e.metaKey && !e.altKey) {
-                        var runBtn = document.querySelector('button[kind="primary"]');
-                        if (runBtn) runBtn.click();
-                    }
-                }
-            });
-        })();
-        </script>
-        """,
-        height=0,
-    )
-
-    # ─── Theme Toggle ────────────────────────────────────────────────────
-    from ui.components import render_theme_toggle
-    render_theme_toggle()
-
-    # ─── Tabs with Lazy Loading + Error Boundaries ─────────────────────────
-    # Track which tabs have been rendered (lazy loading)
-    if 'rendered_tabs' not in st.session_state:
-        st.session_state.rendered_tabs = set()
-
-    # Get current active tab from URL hash or default to 0
-    active_tab_idx = 0  # Streamlit doesn't expose active tab index directly, so we render on demand
-
+    # ─── Tabs with Error Boundaries ─────────────────────────────────────────
+    # Streamlit renders every tab's content on each script run (there is no
+    # built-in lazy-loading of inactive tabs) — the CSS just hides the
+    # inactive panels. A `rendered_tabs` session-state set was previously
+    # written here on every render but never read anywhere, under a comment
+    # claiming lazy loading that isn't actually happening (audit finding C5).
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "CONVERGENCE", "AARAMBH", "NIRNAY", "PRECEDENT", "DIAGNOSTICS", "DATA",
     ])
@@ -1881,23 +1863,17 @@ def main():
     )
 
     with tab1:
-        st.session_state.rendered_tabs.add(0)
         _safe_render("Convergence", lambda: render_convergence_tab(ts_filtered))
     with tab2:
-        st.session_state.rendered_tabs.add(1)
         _safe_render("Aarambh", lambda: render_aarambh_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats, regime_stats, ts, active_target))
     with tab3:
-        st.session_state.rendered_tabs.add(2)
         _safe_render("Nirnay", lambda: render_nirnay_tab(selected_tf=selected_tf))
     with tab4:
-        st.session_state.rendered_tabs.add(3)
         _safe_render("Precedent", lambda: render_precedent_tab(
             ts, active_target, tuple(_lens["hold"]), _lens["momentum"], _lens["horizon"]))
     with tab5:
-        st.session_state.rendered_tabs.add(4)
         _safe_render("Diagnostics", lambda: render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats))
     with tab6:
-        st.session_state.rendered_tabs.add(5)
         _safe_render("Data", lambda: render_data_tab(ts_filtered, ts, active_target))
 
     _render_footer()

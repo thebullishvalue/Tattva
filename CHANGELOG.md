@@ -11,6 +11,133 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ## [Unreleased]
 
+Resolves an end-to-end statistical/correctness/infra/docs audit spanning the
+walk-forward engine, the Intelligence calibration, the Precedent analog matcher,
+regime detection, and the data/cache layer.
+
+### Fixed
+- **Warm-up look-ahead in the walk-forward signal stack.** The first
+  `MIN_TRAIN_SIZE` rows of `predictions` were filled with an expanding mean of
+  `y[:t]` — in `forward_signal` mode `y` is the h-day FORWARD label, so that mean
+  drew on labels overlapping the forecast window it was standing in for. Those
+  rows fed the Intelligence calibration frame, the analog matcher's `NetBreadth`
+  feature, and several research sweeps. `predictions[:MIN_TRAIN_SIZE]` (and the
+  breadth/conviction columns derived from it) are now left genuinely NaN/missing;
+  every consumer (calibration loop, analog feature pool, DDM seed, pivot/divergence
+  detection) now explicitly excludes or gracefully handles that region instead of
+  reading a fabricated "neutral" reading from it.
+- **Forward-change table and divergence detection used a corrupted pseudo-price.**
+  `_compute_forward_changes`/`_compute_divergences` reconstructed a "price" via
+  `cumsum`/`exp(cumsum)` of `y`, which in `forward_signal` mode is the h-day
+  FORWARD return — summing it double-counts each daily return up to h times,
+  inflating `FwdChg_*` (and the Diagnostics "Signal Performance" hit-rates/t-stats
+  built on it) by roughly h×. `FairValueEngine.fit` now accepts an optional
+  `price=` series (the app passes the real target price) and uses it for both.
+- **AR(1) bias correction had the wrong sign.** The OU/half-life estimator's
+  finite-sample correction subtracted `(1+3a)/n` from the OLS AR(1) coefficient;
+  the correction is additive (Kendall 1954; Orcutt & Winokur 1969) — subtracting
+  doubled the downward bias instead of removing it. Also corrected the citation:
+  this is not Andrews (1993), which is a different (quantile-table-based)
+  estimator.
+- **Val IC / walk-forward IC were scored on overlapping daily forward returns.**
+  Adjacent h-day forward-return observations share up to h-1 days, so a
+  daily-sampled IC's effective sample size is ~n/h, not n — overstating precision
+  by ~√h. The *reported* Val IC and each walk-forward-IC window are now scored
+  non-overlapping (stride = the shortest hold horizon); the Optuna objective
+  itself is unchanged (still scores the full overlapping frame for a smoother
+  search surface). Hero/Aarambh-tab trust-chip thresholds recalibrated to the
+  non-overlapping scale.
+- **Intelligence calibration ran (and persisted a profile) on a degenerate
+  all-constant convergence signal** when a target's Nirnay basket had little/no
+  date overlap with Aarambh — every date got the same neutral default, so
+  `convergence_score` was constant and the "calibrated" profile was an arbitrary
+  fit to noise. Calibration (and the walk-forward IC) now skip when overlap is
+  below a small floor.
+- **Analog/precedent "N analogs" could be 1-3 historical episodes counted as N.**
+  `find_similar_periods` picked the top-N by raw similarity with no exclusion
+  window, so adjacent days from the same episode (near-identical rolling-window
+  state) dominated the returned set — inflating the apparent independence of
+  `summarize_forward`'s median/positive_pct. Now enforces a Theiler exclusion
+  window (Theiler 1986) between accepted analogs; propagated to the research
+  analog walkers too.
+- **Precedent backtest verdict used a bare `|ρ| > 0.3` cutoff with no
+  sample-size awareness** — on the ~20-30-point non-overlapping test split this
+  is common under pure noise. Now gated on the Spearman p-value (`p < 0.10`).
+- **"Ledoit-Wolf" shrinkage formula was mis-transcribed** (numerator/denominator
+  terms swapped relative to the OAS closed form it was meant to implement),
+  under-shrinking exactly where shrinkage matters most (near-isotropic state
+  covariance). Corrected to match `sklearn.covariance.OAS` exactly.
+- **Online HMM regime detector had no state-ordering constraint** — a long
+  one-sided regime could drift the Bull emission mean below the Bear mean (label
+  switching), after which `HMM_Bull`/`HMM_Bear` silently swapped meaning. Both
+  the Numba kernel and the Python class now enforce Bull > Neutral > Bear after
+  every emission-parameter update.
+- **DFA Hurst exponent used a narrow, linearly-spaced scale range**
+  (`min_scale = max(4, n/10)`), giving a noisy slope fit at typical `n`. Now
+  `min_scale=8` with `max_scale=n//4`, log-spaced (`np.geomspace`) per standard
+  DFA practice — cuts RMSE roughly 4x in simulation at H=0.5.
+- **`_process_wf_chunk`'s causal break-point search used unpurged data** near the
+  forecast boundary in `forward_signal` mode. Now excludes the last `purge` rows,
+  matching the purge already applied to the ensemble's training rows.
+- **NSE constituent-list fetch disabled TLS verification** (`verify=False`) with
+  no corresponding need — removed; both archive hosts present valid certificate
+  chains.
+- **Snapshot-backfilled macro columns had no staleness ceiling** — a rate-limited
+  ticker was silently refilled from whatever prior snapshot had it, however old.
+  Now dropped instead of filled past a staleness threshold, and columns that
+  are filled are surfaced in-app (previously console-only).
+- **"Refresh Data" didn't clear the convergence tab's per-config normalization
+  cache** (`conv_norm_causal::*` — the cleanup still targeted an old
+  `conv_norm_params` prefix from before a rename), and that cache key didn't
+  account for an intraday last-bar update. Cleanup now targets the live prefix;
+  the key folds in row count + latest raw values.
+- **Force-refresh window was a single process-global deadline** — on a
+  multi-session Streamlit deploy, one user's "Refresh Data" forced every
+  concurrent session's next fetch to bypass cache too. Now scoped per session.
+- **`lead_lag_indicator`'s AARAMBH_LEADS/NIRNAY_LEADS comparison was degenerate**
+  — it compared `abs(sign)` values (always 0 or 1) with a 1.5x margin, which can
+  only ever resolve when one side's *direction* is exactly zero, never from a
+  genuine magnitude dominance. Now compares the actual normalized magnitudes.
+- **A blanket `RuntimeWarning` suppression hid every numeric warning
+  process-wide**, not just the one legitimate source it was meant to cover
+  (`nanmean`'s "empty slice" on the engine's own warm-up rows). That source is
+  now scoped locally at its call site; the global filter is removed.
+
+### Changed
+- Non-overlapping Val IC changes the hero/Aarambh-tab trust-chip thresholds
+  (previously 0.02/0.05, now 0.10/0.20) — same qualitative tiers, recalibrated
+  to the less-inflated scale.
+- `_RESULTS_CACHE_MAX` (session result cache) raised 3 → 6; the universe has
+  grown well past "3 commodities".
+- Aarambh-tab and Diagnostics-tab copy is now mode-aware: forward-return
+  forecast mode no longer describes itself with relative-value language
+  ("cheap/expensive valuation") it doesn't mean, and the OOS R² / ADF / KPSS
+  cards no longer grade a magnitude-R²-near-zero forecast as if it were a
+  failing level-regression model.
+
+### Removed
+- Dead UI components with zero call sites: `render_collapsible_section(_close)`,
+  `render_conviction_signal`, `render_signal_card`, `render_system_card`,
+  `render_kv_table`, `get_signal_badge`, `render_chart_skeleton`,
+  `render_export_button_row`; the theme toggle and keyboard-shortcuts hint
+  (rendered inside 0-height component iframes whose scripts targeted the
+  iframe's own document, not the app's — inert, and the light-mode CSS they
+  gated had accordingly never rendered); the unused `MathUtils` namespace class;
+  the `rendered_tabs` session-state set (written every run, never read, under a
+  comment claiming lazy loading Streamlit doesn't actually do); dead
+  `regime_weak_bull`/`regime_weak_bear` fields (always hardcoded 0, never read).
+
+### Docs
+- Corrected "conformal prediction" → "rolling robust quantile z-scores"
+  throughout (the module never had a conformal-prediction coverage guarantee)
+  and "Andrews (1993)" → "Kendall (1954) / Orcutt & Winokur (1969)" for the
+  AR(1) bias correction. DDM "confidence bands" relabeled "uncertainty bands"
+  (heuristic width, not a calibrated statistical interval). Diagnostics'
+  "Covariance Shrinkage"/"Regime Persistence" cards (which displayed HMM/GARCH
+  initial-prior constants mislabeled as measured telemetry) removed rather than
+  left misleading. Stale "IC vs forward PE" copy (pre-2.0.0 target) corrected to
+  "forward return".
+
 ---
 
 ## [2.4.0] — 2026-06-23 — *Data-pipeline recovery · forward price projection · UI fidelity, motion & logging*

@@ -1,52 +1,33 @@
 # Tattva — Unified Convergence Analysis System
 # @thebullishvalue Product
-#
-# ── PINNED, NOT RANGED — read before editing ─────────────────────────────────
-# Every version below is the EXACT set verified working together (Python 3.11,
-# numba JIT compiling the analytics kernels cleanly). Streamlit Cloud uses uv to
-# resolve these; with open ranges it previously resolved a Python-3.13 + numba
-# combination with no compatible wheel, which segfaulted at boot and crash-looped
-# the app. The native stack — numba / numpy / llvmlite / scipy / scikit-learn —
-# is ABI-coupled: do NOT loosen these without re-verifying the whole set on the
-# SAME Python pinned in runtime.txt (3.11). Pure-Python deps are pinned too so a
-# deploy can never silently drift onto an untested transitive resolution.
 
-# ── Python interpreter ──
-# Pinned via runtime.txt → python-3.11  (Streamlit Cloud reads runtime.txt).
+# Core Framework
+streamlit>=1.30.0
+pandas>=2.1.0
+numpy>=1.24.0
+plotly>=5.18.0
+numba
 
-# ── Core Framework ──
-streamlit==1.58.0
-pandas==2.3.3
-plotly==6.0.0
+# Scientific Computing
+scipy>=1.11.0
+scikit-learn>=1.5.0  # 1.5+ enables PCA svd_solver="covariance_eigh" (exact, ~2x faster walk-forward)
+statsmodels>=0.14.0
 
-# ── Native / ABI-coupled trio (the segfault surface) ──
-# llvmlite is numba's codegen backend; its version is locked to numba's. numpy
-# must stay <2.1 for this numba build. Keep all three together, always.
-numpy==1.26.4
-numba==0.61.0
-llvmlite==0.44.0
+# Self-Calibration / Intelligence Mode (Optuna TPE optimizer)
+optuna>=3.5.0
 
-# ── Scientific Computing ──
-# scikit-learn 1.5+ enables PCA svd_solver="covariance_eigh" (exact, ~2x faster
-# walk-forward); 1.9.0 is the verified build.
-scipy==1.12.0
-scikit-learn==1.9.0
-statsmodels==0.14.4
+# Data Sources (yfinance pulls requests transitively)
+yfinance>=0.2.31
 
-# ── Self-Calibration / Intelligence Mode (Optuna TPE optimizer) ──
-optuna==4.8.0
+# Per-exchange trading calendars for holiday-aware data-freshness counting
+# (data/calendars.py). Offline, keyless — ships its own holiday tables. OPTIONAL:
+# if absent, freshness degrades gracefully to a plain Mon–Fri busday count.
+exchange_calendars>=4.5
 
-# ── Data Sources (yfinance pulls requests transitively) ──
-yfinance==0.2.66
+# HTML parsers for index-constituent scraping (pandas.read_html, data/universe.py).
+# lxml is the primary parser; html5lib is a lenient fallback for malformed markup.
+lxml>=4.9.0
+html5lib>=1.1
 
-# ── Per-exchange trading calendars for holiday-aware data-freshness counting
-# (data/calendars.py). Offline, keyless — ships its own holiday tables. ──
-exchange_calendars==4.13.2
-
-# ── HTML parsers for index-constituent scraping (pandas.read_html). lxml is the
-# primary parser; html5lib is a lenient fallback for malformed markup. ──
-lxml==6.0.2
-html5lib==1.1
-
-# ── Terminal Support ──
-colorama==0.4.6
+# Terminal Support
+colorama>=0.4.6

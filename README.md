@@ -81,14 +81,23 @@ every input "on."
 
 **Honest validation, leakage-free.** The intelligence calibration optimises a
 **purged k-fold cross-validation** objective (robust across time, not one slice) and
-reports a Val IC on a genuinely held-out, purged tail. The Aarambh walk-forward
-itself also **purges label overlap** — each forward-return label spans `(t, t+h]`, so
-training rows within `h` of the prediction point are dropped to stop the forecast
-window leaking into training (this materially lowered, and corrected, the long-horizon
-IC). An expanding-window **walk-forward IC** runs every analysis and is charted in
-Diagnostics — consistently positive bars = durable edge; a couple of spikes = a lucky
-regime. The **Precedent** tab is a separate, non-parametric base rate read alongside
-the model, not part of the calibrated convergence signal.
+reports a Val IC on a genuinely held-out, purged tail, scored **non-overlapping**
+(stride = the shortest hold horizon) rather than on every daily row — a daily-sampled
+IC on overlapping h-day forward returns overstates its own precision by roughly √h, so
+the trust chip's SOLID/MODEST/MARGINAL tiers are calibrated to the non-overlapping
+scale. The Aarambh walk-forward itself also **purges label overlap** — each
+forward-return label spans `(t, t+h]`, so training rows within `h` of the prediction
+point are dropped to stop the forecast window leaking into training (this materially
+lowered, and corrected, the long-horizon IC) — and the engine's own warm-up window
+(the first `MIN_TRAIN_SIZE` rows, before any walk-forward chunk has been fit) is left
+genuinely unscored rather than filled from an expanding mean of labels that overlap
+the forecast window. An expanding-window **walk-forward IC** runs every analysis and
+is charted in Diagnostics — consistently positive bars = durable edge; a couple of
+spikes = a lucky regime. The **Precedent** tab is a separate, non-parametric base
+rate read alongside the model, not part of the calibrated convergence signal; its
+analog matcher enforces a **Theiler exclusion window** (Theiler 1986) between
+returned analogs so "N analogs" reflects N genuinely distinct historical episodes,
+not N adjacent days of the same episode.
 
 ---
 
@@ -145,8 +154,8 @@ data/                   yfinance fetchers, index catalogue + constituent
                         resolution (universe), two-tier cache, circuit breakers,
                         per-exchange trading calendars (calendars.py)
 engines/                aarambh (forecast, purged walk-forward), nirnay (breadth)
-analytics/              OU, Hurst/DFA, conformal, HMM/GARCH/CUSUM, breaks,
-                        analogs (Mahalanobis precedent matcher)
+analytics/              OU, Hurst/DFA, robust-quantile z-scores, HMM/GARCH/CUSUM,
+                        breaks, analogs (Mahalanobis precedent matcher)
 convergence/            cross-validator, conviction (DDM), divergence,
                         normalization, intelligence (calibration + walk-forward)
 ui/                     theme, components, tabs (Convergence/Aarambh/Nirnay/

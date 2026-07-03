@@ -189,8 +189,21 @@ def calculate_mmr(
         x_mean = x.rolling(length, min_periods=1).mean().shift(1).fillna(0)
         x_std = x.rolling(length, min_periods=1).std().shift(1).fillna(1.0)
 
-        # Pearson correlation shifted (only prior data used to estimate relationship)
-        roll_corr = x.rolling(length, min_periods=length).corr(target).shift(1).fillna(0)
+        # Pearson correlation shifted (only prior data used to estimate relationship).
+        # rolling.corr emits ±inf on near-zero-variance windows (pegged/constant
+        # series, ff-filled holiday runs), and catastrophic cancellation can also
+        # yield finite |r| > 1 — both are numerically meaningless for a Pearson r
+        # and, squared, would hijack the top-N driver selection below (±inf sorts
+        # last in argsort, so a constant column would always win a "top driver"
+        # slot). Sanitize: non-finite -> NaN (excluded downstream), then clip to
+        # the valid Pearson range.
+        roll_corr = (
+            x.rolling(length, min_periods=length).corr(target)
+             .replace([np.inf, -np.inf], np.nan)
+             .clip(-1.0, 1.0)
+             .shift(1)
+             .fillna(0)
+        )
         slope = roll_corr * (y_std / x_std.replace(0, np.nan)).fillna(0)
         intercept = y_mean - (slope * x_mean)
 
@@ -215,7 +228,7 @@ def calculate_mmr(
     
     for i in range(n_rows):
         row_r2 = all_r2_arr[i]
-        valid_mask = ~np.isnan(row_r2)
+        valid_mask = np.isfinite(row_r2)
         if np.sum(valid_mask) < num_vars:
             y_predicted[i] = y_mean.iloc[i]
             model_r2_arr[i] = 0.0
@@ -228,7 +241,7 @@ def calculate_mmr(
         preds_sel = all_preds_arr[i, top_real_indices]
         
         r2_sum = np.sum(r2_sel)
-        if r2_sum > 1e-6:
+        if np.isfinite(r2_sum) and r2_sum > 1e-6:
             y_predicted[i] = np.sum(preds_sel * r2_sel) / r2_sum
             model_r2_arr[i] = np.sum(r2_sel**2) / r2_sum
         else:

@@ -561,6 +561,35 @@ def _score_frame(
     return mean_ic, score
 
 
+def _score_frame_nonoverlap(
+    frame: pd.DataFrame,
+    weights: dict[str, float],
+    thresholds: dict[str, float],
+    horizons: tuple[int, ...],
+) -> tuple[float, float]:
+    """Non-overlapping counterpart of ``_score_frame`` for REPORTED IC.
+
+    ``Ret_{h}b`` at every daily row shares up to h-1 days with its neighbors —
+    adjacent observations are ~(h-1)/h correlated, so the effective sample
+    size of a daily-sampled IC is ~n/h, not n (Hansen & Hodrick 1980, JPE;
+    Newey & West 1987, Econometrica — the same overlap the rest of this
+    codebase's research suite strides out via ``stride = horizon``, see
+    research/README.md's "Honest metric" note). Scoring on every date
+    overstates precision by roughly sqrt(h) and is what let a Val IC of
+    +0.05 on ~20 effective observations (SE ~= 0.21) display as "SOLID
+    EDGE". This strides the frame by the SHORTEST configured horizon before
+    scoring — one non-overlapping subsample shared across all horizons in
+    the mean — so the reported number matches the research convention and
+    is not spuriously precise. Used only for the *reported* metric; the
+    Optuna objective itself still scores the full (overlapping) frame for a
+    smoother optimization surface.
+    """
+    if frame.empty or not horizons:
+        return float("nan"), -1e6
+    stride = max(1, int(min(horizons)))
+    return _score_frame(frame.iloc[::stride], weights, thresholds, horizons)
+
+
 # ════════════════════════════════════════════════════════════════════════
 # Rolling walk-forward validation
 # ════════════════════════════════════════════════════════════════════════
@@ -670,7 +699,12 @@ def walk_forward_ic(
         test = frame.iloc[cut + purge: cut + purge + step]
         if len(test) >= 20:
             w, t = _optimize_frame(train, horizons, n_trials, l2_alpha, n_cv_folds)
-            ic, _ = _score_frame(test, w, t, horizons)
+            # Non-overlapping IC — see _score_frame_nonoverlap's docstring:
+            # daily-sampled forward-return IC on a test block this small
+            # (n_eff ~= len(test)/h) is far less precise than the raw sample
+            # count implies; striding matches the honest-metric convention
+            # used everywhere else in the research suite.
+            ic, _ = _score_frame_nonoverlap(test, w, t, horizons)
             try:
                 ts = frame.index[cut + purge]
             except Exception:
@@ -893,14 +927,22 @@ class ConvergenceTuner:
         }
         self.best_weights = weights
         self.best_thresholds = thresholds
-        # Train IC = cross-validated mean over the optimisation folds (what the
-        # search actually optimised), so it is directly comparable to val_ic.
-        self.train_ic, self.train_score = self._score_cv(self.opt_frame, weights, thresholds)
+        # train_score = cross-validated mean over the optimisation folds (what
+        # the search actually optimised — kept on the overlapping/daily basis
+        # so the objective and its diagnostic score agree). The REPORTED
+        # train_ic (shown in the UI, compared against val_ic for the overfit
+        # gate) is scored non-overlapping instead — daily-sampled forward-
+        # return IC overstates precision by ~sqrt(h) (see
+        # _score_frame_nonoverlap's docstring), which is exactly the gap
+        # between the smooth optimisation objective and an honest reported
+        # number.
+        _, self.train_score = self._score_cv(self.opt_frame, weights, thresholds)
+        self.train_ic, _ = _score_frame_nonoverlap(self.opt_frame, weights, thresholds, self.horizons)
         return self._make_profile(), self.study
 
     def evaluate_validation(self) -> tuple[float, float]:
-        """Score the best params on the held-out validation set."""
-        self.val_ic, self.val_score = _score_frame(
+        """Score the best params on the held-out validation set (non-overlapping IC)."""
+        self.val_ic, self.val_score = _score_frame_nonoverlap(
             self.val_frame, self.best_weights, self.best_thresholds, self.horizons,
         )
         return self.val_ic, self.val_score

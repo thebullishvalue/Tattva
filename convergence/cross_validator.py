@@ -244,10 +244,19 @@ class CrossValidator:
         else:
             agreement_ratio = (direction_score + breadth_score + magnitude_score + regime_score) / 4.0
 
-        # Lead-lag indicator
-        if aarambh_direction != nirnay_direction and abs(aarambh_direction) > abs(nirnay_direction) * 1.5:
+        # Lead-lag indicator. NOTE: aarambh_direction/nirnay_direction are
+        # np.sign(...) outputs, i.e. always in {-1, 0, +1} — comparing their
+        # absolute values (both in {0, 1}) against a 1.5x margin is
+        # degenerate: "abs(x) > abs(y)*1.5" can only ever be true when
+        # abs(y)==0 and abs(x)==1, so AARAMBH_LEADS previously could only
+        # fire when Nirnay's breadth was EXACTLY split 50/50 (never in
+        # practice), never from Aarambh's conviction genuinely dominating
+        # Nirnay's (audit finding E5). Compare the actual normalized
+        # MAGNITUDES instead (aarambh_mag_norm/nirnay_mag_norm, both in
+        # [0, 1], already computed for the magnitude dimension above).
+        if aarambh_direction != nirnay_direction and aarambh_mag_norm > nirnay_mag_norm * 1.5:
             lead_lag = "AARAMBH_LEADS"
-        elif aarambh_direction != nirnay_direction and abs(nirnay_direction) * 1.5 > abs(aarambh_direction):
+        elif aarambh_direction != nirnay_direction and nirnay_mag_norm > aarambh_mag_norm * 1.5:
             lead_lag = "NIRNAY_LEADS"
         elif aarambh_direction == nirnay_direction:
             lead_lag = "ALIGNED"

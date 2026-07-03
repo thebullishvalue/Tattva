@@ -41,11 +41,13 @@ class UnifiedConvictionResult:
     nishkarsh_signal : str
         Classified signal (``STRONG BUY`` → ``STRONG SELL``).
     confidence_upper : float
-        Upper bound of the 95% confidence band.
+        Upper bound of the DDM uncertainty band (heuristic — see
+        ``drift_diffusion_filter``'s docstring; NOT a statistical confidence
+        interval with a validated coverage property).
     confidence_lower : float
-        Lower bound of the 95% confidence band.
+        Lower bound of the DDM uncertainty band (heuristic, see above).
     confidence_bandwidth : float
-        Width of the confidence band (upper - lower).
+        Width of the uncertainty band (upper - lower).
     """
 
     nishkarsh_conviction: float

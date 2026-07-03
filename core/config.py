@@ -9,7 +9,7 @@ CORE — Merged from both Aarambh (correl.py) and Nirnay (nirnay_core.py) monoli
 
 # Single source of truth for the app version — ui/theme.py imports these (do not
 # redefine elsewhere; past drift between config and theme is why this is centralized).
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 PRODUCT_NAME = "Tattva"
 COMPANY = "@thebullishvalue"
 

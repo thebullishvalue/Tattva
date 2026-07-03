@@ -1,8 +1,20 @@
 """
-Tattva — Conformal prediction z-scores with fat-tail adjustment.
+Tattva — Rolling robust quantile z-scores with fat-tail adjustment.
 तत्त्व (Tattva) — "Principle / Essence"
 
-ANALYTICS — Conformal prediction bounds for walk-forward regression residuals.
+ANALYTICS — Rolling empirical-quantile bounds for walk-forward regression
+residuals.
+
+NOTE on naming: this module (and older docs/UI copy) previously called this
+"conformal prediction". It isn't — conformal prediction (Vovk, Gammerman &
+Shafer 2005, Algorithmic Learning in a Random World) provides a finite-sample
+COVERAGE GUARANTEE via calibration-set nonconformity scores under an
+exchangeability assumption. What's computed here is a rolling-window robust
+z-score (deviation from the window median, scaled by the window's normalized
+IQR) — a useful, numerically fine robust-statistics tool, but it carries no
+such guarantee on a serially dependent series. The IQR/1.35 scale factor is
+the standard robust-scale estimate (1.349 ~= 2*Phi^-1(0.75); see e.g. Huber &
+Ronchetti, Robust Statistics), unrelated to conformal calibration.
 """
 
 from __future__ import annotations
@@ -63,30 +75,34 @@ def compute_conformal_zscores(
     min_periods: int = 5,
     alpha: float = 0.05,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Conformal prediction-based z-scores with fat-tail adjustment.
+    """Rolling robust quantile z-scores with fat-tail adjustment.
 
-    Uses empirical quantiles instead of mean/std for robustness
-    to fat-tailed distributions.
+    Uses empirical quantiles instead of mean/std for robustness to fat-tailed
+    distributions. (Function/parameter names kept as "conformal" for
+    import-site compatibility — see this module's docstring for why that
+    label is inaccurate: this has no conformal-prediction coverage
+    guarantee, it is a rolling robust z-score / empirical-quantile band.)
 
     Parameters
     ----------
     series : np.ndarray
         Input time-series.
     window : int
-        Rolling window size for conformal intervals.
+        Rolling window size for the empirical-quantile bounds.
     min_periods : int
         Minimum valid observations required within the window.
     alpha : float
-        Significance level for conformal intervals (default 0.05 → 95%).
+        Tail fraction for the bounds (default 0.05 -> the [2.5, 97.5]
+        percentile band).
 
     Returns
     -------
     z_scores : np.ndarray
         Quantile-normalized z-scores.
     lower_bounds : np.ndarray
-        Lower conformal interval bound at level ``1 - alpha``.
+        Lower empirical-quantile bound at level ``1 - alpha``.
     upper_bounds : np.ndarray
-        Upper conformal interval bound at level ``1 - alpha``.
+        Upper empirical-quantile bound at level ``1 - alpha``.
     """
     n = len(series)
     if n <= window:

@@ -11,7 +11,6 @@ from dataclasses import dataclass
 
 import numpy as np
 from numba import njit
-from analytics.utils import MathUtils
 
 @njit(cache=True)
 def _njit_forward_step(transition_matrix: np.ndarray, state_probabilities: np.ndarray,
@@ -207,6 +206,20 @@ def _regime_loop_njit(sig: np.ndarray):
                         nsd = 1e-4
                     em_mean[st] = 0.9 * em_mean[st] + 0.1 * nm
                     em_std[st] = 0.9 * em_std[st] + 0.1 * nsd
+            # Ordering constraint (state 0=Bull > 1=Neutral > 2=Bear): without
+            # it the online EM update has no identifiability constraint on
+            # which state is "which", so a long one-sided regime can drift
+            # em_mean[0] (Bull) below em_mean[2] (Bear) — the canonical
+            # label-switching failure of unconstrained online HMM/mixture
+            # estimation (Jasra, Holmes & Stephens 2005, Statistical Science
+            # 20(1)). After that crossing, hmm_bull silently reports the BEAR
+            # state's probability. A small margin (not a bare >=) stops the
+            # constraint itself from flip-flopping on floating-point noise
+            # when two means are nearly equal.
+            if em_mean[0] < em_mean[1] + 0.01:
+                em_mean[0] = em_mean[1] + 0.01
+            if em_mean[2] > em_mean[1] - 0.01:
+                em_mean[2] = em_mean[1] - 0.01
         # _adapt_transitions (uses last 30 states)
         if nobs >= 5:
             w = 30 if nobs >= 30 else nobs
@@ -504,6 +517,18 @@ class AdaptiveHMM:
                 self.state.emission_stds[state_idx] = (
                     0.9 * self.state.emission_stds[state_idx] + 0.1 * new_std
                 )
+
+        # Ordering constraint (state 0=BULL > 1=NEUTRAL > 2=BEAR): mirrors the
+        # Numba kernel's fix (analytics/regime.py's _regime_loop_njit) for the
+        # same label-switching failure mode of unconstrained online EM
+        # (Jasra, Holmes & Stephens 2005, Statistical Science 20(1)) — without
+        # it a long one-sided regime can drift the Bull mean below the Bear
+        # mean, after which BULL/BEAR probabilities silently swap meaning.
+        means = self.state.emission_means
+        if means[0] < means[1] + 0.01:
+            means[0] = means[1] + 0.01
+        if means[2] > means[1] - 0.01:
+            means[2] = means[1] - 0.01
 
     def _adapt_transitions(self) -> None:
         """Adapt transition matrix based on recent state transitions."""

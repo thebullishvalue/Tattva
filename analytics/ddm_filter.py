@@ -2,7 +2,22 @@
 Tattva — Drift-Diffusion Model (DDM) filter with mean-reverting variance.
 तत्त्व (Tattva) — "Principle / Essence"
 
-ANALYTICS — Bounded signal filtering with confidence bands via stochastic DDM.
+ANALYTICS — Bounded signal filtering with a heuristic uncertainty band via a
+stochastic DDM.
+
+NOTE on "confidence bands": ``±1.96*sqrt(variances)`` (computed by callers,
+e.g. convergence/conviction_model.py) LOOKS like a 95% Gaussian confidence
+interval, but ``variances`` here is not a state-space posterior variance
+estimated from data — the state-space model itself is not specified/fit; the
+level is instead a designed, bounded heuristic that mean-reverts toward
+``long_run_var`` (a fixed constant, e.g. 50 or 100) with a drift-dependent
+expansion term. A real 95% CI requires the variance to be an actual sampling-
+distribution estimate (see Durbin & Koopman, "Time Series Analysis by State
+Space Methods", for the Kalman-filter case that WOULD justify this).
+Practically the band is still a useful WIDTH signal (narrow = the filter's
+recent evidence has been consistent; wide = it has been noisy/conflicting) —
+just not a calibrated coverage interval, so it should be read and labeled as
+an uncertainty band, not a confidence interval.
 """
 
 from __future__ import annotations
@@ -51,7 +66,15 @@ def drift_diffusion_filter(
     if n == 0:
         return np.array([]), np.array([]), np.array([])
 
-    state = float(obs[0]) if n > 0 else 0.0
+    # A NaN seed (the engine's own warm-up region, see aarambh.py's A3 fix, can
+    # leave obs[0] non-finite) would propagate NaN through the leaky state for
+    # the whole series via state*(1-leak_rate). Seed a NEUTRAL 0.0 belief in
+    # that case — matching the per-step `evidence = 0.0` fallback below.
+    # (An earlier revision seeded from the first FINITE observation instead;
+    # that was a look-ahead: for a series whose leading segment is NaN, the
+    # first finite value lives hundreds of rows in the future, so the filter's
+    # t=0 state reflected data that did not yet exist.)
+    state = float(obs[0]) if np.isfinite(obs[0]) else 0.0
     var_est = long_run_var
 
     filtered = np.zeros(n)

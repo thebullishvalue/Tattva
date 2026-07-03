@@ -7,9 +7,9 @@ ANALYTICS — Covariance-aware historical analog matching, ported from Arthagati
 itself is unchanged; only its INPUTS are adapted to Tattva:
 
   • Feature vector is built from the quantities Tattva already computes per day
-    (``engine.ts_data``) — conformal extension (AvgZ), net internal breadth, target
-    momentum, realized volatility, and rolling Hurst — instead of Arthagati's mood
-    features.
+    (``engine.ts_data``) — robust-quantile extension (AvgZ), net internal breadth,
+    target momentum, realized volatility, and rolling Hurst — instead of
+    Arthagati's mood features.
   • Forward-return horizons are the ACTIVE Signal-Horizon hold grid (so the
     precedent read inherits the lens chosen in the sidebar), not a fixed 5/20/60/90.
 
@@ -43,22 +43,34 @@ ANALOG_W_RECV = 0.0    # exponential recency-decay — DROPPED (degraded recent 
 # ════════════════════════════════════════════════════════════════════════════
 
 def _ledoit_wolf_shrinkage(S: np.ndarray, n: int) -> np.ndarray:
-    """Ledoit & Wolf (2004) analytical shrinkage estimator.
-    Σ* = δ·F + (1−δ)·S  where F = (tr(S)/p)·I  (scaled identity target).
-    Optimal δ minimises E[‖Σ*−Σ‖²_F] under standard asymptotics.
+    """Oracle Approximating Shrinkage estimator (Chen, Wiesel, Eldar & Hero
+    2010, IEEE Trans. Signal Processing 58(10), eq. 23, with the O(1/p)
+    ``2/p`` correction term omitted — negligible for large p, but that omission
+    is what makes this match the reference OAS implementation used to verify
+    it (``sklearn.covariance.OAS``: "The factor 2/p is omitted since it does
+    not impact the value of the estimator for large p"). Verified to agree
+    with ``sklearn.covariance.OAS`` to ~1e-16 on random SPD inputs, including
+    the small p (3-4 feature) regime this module actually runs in.
+    Σ* = ρ·F + (1−ρ)·S  where F = (tr(S)/p)·I  (scaled identity target).
     Returns the shrunk covariance matrix — always well-conditioned.
+
+    (Name kept for import-site compatibility; this is OAS, not Ledoit & Wolf
+    2004 — a related but distinct, non-OAS shrinkage intensity. The formula
+    below was previously mis-transcribed: it had tr(S^2) - tr(S)^2/p in the
+    NUMERATOR and (1-2/p)*(tr(S^2)) + tr(S)^2 arrangement swapped relative to
+    the denominator, which under-shrinks exactly where shrinkage matters most
+    — near-isotropic S, where the true rho should approach 1.)
     """
     p = S.shape[0]
     if p == 0 or n < 2:
         return S
     trace_S = np.trace(S)
     mu = trace_S / p                       # target = μ·I
-    delta_mat = S - mu * np.eye(p)
-    sum_sq = np.sum(delta_mat ** 2)        # ‖S − μI‖²_F
-    # Optimal shrinkage intensity (OAS closed-form, Chen et al. 2010)
-    rho_num = ((1.0 - 2.0 / p) * sum_sq + trace_S ** 2)
-    rho_den = ((n + 1.0 - 2.0 / p) * (sum_sq + trace_S ** 2 / p))
-    rho = np.clip(rho_num / max(rho_den, 1e-12), 0.0, 1.0)
+    alpha = np.mean(S * S)                 # tr(S^2)/p^2 via the Frobenius-norm identity
+    mu_sq = mu ** 2
+    rho_num = alpha + mu_sq
+    rho_den = (n + 1.0) * (alpha - mu_sq / p)
+    rho = min(max(rho_num / rho_den, 0.0), 1.0) if rho_den != 0 else 1.0
     return (1.0 - rho) * S + rho * mu * np.eye(p)
 
 
@@ -87,6 +99,45 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     if norm_a < 1e-12 or norm_b < 1e-12:
         return 0.0
     return np.dot(a, b) / (norm_a * norm_b)
+
+
+def select_analogs_theiler(
+    scores: np.ndarray, top_n: int, gap: int,
+    positions: np.ndarray | None = None,
+) -> np.ndarray:
+    """Greedy top-N selection under a Theiler exclusion window.
+
+    Theiler (1986, Phys. Rev. A 34), adopted for analog/nearest-neighbor
+    forecasting by Farmer & Sidorowich (1987, Phys. Rev. Lett. 59): candidates
+    within `gap` rows of an already-accepted analog are excluded, so the
+    returned indices are drawn from genuinely distinct episodes rather than a
+    run of adjacent days whose rolling-window state (and h-day forward
+    outcome) is nearly identical. Plain top-N-by-score (``argpartition`` /
+    ``nlargest``) does not have this property and can return "top_n analogs"
+    that are really 1-3 independent observations repeated.
+
+    ``positions``: the TEMPORAL row position of each candidate (same length as
+    ``scores``). Required when the candidate pool has been filtered (e.g. the
+    engine warm-up rows removed) — array offsets then no longer measure time,
+    and the exclusion window must be applied on the original row positions.
+    Defaults to 0..n-1 (unfiltered pool: offset == time).
+
+    Returns up to `top_n` integer offsets INTO ``scores``, best-first.
+    """
+    if positions is None:
+        positions = np.arange(len(scores))
+    order = np.argsort(scores)[::-1]
+    accepted: list[int] = []
+    accepted_time: list[int] = []
+    for pos in order:
+        p = int(pos)
+        t = int(positions[p])
+        if all(abs(t - a) >= gap for a in accepted_time):
+            accepted.append(p)
+            accepted_time.append(t)
+            if len(accepted) >= top_n:
+                break
+    return np.array(accepted, dtype=np.int64)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -142,12 +193,35 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
     if {"OversoldBreadth", "OverboughtBreadth"}.issubset(df.columns):
         feat["NetBreadth"] = (pd.to_numeric(df["OversoldBreadth"], errors="coerce")
                               - pd.to_numeric(df["OverboughtBreadth"], errors="coerce"))
+        # The engine's own [0, MIN_TRAIN_SIZE) warm-up (no genuine walk-forward
+        # forecast yet — see A3 in the audit) reads OversoldBreadth ==
+        # OverboughtBreadth == 0, so NetBreadth would otherwise be a fabricated
+        # 0.0 "neutral" reading rather than genuinely missing. Force it to NaN
+        # there so the analog historical pool excludes the warm-up (median-fill
+        # in find_similar_periods then treats it as missing, matching every
+        # other NaN-guarded consumer of this engine output).
+        if "Valid" in df.columns:
+            feat.loc[~df["Valid"].astype(bool), "NetBreadth"] = np.nan
     feat["Hurst"] = _rolling_hurst(price, window=max(60, mom_window * 3))
 
     feature_cols = [c for c in ("Momentum", "RealizedVol", "NetBreadth", "Hurst")
                     if c in feat.columns]
     feat["Price"] = price
     feat["Date"] = df["Date"].to_numpy() if "Date" in df.columns else df.index.to_numpy()
+    # Carried DISPLAY-ONLY columns (not in feature_cols, never matched on):
+    #   • AvgZ — the engine's extension z-score at the analog's date. It was
+    #     dropped from the MATCHING feature set in the 2.2 re-tune, but the
+    #     Precedent tab's analog cards still display "Extension (Z)" and key
+    #     their tier badge/color off it; without carrying it, every card
+    #     silently read the dict default 0.0 → permanently "Neutral" badges
+    #     (round-2 audit finding M1).
+    #   • ValidRow — the engine's Valid flag (False through the walk-forward
+    #     warm-up). Lets find_similar_periods exclude rows whose NetBreadth
+    #     would be median-filled fabrication from the candidate pool (M2).
+    if "AvgZ" in df.columns:
+        feat["AvgZ"] = pd.to_numeric(df["AvgZ"], errors="coerce").to_numpy(dtype=np.float64)
+    if "Valid" in df.columns:
+        feat["ValidRow"] = df["Valid"].astype(bool).to_numpy()
     return feat, feature_cols
 
 
@@ -160,12 +234,17 @@ def find_similar_periods(
     top_n: int = 10,
     recency_weight: float = ANALOG_W_RECV,
 ) -> list[dict]:
-    """Tattva analog finder — ported scoring, Tattva inputs.
+    """Tattva analog finder — ported scoring machinery, Tattva-tuned weights.
 
-    3-part scoring (Arthagati blend, unchanged):
-      1. Mahalanobis distance (55%) — covariance-aware state match
-      2. Trajectory cosine similarity (35%) — detrended Price-path shape
-      3. Exponential recency decay (10%) — prefer recent analogs
+    Scoring = ANALOG_W_MAHA · Mahalanobis + ANALOG_W_TRAJ · trajectory-cosine
+    + ANALOG_W_RECV · recency. The SHIPPED weights are **1 / 0 / 0** (pure
+    covariance-aware Mahalanobis state match) — the ported Arthagati blend
+    (.55/.35/.10) was re-tuned for Tattva and the trajectory/recency parts
+    were dropped as harmful to the recent regime (see module header; their
+    computation is skipped entirely at weight 0). Candidates are drawn from
+    genuinely-forecast history only (engine warm-up rows excluded) and
+    selected under a Theiler exclusion window so each returned analog is a
+    distinct episode.
 
     Returns top-N analogs as dicts with the target's forward returns at each
     ``hold_horizons`` value (% Price change t→t+h).
@@ -178,6 +257,14 @@ def find_similar_periods(
     purge = int(max(hold_horizons)) if hold_horizons else 20
     # Exclude the tail: those rows have no realized forward path yet.
     historical = feat.iloc[:n - purge].copy()
+    # Exclude the engine's walk-forward WARM-UP rows from the candidate pool
+    # (ValidRow False, see _build_feature_frame): their NetBreadth is genuinely
+    # missing, and matching against a median-filled fabrication is not a state
+    # match. The frame keeps its original RangeIndex labels after this filter,
+    # so `historical.index` remains the TEMPORAL row position — the forward-
+    # return lookups and the Theiler gap below both rely on that.
+    if "ValidRow" in historical.columns:
+        historical = historical[historical["ValidRow"]]
     if len(historical) < 30:
         return []
 
@@ -221,8 +308,13 @@ def find_similar_periods(
 
         cur_traj = price_all[-traj_window:]
         ct = _ls_detrend(cur_traj)
+        # historical's RangeIndex labels ARE the temporal row positions (the
+        # frame was built with reset_index, and the ValidRow filter above
+        # preserves labels) — use them, not the filtered array offset j, to
+        # slice the price path.
+        _orig_pos = historical.index.to_numpy()
         for j in range(len(historical)):
-            pos = j  # historical is feat.iloc[:n-purge] → positional index aligns
+            pos = int(_orig_pos[j])
             if pos >= traj_window:
                 ht = _ls_detrend(price_all[pos - traj_window:pos])
                 traj_sim[j] = (cosine_similarity(ct, ht) + 1) / 2
@@ -242,7 +334,33 @@ def find_similar_periods(
     combined = ANALOG_W_MAHA * maha_sim + ANALOG_W_TRAJ * traj_sim + ANALOG_W_RECV * recency_norm
     historical = historical.copy()
     historical["similarity"] = combined
-    top = historical.nlargest(top_n, "similarity")
+
+    # Theiler exclusion window (see select_analogs_theiler docstring): without
+    # it, top-N-by-similarity typically returns a RUN of adjacent days from
+    # 1-3 historical episodes whose h-day forward outcomes overlap almost
+    # completely — "10 analogs" that are really 1-3 independent observations,
+    # inflating summarize_forward's apparent median/positive_pct precision.
+    # gap = the longer of the momentum window (how far back the STATE feature
+    # vector looks) and the longest requested forward horizon (how far the
+    # OUTCOME extends) — below that, either the state or the outcome (or
+    # both) would overlap a neighbor's.
+    gap = max(int(mom_window), int(max(hold_horizons)) if hold_horizons else 0, 1)
+    # positions= carries the ORIGINAL temporal row positions (RangeIndex labels)
+    # because the pool above may be filtered (warm-up rows removed) — the
+    # Theiler gap must be measured in trading days, not filtered-array offsets.
+    accepted = select_analogs_theiler(
+        combined, top_n, gap, positions=historical.index.to_numpy(),
+    )
+    top = historical.iloc[accepted]
+
+    def _num(row: dict, key: str, default: float) -> float:
+        """Finite-or-default coercion — carried columns can be NaN."""
+        v = row.get(key)
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return default
+        return fv if np.isfinite(fv) else default
 
     results: list[dict] = []
     for pos, row in zip(top.index, top.to_dict("records")):
@@ -261,11 +379,11 @@ def find_similar_periods(
             "date": date_str,
             "similarity": float(row["similarity"]),
             "price": price_at or 0.0,
-            "momentum": float(row.get("Momentum", 0.0) or 0.0) * 100,  # → %
-            "realized_vol": float(row.get("RealizedVol", 0.0) or 0.0) * 100,
-            "avgz": float(row.get("AvgZ", 0.0) or 0.0),
-            "net_breadth": float(row.get("NetBreadth", 0.0) or 0.0),
-            "hurst": float(row.get("Hurst", 0.5) or 0.5),
+            "momentum": _num(row, "Momentum", 0.0) * 100,  # → %
+            "realized_vol": _num(row, "RealizedVol", 0.0) * 100,
+            "avgz": _num(row, "AvgZ", 0.0),
+            "net_breadth": _num(row, "NetBreadth", 0.0),
+            "hurst": _num(row, "Hurst", 0.5),
             "fwd": {int(h): fwd[h] for h in hold_horizons},
         })
     return results

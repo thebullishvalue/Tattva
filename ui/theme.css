@@ -87,33 +87,6 @@
 }
 
 /* ================================================================
-   Light Theme Tokens
-   ================================================================ */
-[data-theme="light"] {
-    --bg-deep: #F0F2F5;
-    --bg-base: #FFFFFF;
-    --bg-elevated: #F8F9FA;
-    --bg-surface: #FFFFFF;
-    --glass: rgba(255, 255, 255, 0.7);
-    --glass-hover: rgba(255, 255, 255, 0.9);
-    --border: rgba(0, 0, 0, 0.08);
-    --border-active: rgba(180, 140, 60, 0.4);
-    --border-subtle: rgba(0, 0, 0, 0.04);
-
-    --ink-primary: #1A1A2E;
-    --ink-secondary: #4A5568;
-    --ink-tertiary: #718096;
-    --ink-inverse: #FFFFFF;
-
-    --amber-dim: rgba(180, 140, 60, 0.7);
-    --amber-glow: rgba(180, 140, 60, 0.15);
-    --cyan-glow: rgba(6, 150, 180, 0.15);
-    --emerald-glow: rgba(45, 180, 150, 0.15);
-    --rose-glow: rgba(200, 60, 70, 0.15);
-    --violet-glow: rgba(120, 80, 210, 0.15);
-}
-
-/* ================================================================
    Globals & App Overrides
    ================================================================ */
 * {
@@ -165,12 +138,6 @@ svg {
     z-index: 0;
 }
 
-[data-theme="light"] .stApp::before {
-    background:
-        radial-gradient(ellipse 80% 60% at 20% 10%, rgba(180, 140, 60, 0.03) 0%, transparent 70%),
-        radial-gradient(ellipse 60% 80% at 80% 90%, rgba(0, 150, 200, 0.02) 0%, transparent 70%);
-}
-
 /* Subtle grid pattern overlay */
 .stApp::after {
     content: "";
@@ -183,13 +150,6 @@ svg {
     pointer-events: none;
     z-index: 0;
     opacity: 0.5;
-}
-
-[data-theme="light"] .stApp::after {
-    background-image:
-        linear-gradient(rgba(0, 0, 0, 0.02) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0, 0, 0, 0.02) 1px, transparent 1px);
-    opacity: 0.3;
 }
 
 [data-testid="stHeader"] {
@@ -1437,6 +1397,103 @@ footer {
     color: var(--amber);
 }
 
+/* ── Hero verdict card — structured evidence layout ─────────────────
+   Extends .signal-card (same shell, tokens, and tinting) with the
+   rebuilt hero anatomy: source eyebrow · value+score · trust chip ·
+   headline · tagged evidence rows. */
+.signal-card .hero-source {
+    font-family: var(--data);
+    font-size: 0.6rem;
+    color: var(--ink-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: var(--sp-2);
+}
+
+.signal-card .hero-score {
+    font-family: var(--data);
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--ink-secondary);
+    letter-spacing: -0.01em;
+    margin-left: var(--sp-3);
+    vertical-align: 0.35em;
+}
+
+.signal-card .hero-chip-row {
+    margin-top: var(--sp-3);
+}
+
+.signal-card .hero-chip {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 100px;
+    font-family: var(--data);
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+}
+
+.signal-card .hero-headline {
+    margin-top: var(--sp-4);
+    font-family: var(--data);
+    font-size: 0.84rem;
+    line-height: 1.6;
+    color: var(--ink-primary);
+}
+
+.signal-card .hero-evidence {
+    margin-top: var(--sp-5);
+    padding-top: var(--sp-5);
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+}
+
+.signal-card .hero-evidence-row {
+    display: flex;
+    gap: var(--sp-4);
+    align-items: baseline;
+}
+
+.signal-card .hero-tag {
+    flex: 0 0 108px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--display);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-tertiary);
+    white-space: nowrap;
+}
+
+.signal-card .hero-tag .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ink-tertiary);
+    flex: none;
+}
+
+.signal-card .hero-evidence-row.confirm .dot { background: var(--emerald); }
+.signal-card .hero-evidence-row.conflict .dot { background: var(--rose); }
+.signal-card .hero-evidence-row.info .dot { background: var(--cyan); }
+
+.signal-card .hero-text {
+    font-family: var(--data);
+    font-size: 0.76rem;
+    line-height: 1.65;
+    color: var(--ink-secondary);
+}
+
+.signal-card .hero-evidence-row.conflict .hero-text {
+    color: var(--ink-primary);
+}
+
 /* ================================================================
    Status badges
    ================================================================ */
@@ -1503,6 +1560,47 @@ footer {
     font-size: 0.8rem;
     line-height: 1.7;
     font-family: var(--data);
+}
+
+/* Color modifier classes for render_info_box(color=...). The base
+   .info-box/.info-box h4 rules above only ever styled the default (cyan)
+   case — passing e.g. color="amber" set the class but had no matching rule,
+   so every info box rendered visually identical regardless of the color
+   argument (audit finding E2). */
+.info-box.amber h4 {
+    color: var(--amber);
+}
+
+.info-box.amber {
+    border-color: rgba(212, 168, 83, 0.22);
+    background: rgba(212, 168, 83, 0.06);
+}
+
+.info-box.emerald h4 {
+    color: var(--emerald);
+}
+
+.info-box.emerald {
+    border-color: rgba(52, 211, 153, 0.22);
+    background: rgba(52, 211, 153, 0.06);
+}
+
+.info-box.rose h4 {
+    color: var(--rose);
+}
+
+.info-box.rose {
+    border-color: rgba(251, 113, 133, 0.22);
+    background: rgba(251, 113, 133, 0.06);
+}
+
+.info-box.violet h4 {
+    color: var(--violet);
+}
+
+.info-box.violet {
+    border-color: rgba(167, 139, 250, 0.22);
+    background: rgba(167, 139, 250, 0.06);
 }
 
 /* ================================================================
@@ -2867,39 +2965,6 @@ footer {
 }
 
 /* ================================================================
-   Theme Toggle Button
-   ================================================================ */
-.theme-toggle {
-    position: fixed;
-    top: var(--sp-4);
-    right: var(--sp-4);
-    z-index: 1001;
-    background: var(--glass);
-    backdrop-filter: blur(8px);
-    border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    padding: var(--sp-2) var(--sp-3);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    font-family: var(--data);
-    font-size: 0.65rem;
-    color: var(--ink-secondary);
-    transition: all 200ms ease;
-}
-
-.theme-toggle:hover {
-    border-color: var(--amber);
-    color: var(--amber);
-}
-
-.theme-toggle svg {
-    width: 14px;
-    height: 14px;
-}
-
-/* ================================================================
    Export Button Row
    ================================================================ */
 .export-btn-row {
@@ -2907,56 +2972,6 @@ footer {
     justify-content: flex-end;
     gap: var(--sp-3);
     margin-top: var(--sp-4);
-}
-
-/* ================================================================
-   Keyboard Shortcuts
-   ================================================================ */
-.kbd-shortcuts {
-    position: fixed;
-    bottom: var(--sp-4);
-    right: var(--sp-4);
-    z-index: 1000;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    padding: var(--sp-3) var(--sp-4);
-    font-family: var(--data);
-    font-size: 0.62rem;
-    color: var(--ink-tertiary);
-    opacity: 0;
-    transform: translateY(8px);
-    transition: all 200ms ease;
-    pointer-events: none;
-    backdrop-filter: blur(8px);
-}
-
-.kbd-shortcuts.visible {
-    opacity: 1;
-    transform: translateY(0);
-}
-
-.kbd-shortcuts kbd {
-    display: inline-block;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 1px 5px;
-    font-family: var(--data);
-    font-size: 0.58rem;
-    color: var(--ink-secondary);
-    margin: 0 2px;
-}
-
-.kbd-shortcuts .shortcut-row {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    margin-bottom: 2px;
-}
-
-.kbd-shortcuts .shortcut-row:last-child {
-    margin-bottom: 0;
 }
 
 /* ================================================================
@@ -3129,18 +3144,6 @@ footer {
 }
 
 /* ================================================================
-   Light Theme Overrides
-   ================================================================ */
-[data-theme="light"] [data-testid="stSidebar"] {
-    background: rgba(240, 242, 245, 0.95) !important;
-}
-
-[data-theme="light"] .stMultiSelect>div>div {
-    background: rgba(255, 255, 255, 0.8) !important;
-    border-color: rgba(0, 0, 0, 0.12) !important;
-}
-
-/* ================================================================
    Responsive Design
    ================================================================ */
 @media (prefers-reduced-motion: reduce) {
@@ -3236,12 +3239,50 @@ footer {
         font-size: 0.9rem;
     }
 
-    .stPlotlyChart {
-        height: auto !important;
+    /* Charts keep their own layout heights — a previous rule force-clamped
+       every chart container to 300px here, which crushed/cropped the 680px
+       3-row Unified Signal stack (and every other subplot figure) on phones.
+       Plotly is already width-responsive; height must stay chart-owned. */
+
+    /* 6 tabs don't fit a phone viewport — let the tab bar scroll
+       horizontally instead of wrapping/clipping. */
+    .stTabs [data-baseweb="tab-list"] {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
     }
 
-    .stPlotlyChart>div {
-        height: 300px !important;
+    .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar {
+        display: none;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        flex: none;
+    }
+
+    /* Touch targets: WCAG 2.5.8 / platform HIGs want ≥44px interactive
+       height; Streamlit's default buttons sit under that on mobile. */
+    .stButton button,
+    .stDownloadButton button {
+        min-height: 44px;
+    }
+
+    /* Hero verdict card: evidence rows stack label-over-text on narrow
+       screens instead of squeezing the text column. */
+    .signal-card .hero-evidence-row {
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .signal-card .hero-tag {
+        flex: none;
+    }
+
+    .signal-card .hero-score {
+        display: block;
+        margin-left: 0;
+        margin-top: var(--sp-1);
     }
 }
 
@@ -3669,7 +3710,6 @@ footer {
     overflow: hidden;
 }
 
-.info-box::before,
 .interp-card::before {
     content: "";
     position: absolute;
@@ -3958,28 +3998,6 @@ div[data-multi-file-uploader] > div {
 }
 
 /* ================================================================
-    FOOTER
-    ================================================================ */
-
-.theme-toggle {
-    animation: fadeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.5s both;
-    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.theme-toggle:hover {
-    transform: scale(1.1);
-    box-shadow: 0 0 20px var(--amber-glow);
-}
-
-.theme-toggle svg {
-    transition: transform 0.3s ease;
-}
-
-.theme-toggle:hover svg {
-    transform: rotate(15deg);
-}
-
-/* ================================================================
    BUTTON ENHANCEMENTS
    ================================================================ */
 
@@ -4197,25 +4215,8 @@ div[data-multi-file-uploader] > div {
    ================================================================ */
 @media (max-width: 768px) {
 
-    /* Theme toggle — move below header */
-    .theme-toggle {
-        position: relative !important;
-        top: auto !important;
-        right: auto !important;
-        margin: var(--sp-2) auto;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        width: fit-content;
-    }
-
     /* Sidebar hint — hide on mobile (no sidebar overlap risk) */
     .sidebar-hint {
-        display: none !important;
-    }
-
-    /* Keyboard shortcuts — hide on mobile */
-    .kbd-shortcuts {
         display: none !important;
     }
 }

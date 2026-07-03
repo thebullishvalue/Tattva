@@ -158,125 +158,6 @@ def render_metric_card(
     )
 
 
-def get_signal_badge(score: float, compact: bool = False) -> str:
-    """Return HTML string for a signal badge based on a score (-2 to 2)."""
-    if score >= 1.5:
-        color, bg, text = "#2DD4A8", "rgba(45, 212, 168, 0.15)", "Bullish+"
-    elif score >= 0.5:
-        color, bg, text = "#34D399", "rgba(52, 211, 153, 0.1)", "Bullish"
-    elif score <= -1.5:
-        color, bg, text = "#E8555A", "rgba(232, 85, 90, 0.15)", "Bearish+"
-    elif score <= -0.5:
-        color, bg, text = "#FB7185", "rgba(251, 113, 133, 0.1)", "Bearish"
-    else:
-        color, bg, text = "#8B7E6A", "rgba(139, 126, 106, 0.1)", "Neutral"
-
-    if compact:
-        return f'<span style="color:{color}; font-family:\'Space Grotesk\', sans-serif; font-weight:700;">{score:+.0f}</span>'
-
-    return f'<span style="color:{color}; background:{bg}; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:600; border:1px solid {color}33;">{text}</span>'
-
-
-def render_conviction_signal(
-    symbol: str,
-    conviction: float,
-    rsi: str = "—",
-    osc: str = "—",
-    zscore: str = "—",
-    ma: str = "—",
-) -> None:
-    """Render a conviction signal row for position guide.
-
-    Args:
-        symbol: Stock symbol.
-        conviction: Conviction score (0-100).
-        rsi: RSI value formatted.
-        osc: Oscillator value formatted.
-        zscore: Z-score value formatted.
-        ma: Moving average alignment formatted.
-    """
-    if conviction >= 65:
-        signal_class = "buy"
-        signal_text = "Strong Buy"
-        icon_html = get_icon("check-circle", size=14, stroke_width=2.2)
-        conviction_bar_width = min(100, conviction)
-        conviction_bar_color = "var(--emerald)"
-    elif conviction >= 50:
-        signal_class = "buy"
-        signal_text = "Buy"
-        icon_html = get_icon("circle", size=11)
-        conviction_bar_width = min(100, conviction)
-        conviction_bar_color = "var(--emerald-bright)"
-    elif conviction >= 35:
-        signal_class = "hold"
-        signal_text = "Hold"
-        icon_html = get_icon("circle", size=11)
-        conviction_bar_width = min(100, conviction)
-        conviction_bar_color = "var(--amber)"
-    else:
-        signal_class = "sell"
-        signal_text = "Caution"
-        icon_html = get_icon("alert-triangle", size=13, stroke_width=1.8)
-        conviction_bar_width = min(100, conviction)
-        conviction_bar_color = "var(--rose)"
-
-    st.markdown(
-        f"""
-        <div class="signal-row" style="display:flex; align-items:center; gap:0.75rem; padding:0.75rem 0; border-bottom:1px solid var(--border-subtle); position:relative; overflow:hidden;">
-            <div style="position:absolute; left:0; top:0; bottom:0; width:{conviction_bar_width} * 0.3%; background: linear-gradient(90deg, {conviction_bar_color}08, {conviction_bar_color}03); pointer-events:none;"></div>
-            <div style="flex:1; font-family:var(--data); font-weight:600; color:var(--ink-primary); position:relative; z-index:1;">{html_mod.escape(symbol)}</div>
-            <div style="font-family:var(--data); font-size:0.7rem; color:var(--ink-tertiary); position:relative; z-index:1;">
-                <span style="color:var(--ink-secondary); font-weight:500;">RSI</span> {rsi}
-            </div>
-            <div style="font-family:var(--data); font-size:0.7rem; color:var(--ink-tertiary); position:relative; z-index:1;">
-                <span style="color:var(--ink-secondary); font-weight:500;">Osc</span> {osc}
-            </div>
-            <div style="font-family:var(--data); font-size:0.7rem; color:var(--ink-tertiary); position:relative; z-index:1;">
-                <span style="color:var(--ink-secondary); font-weight:500;">Z</span> {zscore}
-            </div>
-            <div style="font-family:var(--data); font-size:0.7rem; color:var(--ink-tertiary); position:relative; z-index:1;">
-                <span style="color:var(--ink-secondary); font-weight:500;">MA</span> {ma}
-            </div>
-            <div style="position:relative; z-index:1;">
-                <div style="width:60px; height:4px; background:var(--bg-elevated); border-radius:2px; overflow:hidden;">
-                    <div style="width:{conviction_bar_width}%; height:100%; background:{conviction_bar_color}; border-radius:2px; transition:width 0.6s cubic-bezier(0.16, 1, 0.3, 1);"></div>
-                </div>
-            </div>
-            <div style="font-family:var(--data); font-size:0.75rem; font-weight:700; color:var(--ink-primary); min-width:40px; text-align:right; position:relative; z-index:1;">{conviction}</div>
-            <div class="signal-pill {signal_class}" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.3rem 0.75rem; border-radius:20px; font-size:0.72rem; font-weight:600; position:relative; z-index:1;">
-                {icon_html} {signal_text}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_signal_card(
-    signal: str,
-    strength: str,
-    confidence: str,
-    detail: str = "",
-) -> None:
-    """Render the primary walk-forward signal card."""
-    signal_class = (
-        "undervalued" if signal == "BUY"
-        else "overvalued" if signal == "SELL"
-        else "fair"
-    )
-
-    st.markdown(
-        f'<div class="signal-card {html_mod.escape(signal_class)}">'
-        f'<div class="label">WALK-FORWARD SIGNAL</div>'
-        f'<div class="value">{html_mod.escape(signal)}</div>'
-        f'<div class="subtext">'
-        f"<strong>{html_mod.escape(strength)}</strong> Strength &bull; "
-        f"<strong>{html_mod.escape(confidence)}</strong> Confidence"
-        f'{f"<br>{html_mod.escape(detail)}" if detail else ""}'
-        f"</div>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
 
 
 def render_header(title: str, tagline: str) -> None:
@@ -298,43 +179,6 @@ def render_info_box(title: str, content: str, color: str = "cyan") -> None:
         f"<h4>{html_mod.escape(title)}</h4>"
         f"<p>{html_mod.escape(content)}</p>"
         f"</div>",
-        unsafe_allow_html=True,
-    )
-
-
-def render_system_card(
-    title: str,
-    description: str,
-    specs: list[tuple[str, str]],
-    card_class: str = "aarambh",
-    icon: str = "briefcase"
-) -> None:
-    """Render a system feature card for landing page.
-
-    Args:
-        title: Card title.
-        description: Card description.
-        specs: List of (label, value) tuples for specifications.
-        card_class: CSS class — "aarambh", "nirnay", "convergence" (or Pragyam variants).
-        icon: Key from ICONS dict.
-    """
-    spec_html = "".join(
-        f'<span>{html_mod.escape(label)}</span> {html_mod.escape(value)}<br>'
-        for label, value in specs
-    )
-    svg = get_icon(icon, size=16, stroke_width=1.8)
-
-    st.markdown(
-        f"""
-        <div class='system-card {html_mod.escape(card_class)}'>
-            <h3>
-                {svg}
-                {html_mod.escape(title)}
-            </h3>
-            <p>{html_mod.escape(description)}</p>
-            <div class='spec'>{spec_html}</div>
-        </div>
-        """,
         unsafe_allow_html=True,
     )
 
@@ -369,61 +213,254 @@ def render_nishkarsh_signal_card(
     wf_pos: float | None = None,
     source: str | None = None,
 ) -> None:
-    """Render the primary Tattva convergence signal card.
+    """DEPRECATED shim — superseded by build_hero_verdict + render_hero_card.
 
-    The headline ``conviction`` is the calibrated convergence value in
-    ``[-1, +1]``. ``val_ic`` / ``wf_pos`` drive a trust chip so the direction is
-    always shown alongside its validated edge; ``source`` labels which signal the
-    headline is (calibrated model / consensus / Aarambh-only).
+    Kept only so an out-of-tree caller doesn't break; the live app no longer
+    calls this. Renders a minimal legacy card.
     """
-    if "BUY" in signal:
-        signal_class = "undervalued"
-    elif "SELL" in signal:
-        signal_class = "overvalued"
-    else:
-        signal_class = "fair"
-    agreement_text = "Strong" if agreement > 0.7 else "Moderate" if agreement > 0.5 else "Weak"
-
-    # ── Trust chip: colour + label by validated edge (Val IC) ─────────────
-    if val_ic is None:
-        chip_color, chip_bg, chip_label = "var(--ink-tertiary)", "rgba(148,163,184,0.12)", "UNCALIBRATED"
-    elif val_ic <= 0:
-        chip_color, chip_bg, chip_label = "#FB7185", "rgba(251,113,133,0.12)", "NO EDGE"
-    elif val_ic < 0.02:
-        chip_color, chip_bg, chip_label = "#D4A853", "rgba(212,168,83,0.12)", "MARGINAL"
-    elif val_ic < 0.05:
-        chip_color, chip_bg, chip_label = "#34D399", "rgba(52,211,153,0.12)", "MODEST EDGE"
-    else:
-        chip_color, chip_bg, chip_label = "#34D399", "rgba(52,211,153,0.18)", "SOLID EDGE"
-
-    ic_text = f"Val IC {val_ic:+.3f}" if val_ic is not None else "Val IC —"
-    wf_text = f" &bull; WF {wf_pos:.0%}+" if wf_pos is not None else ""
-    chip = (
-        f'<span style="display:inline-block;padding:2px 9px;border-radius:100px;'
-        f'background:{chip_bg};color:{chip_color};font-family:var(--data);font-size:0.62rem;'
-        f'font-weight:600;letter-spacing:0.06em;">{chip_label} &bull; {ic_text}{wf_text}</span>'
+    verdict = build_hero_verdict(
+        calib_conviction=conviction * 100.0,
+        calib_signal=signal,
+        has_profile=val_ic is not None,
+        consensus=None,
+        aarambh_signal={},
+        agreement=agreement,
+        val_ic=val_ic,
+        wf_pos=wf_pos,
+        precedent=None,
+        n_divergences=0,
+        horizon_days=10,
     )
-    source_line = (
-        f'<div style="font-family:var(--data);font-size:0.6rem;color:var(--ink-tertiary);'
-        f'text-transform:uppercase;letter-spacing:0.08em;margin-bottom:var(--sp-2);">'
-        f'{html_mod.escape(source)}</div>' if source else ""
+    render_hero_card(verdict)
+
+
+# ── Hero verdict: pure interpretation logic (no Streamlit) ──────────────────
+
+# Trust tiers for the NON-OVERLAPPING Val IC (see convergence.intelligence.
+# _score_frame_nonoverlap): its effective sample size is ~n_val / stride, so at
+# a realistic holdout (~300-500 days) and the Positional lens (stride=10),
+# n_eff ~ 30-50 → SE(IC) ~ 1/sqrt(n_eff-3) ~ 0.15-0.19. The tier cut-points
+# below (0.10 / 0.20) sit at roughly 1 SE (MODEST) and 2 SE (SOLID) for that
+# worst-case n_eff so the chip is not overconfident.
+def _trust_tier(val_ic: float | None, wf_pos: float | None) -> dict:
+    """Map a non-overlapping Val IC to a (tier, chip label, prose) bundle."""
+    if val_ic is None:
+        return {"tier": "uncalibrated", "chip": "UNCALIBRATED",
+                "val_ic": None, "wf_pos": wf_pos,
+                "prose": "Edge not yet calibrated (run Intelligence Mode for a Val IC)."}
+    if val_ic <= 0:
+        tier, chip = "no_edge", "NO EDGE"
+        prose = f"No validated edge (Val IC {val_ic:+.3f}) — treat the direction as noise."
+    elif val_ic < 0.10:
+        tier, chip = "marginal", "MARGINAL"
+        prose = f"Marginal edge (Val IC {val_ic:+.3f}) — within ~1 SE of zero at this sample size."
+    elif val_ic < 0.20:
+        tier, chip = "modest", "MODEST EDGE"
+        prose = f"Modest validated edge (Val IC {val_ic:+.3f})."
+    else:
+        tier, chip = "solid", "SOLID EDGE"
+        prose = f"Solid validated edge (Val IC {val_ic:+.3f})."
+    if wf_pos is not None:
+        prose += f" Walk-forward: {wf_pos:.0%} of windows positive."
+    return {"tier": tier, "chip": chip, "val_ic": float(val_ic),
+            "wf_pos": wf_pos, "prose": prose}
+
+# Minimum number of DISTINCT analogs (post-Theiler-exclusion) before the
+# precedent's direction is treated as probative. Below this, "% positive" is
+# a handful of coin flips — the hero must not claim agreement/divergence on it.
+_PRECEDENT_MIN_N = 5
+
+_NEUTRAL_LABELS = {"HOLD", "NEUTRAL", "N/A", ""}
+
+
+def build_hero_verdict(
+    *,
+    calib_conviction: float | None,
+    calib_signal: str | None,
+    has_profile: bool,
+    consensus: dict | None,
+    aarambh_signal: dict,
+    agreement: float,
+    val_ic: float | None,
+    wf_pos: float | None,
+    precedent: dict | None,
+    n_divergences: int,
+    horizon_days: int,
+    agreement_strong: float = 0.7,
+    agreement_moderate: float = 0.5,
+) -> dict:
+    """Assemble the hero card's verdict — ALL interpretation logic, pure data in/out.
+
+    Separated from rendering so the decision rules (label normalisation, trust
+    tiering, the precedent minimum-n gate, agreement tiers) are unit-testable
+    without Streamlit. Returns a dict the renderer consumes verbatim:
+
+    ``signal`` (display label), ``signal_class`` (css), ``score`` ([-1,+1]),
+    ``source``, ``direction`` (bullish/bearish/neutral), ``headline`` (one
+    sentence), ``trust`` ({tier, chip, val_ic, wf_pos}), ``consensus_score``
+    (float|None — shown so the hero's number and the Convergence tab's
+    consensus card reconcile explicitly instead of looking contradictory),
+    ``evidence`` (ordered rows of {tag, state, text};
+    state ∈ confirm|conflict|neutral|info).
+    """
+    # ── 1. Headline object: calibrated model → consensus → Aarambh-only ────
+    if calib_conviction is not None and calib_signal is not None:
+        score = float(calib_conviction) / 100.0          # DDM ±100 → [-1, +1]
+        raw_label = str(calib_signal)
+        source = "Calibrated model" if has_profile else "Convergence model (uncalibrated)"
+        headline_is_calibrated = True
+    elif consensus:
+        score = float(consensus.get("value", 0.0))
+        raw_label = str(consensus.get("signal", "HOLD"))
+        source = "System consensus (uncalibrated)"
+        headline_is_calibrated = False
+    else:
+        score = float(aarambh_signal.get("conviction_score", 0)) / 100.0
+        raw_label = str(aarambh_signal.get("signal", "HOLD"))
+        source = "Aarambh only (no basket convergence)"
+        headline_is_calibrated = False
+
+    # ── 2. Label normalisation (the DDM classifier says NEUTRAL, the
+    # normalized-consensus classifier says HOLD — one display vocabulary) ───
+    label_up = raw_label.upper()
+    if label_up in _NEUTRAL_LABELS:
+        signal, direction = "HOLD", "neutral"
+    elif "BUY" in label_up:
+        signal, direction = raw_label, "bullish"
+    elif "SELL" in label_up:
+        signal, direction = raw_label, "bearish"
+    else:
+        signal, direction = "HOLD", "neutral"
+    signal_class = ("undervalued" if direction == "bullish"
+                    else "overvalued" if direction == "bearish" else "fair")
+
+    # ── 3. Trust tier ───────────────────────────────────────────────────────
+    trust = _trust_tier(val_ic, wf_pos)
+
+    # ── 4. Headline sentence ────────────────────────────────────────────────
+    if direction == "neutral":
+        headline = (f"{source}: {score:+.2f} — no directional edge at the "
+                    f"{horizon_days}d lens right now.")
+    else:
+        headline = (f"{source} reads {direction} ({signal}, {score:+.2f}) over "
+                    f"the next ~{horizon_days} trading days.")
+
+    # ── 5. Evidence rows ────────────────────────────────────────────────────
+    evidence: list[dict] = []
+
+    # MODEL — validated edge behind the headline number.
+    model_state = ("confirm" if trust["tier"] in ("modest", "solid")
+                   else "conflict" if trust["tier"] == "no_edge" else "neutral")
+    evidence.append({"tag": "MODEL", "state": model_state, "text": trust["prose"]})
+
+    # PRECEDENT — non-parametric base rate, gated on a real sample.
+    if precedent and int(precedent.get("n") or 0) >= 1:
+        p_n = int(precedent["n"])
+        p_med = float(precedent["median"])
+        p_pos = float(precedent["positive_pct"])
+        p_h = int(precedent["horizon"])
+        p_dir = int(precedent.get("dir") or 0)
+        p_word = "bullish" if p_dir > 0 else "bearish" if p_dir < 0 else "flat"
+        hero_sign = 1 if direction == "bullish" else -1 if direction == "bearish" else 0
+        stub = (f"{p_n} distinct analogs at +{p_h}d: {p_med:+.1f}% median, "
+                f"{p_pos:.0f}% positive")
+        if p_n < _PRECEDENT_MIN_N:
+            evidence.append({"tag": "PRECEDENT", "state": "neutral",
+                             "text": f"Thin sample — only {stub}. Not probative; ignore the lean."})
+        elif abs(p_pos - 50) < 15:
+            evidence.append({"tag": "PRECEDENT", "state": "neutral",
+                             "text": f"Split — {stub}. No directional lean either way."})
+        elif hero_sign == 0:
+            evidence.append({"tag": "PRECEDENT", "state": "info",
+                             "text": f"Leans {p_word} — {stub}. The model itself reads no edge."})
+        elif p_dir == hero_sign:
+            evidence.append({"tag": "PRECEDENT", "state": "confirm",
+                             "text": f"Agrees — {stub}, confirming the {direction} read."})
+        else:
+            evidence.append({"tag": "PRECEDENT", "state": "conflict",
+                             "text": (f"Diverges ({p_word}) — {stub}. The analog base rate has "
+                                      f"historically been the stronger directional read; treat "
+                                      f"the {direction} signal with caution.")})
+
+    # INTERNALS — Aarambh vs Nirnay alignment + explicit consensus reconciliation.
+    consensus_score: float | None = None
+    a_norm = consensus.get("aarambh_norm") if consensus else None
+    n_norm = consensus.get("nirnay_norm") if consensus else None
+    if a_norm is not None and n_norm is not None:
+        consensus_score = float(consensus.get("value", 0.0))
+        aligned = (a_norm < 0) == (n_norm < 0)
+        agree_tier = ("strong" if agreement > agreement_strong
+                      else "moderate" if agreement > agreement_moderate else "weak")
+        state = "confirm" if (aligned and agreement > agreement_strong) \
+            else "conflict" if not aligned else "neutral"
+        recon = (f" Consensus reads {consensus_score:+.2f} (Convergence tab)."
+                 if headline_is_calibrated else "")
+        evidence.append({
+            "tag": "INTERNALS", "state": state,
+            "text": (f"Aarambh {a_norm:+.2f} / Nirnay {n_norm:+.2f} — "
+                     f"{agree_tier} agreement ({agreement:.0%}), "
+                     + ("engines aligned." if aligned else "engines split.") + recon),
+        })
+
+    # RISK — flagged divergence events.
+    if n_divergences:
+        evidence.append({"tag": "RISK", "state": "conflict",
+                         "text": (f"{n_divergences} divergence event"
+                                  f"{'s' if n_divergences != 1 else ''} flagged — "
+                                  f"see the Convergence tab before acting.")})
+
+    return {
+        "signal": signal, "signal_class": signal_class, "score": score,
+        "source": source, "direction": direction, "headline": headline,
+        "trust": trust, "consensus_score": consensus_score, "evidence": evidence,
+    }
+
+
+def render_hero_card(verdict: dict) -> None:
+    """Render the hero verdict as a structured signal card.
+
+    Layout (top → bottom): eyebrow label · source · signal + score ·
+    trust chip · headline · evidence rows. Every text field is escaped here
+    (plain text in, HTML out) — the old card passed markdown ``**bold**``
+    through ``html.escape`` and showed literal asterisks.
+    """
+    trust = verdict["trust"]
+    tier = trust["tier"]
+    chip_style = {
+        "uncalibrated": ("var(--ink-tertiary)", "rgba(148,163,184,0.12)"),
+        "no_edge":      ("#FB7185", "rgba(251,113,133,0.12)"),
+        "marginal":     ("#D4A853", "rgba(212,168,83,0.12)"),
+        "modest":       ("#34D399", "rgba(52,211,153,0.12)"),
+        "solid":        ("#34D399", "rgba(52,211,153,0.18)"),
+    }.get(tier, ("var(--ink-tertiary)", "rgba(148,163,184,0.12)"))
+    ic_text = (f"Val IC {trust['val_ic']:+.3f}" if trust.get("val_ic") is not None
+               else "Val IC —")
+    wf_text = (f" &bull; WF {trust['wf_pos']:.0%}+" if trust.get("wf_pos") is not None
+               else "")
+    chip = (
+        f'<span class="hero-chip" style="background:{chip_style[1]};color:{chip_style[0]};">'
+        f'{html_mod.escape(trust["chip"])} &bull; {ic_text}{wf_text}</span>'
+    )
+
+    rows_html = "".join(
+        f'<div class="hero-evidence-row {html_mod.escape(r["state"])}">'
+        f'<span class="hero-tag"><span class="dot"></span>{html_mod.escape(r["tag"])}</span>'
+        f'<span class="hero-text">{html_mod.escape(r["text"])}</span>'
+        f'</div>'
+        for r in verdict["evidence"]
     )
 
     st.markdown(
         f"""
-        <div class="signal-card {html_mod.escape(signal_class)}">
+        <div class="signal-card {html_mod.escape(verdict["signal_class"])}">
             <div class="label">TATTVA CONVERGENCE SIGNAL &#40;&#x0924;&#x0924;&#x094D;&#x0924;&#x094D;&#x0935;&#41;</div>
-            {source_line}
-            <div class="value">{html_mod.escape(signal)}</div>
-            <div class="subtext">
-                Score: <strong style="color:var(--ink-primary)">{conviction:+.2f}</strong> &bull;
-                Agreement: <strong style="color:var(--ink-primary)">{agreement:.0%}</strong> ({html_mod.escape(agreement_text)})
+            <div class="hero-source">{html_mod.escape(verdict["source"])}</div>
+            <div class="value">{html_mod.escape(verdict["signal"])}
+                <span class="hero-score">{verdict["score"]:+.2f}</span>
             </div>
-            <div style="margin-top:var(--sp-4);">{chip}</div>
-            <div style="margin-top:var(--sp-5);padding-top:var(--sp-5);border-top:1px solid var(--border);font-size:0.8rem;line-height:1.7;color:var(--ink-secondary);font-family:var(--data);">
-                <strong style="color:var(--amber);font-family:var(--display);font-size:0.68rem;letter-spacing:0.1em;text-transform:uppercase;">INTERPRETATION</strong><br>
-                {html_mod.escape(explanation)}
-            </div>
+            <div class="hero-chip-row">{chip}</div>
+            <div class="hero-headline">{html_mod.escape(verdict["headline"])}</div>
+            <div class="hero-evidence">{rows_html}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -446,208 +483,3 @@ def render_warning_box(title: str, content: str) -> None:
     )
 
 
-def render_chart_skeleton(height: int = 280) -> None:
-    """Render a loading skeleton placeholder for charts.
-
-    Provides visual feedback while chart data is being computed.
-    Uses CSS shimmer animation for a polished loading experience.
-    """
-    st.markdown(
-        f'<div class="skeleton-chart" style="min-height:{height}px;">'
-        f'<div class="skeleton-line skeleton-pulse"></div>'
-        f'<div class="skeleton-block skeleton-pulse"></div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def render_collapsible_section(
-    title: str,
-    description: str = "",
-    icon: str = "chart",
-    accent: str = "",
-    default_open: bool = False,
-):
-    """Render a collapsible section header with chevron toggle.
-
-    Returns a context manager that yields content when expanded.
-    Uses Streamlit's container + checkbox pattern for state management.
-
-    Args:
-        title: Section title (rendered uppercase).
-        description: Optional one-line description below title.
-        icon: Key from ICONS dict.
-        accent: CSS color class — "", "cyan", "emerald", "violet", "rose".
-        default_open: Whether section starts expanded or collapsed.
-    """
-    svg = ICONS.get(icon, ICONS["chart"])
-    section_id = f"collapsible_{html_mod.escape(title.lower().replace(' ', '_'))}"
-    is_open = st.checkbox(
-        f"toggle_{section_id}",
-        value=default_open,
-        label_visibility="collapsed",
-        key=f"_{section_id}_state",
-    )
-
-    icon_class = f"icon {accent}" if accent else "icon"
-    hdr_class = f"section-hdr {accent}" if accent else "section-hdr"
-    desc_html = f'<div class="desc">{html_mod.escape(description)}</div>' if description else ""
-    open_class = "open" if is_open else ""
-
-    st.markdown(
-        f'<div class="collapsible-section {open_class}" id="{section_id}">'
-        f'<div class="collapsible-header" data-target="{section_id}">'
-        f'<span class="chevron">{ICONS["chevron-right"]}</span>'
-        f'<div class="{hdr_class}" style="margin:0;padding:0;border:none;flex:1;">'
-        f'<div class="{icon_class}">{svg}</div>'
-        f'<div class="text">'
-        f'<h3>{html_mod.escape(title)}</h3>'
-        f'{desc_html}'
-        f'</div>'
-        f'</div>'
-        f'</div>'
-        f'<div class="collapsible-body">'
-        f'<div class="collapsible-body-inner">',
-        unsafe_allow_html=True,
-    )
-
-    return is_open
-
-
-def render_collapsible_section_close() -> None:
-    """Close a collapsible section opened by render_collapsible_section."""
-    st.markdown(
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def render_theme_toggle() -> None:
-    """Render a fixed-position theme toggle button (dark/light mode).
-
-    Uses JavaScript to toggle data-theme attribute on the html element.
-    Persists preference in localStorage.
-    """
-    from streamlit.components.v1 import html as st_html
-    st_html(
-        """
-        <div class="theme-toggle" id="theme-toggle" title="Toggle theme" onclick="toggleTheme()">
-            <svg id="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                <circle cx="12" cy="12" r="5"/>
-                <line x1="12" y1="1" x2="12" y2="3"/>
-                <line x1="12" y1="21" x2="12" y2="23"/>
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
-                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-                <line x1="1" y1="12" x2="3" y2="12"/>
-                <line x1="21" y1="12" x2="23" y2="12"/>
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
-                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-            </svg>
-            <svg id="theme-icon-moon" style="display:none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-            </svg>
-            <span id="theme-label">Light</span>
-        </div>
-        <script>
-        (function() {
-            var html = document.documentElement;
-            var saved = localStorage.getItem('nishkarsh-theme');
-            var theme = saved || 'dark';
-            html.setAttribute('data-theme', theme);
-            updateUI(theme);
-
-            window.toggleTheme = function() {
-                var current = html.getAttribute('data-theme');
-                var next = current === 'dark' ? 'light' : 'dark';
-                html.setAttribute('data-theme', next);
-                localStorage.setItem('nishkarsh-theme', next);
-                updateUI(next);
-            };
-
-            function updateUI(theme) {
-                var sun = document.getElementById('theme-icon-sun');
-                var moon = document.getElementById('theme-icon-moon');
-                var label = document.getElementById('theme-label');
-                if (theme === 'light') {
-                    if (sun) sun.style.display = 'none';
-                    if (moon) moon.style.display = 'block';
-                    if (label) label.textContent = 'Dark';
-                } else {
-                    if (sun) sun.style.display = 'block';
-                    if (moon) moon.style.display = 'none';
-                    if (label) label.textContent = 'Light';
-                }
-            }
-        })();
-        </script>
-        """,
-        height=0,
-    )
-
-
-def render_export_button_row(
-    label: str = "Export",
-    icon: str = "download",
-    data: bytes = b"",
-    file_name: str = "export.csv",
-    mime: str = "text/csv",
-) -> None:
-    """Render a right-aligned export button with icon.
-
-    Args:
-        label: Button label text.
-        icon: Key from ICONS dict (defaults to "download").
-        data: Binary data to export.
-        file_name: Default download filename.
-        mime: MIME type for the download.
-    """
-    svg = ICONS.get(icon, ICONS["download"])
-    st.markdown(
-        f'<div class="export-btn-row">'
-        f'{svg}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-    st.download_button(
-        label=f"{svg}  {label}",
-        data=data,
-        file_name=file_name,
-        mime=mime,
-        key=f"export_{file_name}",
-    )
-
-
-def render_kv_table(data: dict[str, str], header_left: str = "Setting", header_right: str = "Value") -> None:
-    """Render a professional KV table in Obsidian Quant style.
-
-    Args:
-        data: Dictionary of keys and values to display.
-        header_left: Header for the left column.
-        header_right: Header for the right column.
-    """
-    rows = []
-    for k, v in data.items():
-        rows.append(
-            f'<tr>'
-            f'<td class="key">{html_mod.escape(k)}</td>'
-            f'<td class="value">{html_mod.escape(v)}</td>'
-            f'</tr>'
-        )
-
-    rows_html = "\n".join(rows)
-    table_html = f'''
-    <div class="kv-table-container">
-        <table class="kv-table">
-            <thead>
-                <tr>
-                    <th>{html_mod.escape(header_left)}</th>
-                    <th style="text-align:right;">{html_mod.escape(header_right)}</th>
-                </tr>
-            </thead>
-            <tbody>
-                {rows_html}
-            </tbody>
-        </table>
-    </div>
-    '''
-    st.markdown(table_html, unsafe_allow_html=True)

@@ -142,10 +142,16 @@ def fit_ic(cfg, target, h, mom):
             n_pca_components=cfg["pca"], purge=h)
     fv = pd.to_numeric(eng.ts_data["FairValue"], errors="coerce").to_numpy(dtype=np.float64)
     n = len(price)
-    vp = np.where(np.isfinite(fv) & (fv != 0))[0]
+    # Since engines/aarambh.py leaves predictions[:MIN_TRAIN_SIZE] as NaN (no
+    # look-ahead-tainted expanding-mean placeholder — see the audit's A3 fix),
+    # the first finite FairValue already correctly starts at (>=) MIN_TRAIN_SIZE.
+    # The floor at cfg["mint"] here is a belt-and-suspenders guard, not the
+    # primary mechanism (previously it was, filtering on fv != 0 as a *proxy*
+    # for validity against a warm-up that was silently 0.0-ish, not NaN).
+    vp = np.where(np.isfinite(fv))[0]
     start = int(vp[0]) if len(vp) else cfg["mint"]
     p, r = [], []
-    for t in range(max(start, 250), n - h, h):
+    for t in range(max(start, cfg["mint"]), n - h, h):
         if price[t] > 0 and np.isfinite(fv[t]) and fv[t] != 0:
             p.append(fv[t]); r.append((price[t + h] / price[t] - 1) * 100)
     p, r = np.array(p), np.array(r)

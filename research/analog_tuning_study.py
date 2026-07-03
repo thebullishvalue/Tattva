@@ -27,7 +27,8 @@ warnings.filterwarnings("ignore")
 
 import os as _os, sys as _sys  # research/: put repo root on path so `from core...` resolves
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-from analytics.analogs import _rolling_hurst, mahalanobis_distance_batch
+from core.config import MIN_TRAIN_SIZE
+from analytics.analogs import _rolling_hurst, mahalanobis_distance_batch, select_analogs_theiler
 from markers_study import _aarambh_ts, _load
 
 TARGETS = ["Gold", "Silver", "Copper", "Cotton", "Brent Crude", "USD/INR", "Jeera",
@@ -100,7 +101,9 @@ def _walk_ic(target, h, cfg):
     n = len(price); tw = MOM[h]
     wm, wt, wr, top_n, hl, sim = cfg["wm"], cfg["wt"], cfg["wr"], cfg["top_n"], cfg["hl"], cfg["sim"]
     preds, reals = [], []
-    for t in range(max(250, tw + 30), n - h, h):
+    # Start no earlier than MIN_TRAIN_SIZE: before that the engine's own
+    # forecast/breadth features are unfit (NaN) — see the audit's A3 fix.
+    for t in range(max(MIN_TRAIN_SIZE, tw + 30), n - h, h):
         he = t + 1 - h
         if he < 30:
             continue
@@ -115,7 +118,11 @@ def _walk_ic(target, h, cfg):
         ds = (pd.Timestamp(dates[t]) - pd.to_datetime(dates[:he])).days.to_numpy(float)
         rec = np.exp(-np.log(2) * np.clip(ds, 0, None) / hl); rec /= max(rec.max(), 1e-6)
         sc = wm * maha + wt * traj + wr * rec
-        top = np.argpartition(sc, -top_n)[-top_n:]
+        # Theiler exclusion window (audit finding A5): argpartition's plain
+        # top-N returns adjacent-day runs from 1-3 episodes whose h-day
+        # forward outcomes overlap almost completely — "top_n analogs" that
+        # are really far fewer independent observations.
+        top = select_analogs_theiler(sc, top_n, max(tw, h, 1))
         valid = [p for p in top if price[p] > 0 and p + h < n]
         if not valid:
             continue

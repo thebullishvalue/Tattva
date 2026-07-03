@@ -31,10 +31,10 @@ warnings.filterwarnings("ignore")
 
 import os as _os, sys as _sys  # research/: put repo root on path so `from core...` resolves
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-from core.config import MIN_DATA_POINTS, TARGET_EXCLUDED_PREDICTORS
+from core.config import MIN_DATA_POINTS, MIN_TRAIN_SIZE, TARGET_EXCLUDED_PREDICTORS
 from data.fetcher import fetch_commodity_dataset
 from engines.aarambh import FairValueEngine
-from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch
+from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch, select_analogs_theiler
 
 TARGET = "Jeera"
 TOP_N = 10
@@ -96,11 +96,14 @@ def build_engine_ts(fwd_horizon: int, fwd_mom_k: int) -> pd.DataFrame:
 
     print(f"  Fitting FairValueEngine (fit {fwd_horizon}d / mom {fwd_mom_k}d) "
           f"on {len(data)} rows × {len(features)} predictors ...")
+    price_level = data[TARGET].to_numpy(dtype=np.float64)
     eng = FairValueEngine()
+    # price= so FwdChg_*/divergence detection use the real price, not the
+    # overlapping-label pseudo-price (audit finding A1).
     eng.fit(X, y, feature_names=features, forward_signal=True, n_pca_components=20,
-            purge=fwd_horizon)   # purge gap = horizon → no train-label leakage
+            purge=fwd_horizon, price=price_level)   # purge gap = horizon → no train-label leakage
     ts = eng.ts_data.copy()
-    ts["Price"] = data[TARGET].values
+    ts["Price"] = price_level
     ts["Date"] = pd.to_datetime(data["DATE"].values)
     return ts
 
@@ -130,10 +133,12 @@ def walk_forward(ts: pd.DataFrame, h: int, mom_window: int) -> pd.DataFrame:
             Tn[i] = d / nrm
 
     purge = h
-    # Start where the engine's walk-forward forecast is live (non-zero) AND there
+    # Start where the engine's walk-forward forecast is live (finite) AND there
     # is enough analog history — same date set for both predictors (fair compare).
-    valid_pred = np.where(np.isfinite(tattva) & (tattva != 0))[0]
-    start = int(max(250, valid_pred[0] if len(valid_pred) else 250))
+    # predictions[:MIN_TRAIN_SIZE] is genuinely NaN post-A3-fix, so the first
+    # finite FairValue already starts at (>=) MIN_TRAIN_SIZE.
+    valid_pred = np.where(np.isfinite(tattva))[0]
+    start = int(max(MIN_TRAIN_SIZE, valid_pred[0] if len(valid_pred) else MIN_TRAIN_SIZE))
 
     rows = []
     for t in range(start, n - h):
@@ -153,7 +158,9 @@ def walk_forward(ts: pd.DataFrame, h: int, mom_window: int) -> pd.DataFrame:
         rec = np.exp(-np.log(2) * np.clip(ds, 0, None) / 365.0) * W_RECV
         rec /= max(rec.max(), 1e-6)
         score = W_MAHA * maha_sim + W_TRAJ * traj + W_RECV * rec
-        top = np.argpartition(score, -TOP_N)[-TOP_N:]
+        # Theiler exclusion window (audit finding A5) — see
+        # analytics.analogs.select_analogs_theiler's docstring.
+        top = select_analogs_theiler(score, TOP_N, max(tw, h, 1))
         fwd_analog = [(price[p + h] / price[p] - 1) * 100 for p in top if price[p] > 0]
         analog_pred = float(np.median(fwd_analog)) if fwd_analog else np.nan
         real = (price[t + h] / price[t] - 1) * 100 if price[t] > 0 else np.nan

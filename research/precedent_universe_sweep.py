@@ -32,10 +32,10 @@ warnings.filterwarnings("ignore")
 
 import os as _os, sys as _sys  # research/: put repo root on path so `from core...` resolves
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-from core.config import MIN_DATA_POINTS, TARGET_EXCLUDED_PREDICTORS, ALL_TARGETS
+from core.config import MIN_DATA_POINTS, MIN_TRAIN_SIZE, TARGET_EXCLUDED_PREDICTORS, ALL_TARGETS
 from data.fetcher import fetch_commodity_dataset
 from engines.aarambh import FairValueEngine
-from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch
+from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch, select_analogs_theiler
 
 # SPEED basket for the universe sweep: drop Huber (the dominant cost) → ~8× faster
 # per fit. The analog ranking is driven by price-based features + breadth, so it is
@@ -91,11 +91,15 @@ def fit_target(target: str):
     data = data.loc[valid].reset_index(drop=True)
     X = mom.loc[valid].to_numpy()
     y = np.nan_to_num(fwd.loc[valid].to_numpy(), nan=0.0)
+    price_level = data[target].to_numpy(dtype=np.float64)
     eng = FairValueEngine()
+    # price= so FwdChg_*/divergence detection use the real price, not a
+    # pseudo-price reconstructed from overlapping forward-return labels
+    # (see the audit's A1 finding) — matches the live app pipeline.
     eng.fit(X, y, feature_names=feats, forward_signal=True, n_pca_components=20,
-            purge=FIT_H)   # purge gap = horizon → no train-label leakage
+            purge=FIT_H, price=price_level)   # purge gap = horizon → no train-label leakage
     ts = eng.ts_data.copy()
-    ts["Price"] = data[target].values
+    ts["Price"] = price_level
     ts["Date"] = pd.to_datetime(data["DATE"].values)
     return ts
 
@@ -124,7 +128,10 @@ def analog_ic(ts: pd.DataFrame, h: int):
             Tn[i] = d / nm
     purge = h
     preds, reals = [], []
-    for t in range(max(250, tw + 30), n - h, h):     # stride = h → non-overlapping
+    # Start no earlier than MIN_TRAIN_SIZE: the engine's own warm-up rows
+    # (see the audit's A3 fix) carry NaN forecast/breadth features, so
+    # anything before that is an unfit region, not a genuine as-of point.
+    for t in range(max(MIN_TRAIN_SIZE, tw + 30), n - h, h):     # stride = h → non-overlapping
         he = t + 1 - purge
         if he < 30:
             continue
@@ -141,7 +148,9 @@ def analog_ic(ts: pd.DataFrame, h: int):
         rec = np.exp(-np.log(2) * np.clip(ds, 0, None) / 365.0) * W_RECV
         rec /= max(rec.max(), 1e-6)
         score = W_MAHA * maha + W_TRAJ * traj + W_RECV * rec
-        top = np.argpartition(score, -TOP_N)[-TOP_N:]
+        # Theiler exclusion window (audit finding A5) — see
+        # analytics.analogs.select_analogs_theiler's docstring.
+        top = select_analogs_theiler(score, TOP_N, max(tw, h, 1))
         fa = [(price[p + h] / price[p] - 1) * 100 for p in top if price[p] > 0]
         if not fa or price[t] <= 0:
             continue

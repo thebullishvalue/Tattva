@@ -24,11 +24,11 @@ warnings.filterwarnings("ignore")
 import os as _os, sys as _sys  # research/: put repo root on path so `from core...` resolves
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from core.config import (
-    MIN_DATA_POINTS, TARGET_EXCLUDED_PREDICTORS, ALL_TARGETS, COMMODITY_TARGETS,
+    MIN_DATA_POINTS, MIN_TRAIN_SIZE, TARGET_EXCLUDED_PREDICTORS, ALL_TARGETS, COMMODITY_TARGETS,
 )
 from data.fetcher import fetch_commodity_dataset
 from engines.aarambh import FairValueEngine
-from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch
+from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch, select_analogs_theiler
 
 # SPEED basket for the sweep (drop Huber → ~8× faster; analog ranking robust).
 import engines.aarambh as _aa
@@ -78,10 +78,13 @@ def fit_ts(target: str, h: int, mom: int):
     data = data.loc[valid].reset_index(drop=True)
     X = momx.loc[valid].to_numpy()
     y = np.nan_to_num(fwd.loc[valid].to_numpy(), nan=0.0)
+    price_level = data[target].to_numpy(dtype=np.float64)
     eng = FairValueEngine()
-    eng.fit(X, y, feature_names=feats, forward_signal=True, n_pca_components=20, purge=h)
+    # price= so FwdChg_*/divergence detection use the real price, not the
+    # overlapping-label pseudo-price (audit finding A1).
+    eng.fit(X, y, feature_names=feats, forward_signal=True, n_pca_components=20, purge=h, price=price_level)
     ts = eng.ts_data.copy()
-    ts["Price"] = data[target].values
+    ts["Price"] = price_level
     ts["Date"] = pd.to_datetime(data["DATE"].values)
     return ts
 
@@ -105,8 +108,11 @@ def both_ic(ts: pd.DataFrame, h: int, mom: int):
         d = seg - (seg.mean() + slope * xm); nm = np.linalg.norm(d)
         if nm > 1e-12:
             Tn[i] = d / nm
-    vp = np.where(np.isfinite(tattva) & (tattva != 0))[0]
-    start = int(max(250, vp[0] if len(vp) else 250))
+    # predictions[:MIN_TRAIN_SIZE] is genuinely NaN post-A3-fix (no more
+    # look-ahead-tainted expanding-mean placeholder), so the first finite
+    # FairValue already starts at (>=) MIN_TRAIN_SIZE.
+    vp = np.where(np.isfinite(tattva))[0]
+    start = int(max(MIN_TRAIN_SIZE, vp[0] if len(vp) else MIN_TRAIN_SIZE))
     tv, an, re = [], [], []
     for t in range(start, n - h, h):                  # stride h → non-overlapping
         he = t + 1 - h
@@ -124,7 +130,9 @@ def both_ic(ts: pd.DataFrame, h: int, mom: int):
         rec = np.exp(-np.log(2) * np.clip(ds, 0, None) / 365.0) * W_RECV
         rec /= max(rec.max(), 1e-6)
         score = W_MAHA * maha + W_TRAJ * traj + W_RECV * rec
-        top = np.argpartition(score, -TOP_N)[-TOP_N:]
+        # Theiler exclusion window (audit finding A5) — see
+        # analytics.analogs.select_analogs_theiler's docstring.
+        top = select_analogs_theiler(score, TOP_N, max(tw, h, 1))
         fa = [(price[p + h] / price[p] - 1) * 100 for p in top if price[p] > 0]
         if not fa or price[t] <= 0:
             continue

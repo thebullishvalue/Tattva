@@ -30,8 +30,9 @@ warnings.filterwarnings("ignore")
 
 import os as _os, sys as _sys  # research/: put repo root on path so `from core...` resolves
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from core.config import MIN_TRAIN_SIZE
 from convergence.normalization import align_aarambh_nirnay, compute_norm_params, zscore_clip
-from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch
+from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch, select_analogs_theiler
 from markers_study import _aarambh_ts, _nirnay_daily, _load, TARGETS
 
 H, MOM = 10, 20
@@ -64,7 +65,9 @@ def _analog_by_pos(ts):
         if nm > 1e-12:
             Tn[i] = d / nm
     out = {}
-    for t in range(max(250, tw + 30), n - H, H):
+    # Start no earlier than MIN_TRAIN_SIZE: before that the engine's own
+    # forecast/breadth features are unfit (NaN) — see the audit's A3 fix.
+    for t in range(max(MIN_TRAIN_SIZE, tw + 30), n - H, H):
         he = t + 1 - H
         if he < 30:
             continue
@@ -80,7 +83,9 @@ def _analog_by_pos(ts):
         rec = np.exp(-np.log(2) * np.clip(ds, 0, None) / 365.0) * W_RECV
         rec /= max(rec.max(), 1e-6)
         score = W_MAHA * maha + W_TRAJ * traj + W_RECV * rec
-        top = np.argpartition(score, -TOP_N)[-TOP_N:]
+        # Theiler exclusion window (audit finding A5) — see
+        # analytics.analogs.select_analogs_theiler's docstring.
+        top = select_analogs_theiler(score, TOP_N, max(tw, H, 1))
         fa = [(price[p + H] / price[p] - 1) * 100 for p in top if price[p] > 0]
         if fa:
             out[t] = float(np.median(fa))

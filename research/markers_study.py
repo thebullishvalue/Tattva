@@ -67,10 +67,13 @@ def _aarambh_ts(target):
     valid = mom.notna().all(axis=1).to_numpy()
     data = data.loc[valid].reset_index(drop=True)
     X = mom.loc[valid].to_numpy(); y = np.nan_to_num(fwd.loc[valid].to_numpy(), nan=0.0)
+    price_level = data[target].to_numpy(dtype=np.float64)
     eng = FairValueEngine()
-    eng.fit(X, y, feature_names=feats, forward_signal=True, n_pca_components=20, purge=H)
+    # price= so FwdChg_*/divergence detection use the real price, not the
+    # overlapping-label pseudo-price (audit finding A1).
+    eng.fit(X, y, feature_names=feats, forward_signal=True, n_pca_components=20, purge=H, price=price_level)
     ts = eng.ts_data.copy()
-    ts["Price"] = data[target].values
+    ts["Price"] = price_level
     ts.index = pd.to_datetime(data["DATE"].values)
     return ts
 

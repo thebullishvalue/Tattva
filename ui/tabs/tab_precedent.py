@@ -31,7 +31,7 @@ from ui.theme import chart_layout, style_axes
 
 
 def _classify_state(avgz: float) -> tuple[str, str, str, str]:
-    """Map the conformal extension (AvgZ) to (tier, badge, label, fill) classes.
+    """Map the robust-quantile extension (AvgZ) to (tier, badge, label, fill) classes.
 
     Descriptive of WHERE the target sat (oversold↔overbought), not a forecast —
     the forward tiles carry the realized outcome colouring.
@@ -253,10 +253,11 @@ def render_precedent_tab(
     tr_p = np.corrcoef(tr_x, tr_y)[0, 1] if len(tr_x) > 2 else 0.0
     tr_s, _ = _spearmanr(tr_x, tr_y) if len(tr_x) > 2 else (0.0, 1.0)
     oos_p = np.corrcoef(te_x, te_y)[0, 1] if len(te_x) > 2 else 0.0
-    oos_s, _ = _spearmanr(te_x, te_y) if len(te_x) > 2 else (0.0, 1.0)
+    oos_s, oos_s_pval = _spearmanr(te_x, te_y) if len(te_x) > 2 else (0.0, 1.0)
     tr_s = 0.0 if not np.isfinite(tr_s) else tr_s
     oos_s = 0.0 if not np.isfinite(oos_s) else oos_s
     oos_p = 0.0 if not np.isfinite(oos_p) else oos_p
+    oos_s_pval = 1.0 if not np.isfinite(oos_s_pval) else oos_s_pval
 
     fig = go.Figure()
     fig.add_trace(go.Scattergl(
@@ -280,6 +281,11 @@ def render_precedent_tab(
             line=dict(color=COLOR_GOLD, width=2, dash="dash"),
             name=f"Linear (train ρ={tr_p:.2f}, test ρ={oos_p:.2f})",
         ))
+    # Quadratic curve needs more points than the linear fit to avoid a 2nd-degree
+    # polynomial chasing noise in a small training split — 40 is a low bar,
+    # chosen only to exclude the smallest/thinnest backtests, not a claim of
+    # genuine statistical power at 40 either.
+    if len(tr_x) >= 40:
         z2 = np.polyfit(tr_x, tr_y, 2)
         fig.add_trace(go.Scatter(
             x=xr, y=z2[0] * xr ** 2 + z2[1] * xr + z2[2], mode="lines",
@@ -298,12 +304,20 @@ def render_precedent_tab(
     st.plotly_chart(fig, use_container_width=True,
                     config={"displayModeBar": False, "displaylogo": False})
 
-    oos_strong = oos_s if abs(oos_s) > abs(oos_p) else oos_p
-    if abs(oos_strong) > 0.3:
-        strength = "strong" if abs(oos_strong) > 0.5 else "moderate"
-        direction = "positive" if oos_strong > 0 else "negative"
+    # Gate the verdict on the test-split Spearman p-value, not a bare |rho|
+    # magnitude threshold. After non-overlapping striding the test split is
+    # typically only ~20-30 points (e.g. h=20 on ~2200 rows), where |rho|=0.3
+    # has a two-sided p-value ~0.20 — a 1-in-5 fluke rate under the null that
+    # was previously being branded "holds out-of-sample" regardless of n.
+    # scipy's spearmanr already returns this p-value; use it directly rather
+    # than a fixed correlation-magnitude cutoff that ignores sample size.
+    n_test = len(te_x)
+    if oos_s_pval < 0.10:
+        strength = "strong" if abs(oos_s) > 0.5 else "moderate"
+        direction = "positive" if oos_s > 0 else "negative"
         body = (
-            f"<strong>Out-of-sample (30%):</strong> Pearson {oos_p:.2f} · Spearman {oos_s:.2f} — "
+            f"<strong>Out-of-sample (30%, n={n_test}):</strong> Pearson {oos_p:.2f} · "
+            f"Spearman {oos_s:.2f} (p={oos_s_pval:.3f}) — "
             f"{strength} {direction} relationship holds on unseen data.<br>"
             f"<span style='color:var(--ink-tertiary);'>In-sample (70%): Pearson {tr_p:.2f} · "
             f"Spearman {tr_s:.2f}</span>"
@@ -311,11 +325,13 @@ def render_precedent_tab(
         render_interpretation_card("Relationship Holds Out-of-Sample", body, color="success")
     else:
         body = (
-            f"<strong>Out-of-sample (30%):</strong> Pearson {oos_p:.2f} · Spearman {oos_s:.2f} — "
-            f"weak out-of-sample relationship at the {horizon}d horizon.<br>"
+            f"<strong>Out-of-sample (30%, n={n_test}):</strong> Pearson {oos_p:.2f} · "
+            f"Spearman {oos_s:.2f} (p={oos_s_pval:.3f}, not significant at 10%) — "
+            f"no reliable out-of-sample relationship at the {horizon}d horizon.<br>"
             f"<span style='color:var(--ink-tertiary);'>In-sample (70%): Pearson {tr_p:.2f} · "
             f"Spearman {tr_s:.2f}</span><br><br>"
-            "The extension→return link may be non-linear (see the quadratic curve) or "
-            "stronger at a different lens horizon."
+            "The extension→return link may be non-linear (see the quadratic curve, when shown), "
+            "stronger at a different lens horizon, or the test split (n above) may simply be "
+            "too small to detect a real but modest effect."
         )
         render_interpretation_card("Weak Out-of-Sample Fit", body, color="warning")

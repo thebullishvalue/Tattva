@@ -2,7 +2,8 @@
 Tattva — Aarambh tab: Price & idiosyncratic-spread plots, conviction, breadth, model quality.
 तत्त्व (Tattva) — "Principle / Essence"
 
-UI — AARAMBH engine visualization: ensemble regression outputs with conformal bounds.
+UI — AARAMBH engine visualization: ensemble regression outputs with rolling
+robust-quantile bounds.
 
 Section order (logical analytical flow):
   Phase 1 — Trust:     Model Quality
@@ -26,8 +27,6 @@ from ui.components import (
     render_info_box,
     render_interpretation_card,
     render_section_header,
-    render_collapsible_section,
-    render_collapsible_section_close,
     section_gap,
 )
 from core.config import (
@@ -71,8 +70,9 @@ TOOLTIPS = {
     "ddm_conviction": (
         "Conviction score smoothed through a Drift-Diffusion Model that accumulates evidence "
         "over time and reverts toward zero when signals are inconsistent. The shaded band is "
-        "the confidence interval — narrow bands mean high conviction, wide bands mean the "
-        "model is uncertain. Use this (not raw conviction) for trade decisions."
+        "a heuristic uncertainty band (not a statistical confidence interval) — narrow bands "
+        "mean recent evidence has been consistent, wide bands mean it has been noisy/conflicting. "
+        "Use this (not raw conviction) for trade decisions."
     ),
     "oversold_breadth": (
         "Share of lookback windows where the idiosyncratic spread is stretched low — the target "
@@ -170,8 +170,14 @@ def _render_raw_conviction_chart(ts_filtered, x_axis):
     st.plotly_chart(fig_raw, width='stretch', key="aarambh_raw_conviction")
 
 
-def _render_ddm_conviction_chart(ts_filtered, x_axis, signal):
-    """Section: DDM-Filtered Conviction with Confidence Bands + interpretation card."""
+def _render_ddm_conviction_chart(ts_filtered, x_axis, signal, is_forward=False):
+    """Section: DDM-Filtered Conviction with Uncertainty Band + interpretation card.
+
+    Interpretation copy branches on ``is_forward`` — the app's only live mode
+    forecasts a forward RETURN, so "prices the market above/below fair value"
+    is relative-value language that doesn't describe what's on screen (see
+    the audit's E3 finding).
+    """
     fig_conv = go.Figure()
     if "ConvictionUpper" in ts_filtered.columns:
         fig_conv.add_trace(go.Scatter(
@@ -209,7 +215,43 @@ def _render_ddm_conviction_chart(ts_filtered, x_axis, signal):
     cu, cl = signal["conviction_upper"], signal["conviction_lower"]
     bw = cu - cl
 
-    if cv > UI_CONVICTION_STRONG:
+    if is_forward:
+        if cv > UI_CONVICTION_STRONG:
+            regime_title = "STRONG OVERBOUGHT"
+            regime_color = "danger"
+            regime_body = (
+                f"Conviction {cv:+.0f} — top decile. Most lookback windows agree on a strongly "
+                f"negative expected forward return (bearish forecast). "
+            )
+        elif cv > UI_CONVICTION_MODERATE:
+            regime_title = "MODERATE OVERBOUGHT"
+            regime_color = "warning"
+            regime_body = (
+                f"Conviction {cv:+.0f} — tilts bearish. Not at extremes, but the ensemble leans "
+                f"toward a negative expected forward return. "
+            )
+        elif cv > -UI_CONVICTION_MODERATE:
+            regime_title = "NEUTRAL"
+            regime_color = "neutral"
+            regime_body = (
+                f"Conviction {cv:+.0f} — noise band. Windows are split — no reliable directional forecast. "
+                f"Stand aside or maintain current allocation. "
+            )
+        elif cv > -UI_CONVICTION_STRONG:
+            regime_title = "MODERATE OVERSOLD"
+            regime_color = "success"
+            regime_body = (
+                f"Conviction {cv:+.0f} — tilts bullish. The ensemble leans toward a positive "
+                f"expected forward return. Watch for conviction to roll over before entering. "
+            )
+        else:
+            regime_title = "STRONG OVERSOLD"
+            regime_color = "success"
+            regime_body = (
+                f"Conviction {cv:+.0f} — bottom decile. Most lookback windows agree on a strongly "
+                f"positive expected forward return (bullish forecast). "
+            )
+    elif cv > UI_CONVICTION_STRONG:
         regime_title = "STRONG OVERBOUGHT"
         regime_color = "danger"
         regime_body = (
@@ -275,22 +317,39 @@ def _render_market_breadth_chart(ts_filtered, x_axis):
     st.plotly_chart(fig_zones, width='stretch', key="aarambh_breadth")
 
 
-def _render_market_state_cards(signal, regime_stats, ts):
-    """Section: Market State — metric cards + regime distribution interpretation."""
+def _render_market_state_cards(signal, regime_stats, ts, is_forward=False):
+    """Section: Market State — metric cards + regime distribution interpretation.
+
+    Copy branches on ``is_forward``: in PREDICTIVE mode (the app's only live
+    mode) the lookback windows measure how extreme the FORECAST is relative
+    to its own trailing distribution, not "cheap/expensive valuation" — the
+    latter only applies in relative-value (cumulative_residual) mode, which
+    the shipped app never runs (see the audit's E3 finding).
+    """
     c1, c2, c3 = st.columns(3)
     with c1:
         render_metric_card(
             "OVERSOLD BREADTH", f'{signal["oversold_breadth"]:.0f}%',
-            "Fraction of lookback windows that see cheap valuation. Rising = bullish pressure building.",
+            (
+                "Fraction of lookback windows reading the forecast as extreme bullish. "
+                "Rising = more windows agree on a strong positive expected return."
+                if is_forward else
+                "Fraction of lookback windows that see cheap valuation. Rising = bullish pressure building."
+            ),
             "success" if signal["oversold_breadth"] > UI_BREADTH_HIGH else "neutral",
-            tooltip=TOOLTIPS["oversold_breadth"],
+            tooltip=None if is_forward else TOOLTIPS["oversold_breadth"],
         )
     with c2:
         render_metric_card(
             "OVERBOUGHT BREADTH", f'{signal["overbought_breadth"]:.0f}%',
-            "Fraction of lookback windows that see expensive valuation. Rising = caution strengthening.",
+            (
+                "Fraction of lookback windows reading the forecast as extreme bearish. "
+                "Rising = more windows agree on a strong negative expected return."
+                if is_forward else
+                "Fraction of lookback windows that see expensive valuation. Rising = caution strengthening."
+            ),
             "danger" if signal["overbought_breadth"] > UI_BREADTH_HIGH else "neutral",
-            tooltip=TOOLTIPS["overbought_breadth"],
+            tooltip=None if is_forward else TOOLTIPS["overbought_breadth"],
         )
     with c3:
         curr_regime = signal["regime"]
@@ -298,16 +357,24 @@ def _render_market_state_cards(signal, regime_stats, ts):
         regime_color = "success" if "OVERSOLD" in curr_regime else "danger" if "OVERBOUGHT" in curr_regime else "neutral"
         render_metric_card(
             "CURRENT REGIME", regime_short,
-            f"Mean reversion half-life: {signal['ou_half_life']:.0f}d. Shorter = faster snap-back to fair value.",
+            (
+                f"Forecast-extremeness half-life: {signal['ou_half_life']:.0f}d "
+                f"(diagnostic only in forecast mode — see Val IC for the real edge)."
+                if is_forward else
+                f"Mean reversion half-life: {signal['ou_half_life']:.0f}d. Shorter = faster snap-back to fair value."
+            ),
             regime_color,
-            tooltip=TOOLTIPS["current_regime"],
+            tooltip=None if is_forward else TOOLTIPS["current_regime"],
         )
 
-    # Regime distribution interpretation
-    total = len(ts)
+    # Regime distribution interpretation. Denominator = the sum of the five
+    # regime counts, NOT len(ts): get_regime_stats now excludes the engine's
+    # warm-up rows (no genuine forecast there), so dividing by the full row
+    # count would silently deflate every percentage by the warm-up share.
     os_total = regime_stats["strongly_oversold"] + regime_stats["oversold"]
     ob_total = regime_stats["strongly_overbought"] + regime_stats["overbought"]
     neutral_count = regime_stats["neutral"]
+    total = os_total + ob_total + neutral_count
     os_pct = os_total / total * 100 if total > 0 else 0
     ob_pct = ob_total / total * 100 if total > 0 else 0
     neutral_pct = neutral_count / total * 100 if total > 0 else 0
@@ -351,12 +418,28 @@ def _render_model_quality_cards(model_stats, signal, is_forward=False):
     q1, q2, q3, q4 = st.columns(4)
     with q1:
         r2 = model_stats["r2_oos"]
-        render_metric_card(
-            "OOS R²", f"{r2:.3f}",
-            "Variance explained on unseen data. For a forecast, even small positive values are useful.",
-            "success" if r2 > UI_R2_STRONG else "warning" if r2 > UI_R2_ACCEPTABLE else "danger",
-            tooltip=TOOLTIPS["oos_r2"],
-        )
+        if is_forward:
+            # In PREDICTIVE mode the target is a forward RETURN, not a price
+            # level — magnitude R² is ~0 by construction (README: "a price
+            # forecast's magnitude R² is ~0 by nature; the tradeable
+            # information is in the direction"). The 0.7/0.4 thresholds
+            # below are calibrated for level regression and would paint a
+            # healthy forecasting model permanently red. Small positive is
+            # good, ~0 is normal (not a failure), negative is the real
+            # warning sign — see Val IC for the actual edge metric.
+            render_metric_card(
+                "OOS R²", f"{r2:.3f}",
+                "Variance explained on the forward-return forecast. ~0 is NORMAL for return "
+                "forecasting (magnitude R² isn't the signal) — see Val IC for the real edge metric.",
+                "success" if r2 > 0 else "neutral" if r2 > -0.05 else "danger",
+            )
+        else:
+            render_metric_card(
+                "OOS R²", f"{r2:.3f}",
+                "Variance explained on unseen data. For a forecast, even small positive values are useful.",
+                "success" if r2 > UI_R2_STRONG else "warning" if r2 > UI_R2_ACCEPTABLE else "danger",
+                tooltip=TOOLTIPS["oos_r2"],
+            )
 
     if is_forward:
         prof = st.session_state.get("intelligence_active_profile") or {}
@@ -368,9 +451,10 @@ def _render_model_quality_cards(model_stats, signal, is_forward=False):
             else:
                 render_metric_card(
                     "VAL IC", f"{val_ic:+.3f}",
-                    "Out-of-sample rank correlation of the convergence signal with forward returns. "
-                    "The real edge metric. >0 = genuine predictive power.",
-                    "success" if val_ic > 0.02 else "warning" if val_ic > 0 else "danger",
+                    "Out-of-sample rank correlation of the convergence signal with forward returns "
+                    "(non-overlapping — see the hero trust chip). The real edge metric. "
+                    ">0 = genuine predictive power.",
+                    "success" if val_ic > 0.10 else "warning" if val_ic > 0 else "danger",
                 )
         with q3:
             if train_ic is None:
@@ -666,18 +750,24 @@ def render_aarambh_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats
     section_gap()
 
     render_section_header(
-        "DDM-Filtered Conviction with Confidence Bands",
-        "Evidence-accumulated signal with confidence bands. Narrow = high conviction. This is your primary trade signal.",
+        "DDM-Filtered Conviction with Uncertainty Band",
+        "Evidence-accumulated signal with a heuristic uncertainty band (not a statistical "
+        "confidence interval). Narrow = consistent recent evidence. This is your primary trade signal.",
         icon="shield",
         accent="cyan",
     )
-    _render_ddm_conviction_chart(ts_filtered, x_axis, signal)
+    _render_ddm_conviction_chart(ts_filtered, x_axis, signal, is_forward=_is_forward)
 
     section_gap()
 
     render_section_header(
         "Market Breadth",
-        "Windows that agree the market is cheap (green) vs expensive (red). Convergence near zero = fairly valued.",
+        (
+            "Windows that agree the forecast reads strongly bullish (green) vs bearish (red). "
+            "Convergence near zero = no directional consensus."
+            if _is_forward else
+            "Windows that agree the market is cheap (green) vs expensive (red). Convergence near zero = fairly valued."
+        ),
         icon="bar-chart",
         accent="emerald",
     )
@@ -688,11 +778,16 @@ def render_aarambh_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats
     # ── Phase 4: STATE ─────────────────────────────────────────────────
     render_section_header(
         "Market State",
-        "How many windows see the market as cheap vs expensive, plus the mean-reversion regime.",
+        (
+            "How many lookback windows read the forecast as extreme bullish vs bearish, "
+            "plus the mean-reversion regime label."
+            if _is_forward else
+            "How many windows see the market as cheap vs expensive, plus the mean-reversion regime."
+        ),
         icon="crosshair",
         accent="emerald",
     )
-    _render_market_state_cards(signal, regime_stats, ts)
+    _render_market_state_cards(signal, regime_stats, ts, is_forward=_is_forward)
 
     section_gap()
 

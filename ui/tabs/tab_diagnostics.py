@@ -44,14 +44,6 @@ TOOLTIPS = {
         "Corroborating test: checks whether the residual is stationary around a trend. "
         "p > 0.05 fails to reject stationarity — second confirmation of mean-reversion."
     ),
-    "hmm_cov_shrinkage": (
-        "Covariance regularization for the regime detection model. "
-        "Prevents overfitting when estimating regime volatility from limited data."
-    ),
-    "viterbi_persist": (
-        "Probability the current regime (bull/bear) persists into the next period. "
-        "Near 1.0 = stable regimes; below 0.9 = frequent switching, lower signal confidence."
-    ),
 }
 
 
@@ -90,16 +82,22 @@ def render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_s
     theta_status = "Stable" if signal.get("theta_stable", True) else "Unstable"
     stationarity = "Stationary" if signal["adf_pvalue"] < 0.05 and signal["kpss_pvalue"] > 0.05 else "Non-Stationary"
 
+    # Card colors are meaningless in predictive mode (these run on the FORECAST
+    # series, not a mean-reverting pricing residual — see the section header
+    # copy above), so success/danger there would grade a forecast property
+    # that was never claimed to matter. Neutralize in that mode; keep the
+    # real success/danger signal in relative-value mode where it's the
+    # foundation the mean-reversion stack depends on.
     c1, c2, c3 = st.columns(3)
     with c1:
         render_metric_card("OU HALF-LIFE", f"{signal['ou_half_life']:.0f}d", "Days to close half the pricing gap", "info",
                            tooltip=TOOLTIPS["ou_half_life"])
     with c2:
-        adf_class = "success" if signal["adf_pvalue"] < 0.05 else "danger"
+        adf_class = "neutral" if _is_forward else ("success" if signal["adf_pvalue"] < 0.05 else "danger")
         render_metric_card("ADF P-VALUE", f"{signal['adf_pvalue']:.3f}", "Rejects drift if p < 0.05", adf_class,
                            tooltip=TOOLTIPS["adf_pvalue"])
     with c3:
-        kpss_class = "success" if signal["kpss_pvalue"] > 0.05 else "danger"
+        kpss_class = "neutral" if _is_forward else ("success" if signal["kpss_pvalue"] > 0.05 else "danger")
         render_metric_card("KPSS P-VALUE", f"{signal['kpss_pvalue']:.3f}", "Confirms mean-reversion if p > 0.05", kpss_class,
                            tooltip=TOOLTIPS["kpss_pvalue"])
 
@@ -166,9 +164,14 @@ def render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_s
             st.caption(f"Top {len(labels)} of {_total_feats} predictors by current contribution.")
 
         if not feature_history.empty and len(feature_history) > 0:
+            # feature_impact_history is populated once, after the walk-forward
+            # completes (engines/aarambh.py's _compute_feature_impacts runs on
+            # the LAST chunk's fitted models only) — it is a snapshot, not a
+            # rolling history, so this used to be titled "(last 10)" while
+            # always showing exactly one row (audit finding C4).
             st.markdown(
                 '<div style="font-family:var(--display);font-size:0.72rem;font-weight:600;color:var(--ink-tertiary);'
-                'text-transform:uppercase;letter-spacing:0.08em;margin:var(--sp-4) 0 var(--sp-2) 0;">Impact History (last 10)</div>',
+                'text-transform:uppercase;letter-spacing:0.08em;margin:var(--sp-4) 0 var(--sp-2) 0;">Current Impact Snapshot</div>',
                 unsafe_allow_html=True,
             )
             st.dataframe(feature_history.tail(10), width='stretch', height=200)
@@ -218,21 +221,23 @@ def render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_s
         accent="rose",
     )
 
-    c1, c2 = st.columns(2)
-    try:
-        from analytics.regime import GARCHState, HMMState
-        _hmm_persist = f"{HMMState().transition_matrix[0, 0]:.2f}"
-        _garch_shrink = f"{GARCHState().omega:.0e}"
-    except Exception:
-        _hmm_persist, _garch_shrink = "0.98", "1e-4"
-    with c1:
-        render_metric_card("COVARIANCE SHRINKAGE", _garch_shrink, "Regularization strength", "warning",
-                           tooltip=TOOLTIPS["hmm_cov_shrinkage"])
-    with c2:
-        render_metric_card("REGIME PERSISTENCE", _hmm_persist, "Probability regime holds next period", "info",
-                           tooltip=TOOLTIPS["viterbi_persist"])
+    # (Two metric cards previously shown here — "Covariance Shrinkage" and
+    # "Regime Persistence" — displayed the HMM/GARCH INITIAL PRIOR constants
+    # (GARCHState().omega, HMMState().transition_matrix[0,0]), not live
+    # telemetry: "Covariance Shrinkage" was actually the GARCH intercept
+    # omega (unrelated to covariance shrinkage — nothing in this pipeline
+    # regularizes a covariance matrix), and "Regime Persistence" was the
+    # transition matrix's INITIAL value, which each constituent then adapts
+    # online per-instrument (analytics/regime.py's _adapt_transitions) — the
+    # basket-wide adapted value isn't currently returned by run_regime_loop.
+    # Removed rather than left displaying constants mislabeled as measured
+    # state (audit finding E4).
 
-    nirnay_df = st.session_state.get("nirnay_results", pd.DataFrame())
+    # app.py stores the aggregated basket time-series under "nirnay_daily"
+    # (produced by engines.nirnay.aggregate_constituent_timeseries, which
+    # carries avg_hmm_bull/avg_hmm_bear) — "nirnay_results" was never written
+    # anywhere, so this chart previously never rendered (audit finding C3).
+    nirnay_df = st.session_state.get("nirnay_daily", pd.DataFrame())
     if not nirnay_df.empty and "avg_hmm_bull" in nirnay_df.columns:
         fig_hmm = go.Figure()
         fig_hmm.add_trace(go.Scatter(
@@ -388,7 +393,13 @@ def _render_intelligence_center() -> None:
     n_trials = int(profile.get("n_trials", 0)) if profile else 0
     n_train  = int(profile.get("n_train_dates", 0)) if profile else 0
     n_val    = int(profile.get("n_val_dates", 0)) if profile else 0
-    stability = (val_ic / train_ic * 100) if abs(train_ic) > 1e-9 else 0.0
+    # Guard against a near-zero denominator: with |train_ic| < ~0.01 the ratio
+    # is dominated by noise in train_ic's last digit and can read e.g.
+    # "+4300%" for a case that's actually just two small numbers near zero
+    # (audit finding E5). Treat as "not meaningfully computable" below that.
+    _STABILITY_MIN_TRAIN_IC = 0.01
+    _stability_computable = abs(train_ic) > _STABILITY_MIN_TRAIN_IC
+    stability = (val_ic / train_ic * 100) if _stability_computable else 0.0
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -407,9 +418,9 @@ def _render_intelligence_center() -> None:
     with c3:
         render_metric_card(
             "STABILITY",
-            f"{stability:+.0f}%" if (is_calibrated and abs(train_ic) > 1e-9) else "—",
-            "val / train ratio",
-            "success" if (is_calibrated and 50 <= stability <= 110) else "warning",
+            f"{stability:+.0f}%" if (is_calibrated and _stability_computable) else "—",
+            "val / train ratio" if _stability_computable else "train IC too close to zero to ratio",
+            "success" if (is_calibrated and _stability_computable and 50 <= stability <= 110) else "warning",
         )
     with c4:
         render_metric_card(
@@ -485,12 +496,12 @@ def _render_intelligence_center() -> None:
         d1, d2, d3, d4 = st.columns(4)
         with d1:
             render_metric_card(
-                "TRAIN IC", f"{train_ic:+.3f}", "in-sample IC vs forward PE",
+                "TRAIN IC", f"{train_ic:+.3f}", "in-sample IC vs forward return",
                 "success" if train_ic > 0 else "danger",
             )
         with d2:
             render_metric_card(
-                "VAL IC", f"{val_ic:+.3f}", "out-of-sample IC vs forward PE",
+                "VAL IC", f"{val_ic:+.3f}", "out-of-sample IC vs forward return",
                 "success" if val_ic > 0 else "danger",
             )
         with d3:

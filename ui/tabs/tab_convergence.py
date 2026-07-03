@@ -111,7 +111,17 @@ def render_convergence_tab(ts_filtered=None):
     if has_overlap:
         # Key by the full engine config (target + features + horizon + date range) so
         # switching predictor sets with the same target never reuses stale z-scores.
-        _np_key = f"conv_norm_causal::{st.session_state.get('engine_cache', st.session_state.get('active_target', ''))}"
+        # Also fold in content (row count + latest raw Aarambh/Nirnay reading): a
+        # "Refresh Data" that updates the LAST bar's value without changing the
+        # date-range fingerprint that engine_cache is built from would otherwise
+        # keep this key unchanged and silently reuse pre-refresh z-scores against
+        # the post-refresh raw series (audit finding C1).
+        _last_a = aligned_aarambh_raw[-1] if aligned_aarambh_raw else 0.0
+        _last_n = aligned_nirnay_raw[-1] if aligned_nirnay_raw else 0.0
+        _np_key = (
+            f"conv_norm_causal::{st.session_state.get('engine_cache', st.session_state.get('active_target', ''))}"
+            f"|{len(aligned_dates)}|{_last_a:.6g}|{_last_n:.6g}"
+        )
         if _np_key not in st.session_state:
             # Compute per-date CAUSAL expanding-window z-scores over the FULL aligned
             # series.  Applying terminal-point μ/σ to a historical slice is look-ahead
@@ -324,20 +334,9 @@ def render_convergence_tab(ts_filtered=None):
         line=dict(color=SLATE, width=2),
         marker=dict(size=avg_sizes, color=avg_colors),
     ), row=1, col=1)
-    # Overlay the CALIBRATED convergence (the hero headline's model line, ±100→[-1,1])
-    # on top of the normalized 50/50 consensus, so the plot base and the headline
-    # reconcile on the same object. Amber = the validated model; slate = consensus.
-    # _calib_series = st.session_state.get("calibrated_conv_series")
-    # if _calib_series is not None and len(_calib_series):
-    #    _clut = {str(k): float(v) for k, v in _calib_series.items()}
-    #    _cal_y = [
-    #        _clut.get(str(d.date()) if hasattr(d, "date") else str(d)) for d in aligned_dates
-    #    ]
-    #    if any(v is not None for v in _cal_y):
-    #        fig.add_trace(go.Scatter(
-    #            x=aligned_dates, y=_cal_y, mode="lines", name="Calibrated model",
-    #            line=dict(color=AMBER, width=2), connectgaps=True,
-    #        ), row=1, col=1)
+    # Calibrated-model overlay (amber trace) intentionally omitted here — the
+    # normalized 50/50 consensus (slate) is the plot's own read; the hero card
+    # above already shows the calibrated model value separately.
     fig.add_hline(y=UI_CONSENSUS_STRONG, line_dash="dot", line_color="rgba(251,113,133,0.15)", line_width=0.5, row=1, col=1)
     fig.add_hline(y=-UI_CONSENSUS_STRONG, line_dash="dot", line_color="rgba(52,211,153,0.15)", line_width=0.5, row=1, col=1)
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5, row=1, col=1)

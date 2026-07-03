@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ui.theme import chart_layout, style_axes
-from ui.components import render_metric_card, render_section_header, section_gap
+from ui.components import render_metric_card, render_section_header, render_control_hint, section_gap
 from core.config import (
     COLOR_GREEN,
     COLOR_RED,
@@ -237,6 +237,15 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
     if nirnay_daily is None or nirnay_daily.empty:
         st.info("No Nirnay constituent data available.")
         return
+
+    # Basket source hint — only when it's a degraded fallback (live scrape +
+    # cache both failed). A "snapshot (N)" basket for an uncapped large index
+    # (S&P 500/Nasdaq 100) is a small fraction of the true constituent set,
+    # so breadth below reflects that partial basket, not the full index
+    # (audit finding B4 — this was previously console-only).
+    _basket_src = st.session_state.get("nirnay_basket_source", "")
+    if _basket_src.startswith("snapshot") or _basket_src.startswith("stale"):
+        render_control_hint(f"Basket source: {_basket_src} · live resolution unavailable, using fallback")
 
     # ── Normalize columns ───────────────────────────────────────────────
     df_n = nirnay_daily[~nirnay_daily.index.duplicated(keep="last")].copy()

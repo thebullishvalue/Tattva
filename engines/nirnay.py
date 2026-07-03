@@ -150,6 +150,20 @@ def calculate_mmr(
     builds a weighted composite prediction, and measures the deviation of
     actual price from that prediction.
 
+    CAVEAT — ``mmr_quality`` is a max-statistic and reads high by construction:
+    it is computed over the per-row TOP-``num_vars`` R² values selected from
+    ~100 candidate macros on a ~``length``-day window. Under a pure null
+    (no genuine relationship anywhere) the expected maximum |correlation|
+    among ~100 candidates at ~20 effective observations is ~0.5-0.6 (order
+    statistics of r; cf. the multiple-testing magnitude in Harvey, Liu & Zhu
+    2016, RFS 29(1)), so a "high quality" reading is NOT evidence the macro
+    fit is real. The selection stays causal (shift(1) correlations), so the
+    deviation oscillator itself is usable, and since the inflation applies
+    ~uniformly across constituents the cross-sectional breadth signal is
+    mostly unharmed — but do not repurpose ``mmr_quality`` as an absolute
+    confidence measure without benchmarking it against a same-row max-R² of
+    permuted candidates.
+
     Returns
     -------
     mmr_signal, driver_details, mmr_quality
@@ -167,7 +181,8 @@ def calculate_mmr(
 
     preds_list = []
     r2_list = []
-    
+    last_corr: dict[str, float] = {}   # signed r at the last bar, per ticker
+
     # Vectorized causal rolling computations
     for ticker in available_macros:
         x = df[ticker].ffill().fillna(0)
@@ -178,12 +193,14 @@ def calculate_mmr(
         roll_corr = x.rolling(length, min_periods=length).corr(target).shift(1).fillna(0)
         slope = roll_corr * (y_std / x_std.replace(0, np.nan)).fillna(0)
         intercept = y_mean - (slope * x_mean)
-        
+
         pred = (slope * x) + intercept
         r2 = roll_corr**2
-        
+
         preds_list.append(pred)
         r2_list.append(r2)
+        if len(roll_corr):
+            last_corr[ticker] = float(roll_corr.iloc[-1])
 
     all_preds = pd.concat(preds_list, axis=1)
     all_r2 = pd.concat(r2_list, axis=1)
@@ -225,15 +242,28 @@ def calculate_mmr(
 
     # Top drivers from the causal per-row R² weights at the last bar (same
     # weights that actually drove the MMR signal, not a trailing static corr).
+    # Two fixes here:
+    #   • Symbol — rolling().corr() drops the Series name, so all_r2's columns
+    #     are INTEGER positions; the old code emitted those integers as the
+    #     "Symbol". Map position → available_macros[position] (the loop order).
+    #   • Correlation — the SIGNED r; sqrt(r²) would silently report |r| and
+    #     display an inversely-related driver (r = -0.8) as +0.8.
     driver_details = []
     if len(all_r2) > 0:
         last_r2 = all_r2.iloc[-1].dropna()
         if len(last_r2) > 0:
             top_r2 = last_r2.nlargest(num_vars)
-            for ticker in top_r2.index:
+            for col in top_r2.index:
+                if isinstance(col, (int, np.integer)) and 0 <= int(col) < len(available_macros):
+                    name = available_macros[int(col)]
+                else:
+                    name = str(col)
+                signed_r = last_corr.get(name)
+                if signed_r is None:
+                    signed_r = float(np.sqrt(max(0.0, float(top_r2[col]))))
                 driver_details.append({
-                    "Symbol": ticker,
-                    "Correlation": round(float(np.sqrt(max(0.0, float(top_r2[ticker])))), 4),
+                    "Symbol": name,
+                    "Correlation": round(float(signed_r), 4),
                 })
 
     return mmr_signal, driver_details, mmr_quality

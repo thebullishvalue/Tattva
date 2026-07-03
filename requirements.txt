@@ -2,7 +2,10 @@
 # @thebullishvalue Product
 
 # Core Framework
-streamlit>=1.30.0
+# streamlit>=1.42.0: the UI passes width='stretch' to st.button/st.plotly_chart/
+# st.dataframe, an argument introduced in 1.42 — on older versions (e.g. 1.37.1)
+# the app crashes at first render with TypeError: unexpected keyword 'width'.
+streamlit>=1.42.0
 pandas>=2.1.0
 numpy>=1.24.0
 plotly>=5.18.0

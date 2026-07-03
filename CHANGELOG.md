@@ -11,9 +11,16 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ## [Unreleased]
 
+---
+
+## [2.5.0] — 2026-07-04 — *Audit hardening · hero verdict rebuild · UI/UX polish*
+
 Resolves an end-to-end statistical/correctness/infra/docs audit spanning the
 walk-forward engine, the Intelligence calibration, the Precedent analog matcher,
-regime detection, and the data/cache layer.
+regime detection, and the data/cache layer; rebuilds the hero convergence card
+from a pure, unit-tested verdict function; and completes an institutional-grade
+UI/UX polish pass (grid rhythm, motion, focus/a11y) within the existing design
+language.
 
 ### Fixed
 - **Warm-up look-ahead in the walk-forward signal stack.** The first
@@ -101,7 +108,96 @@ regime detection, and the data/cache layer.
 - **A blanket `RuntimeWarning` suppression hid every numeric warning
   process-wide**, not just the one legitimate source it was meant to cover
   (`nanmean`'s "empty slice" on the engine's own warm-up rows). That source is
-  now scoped locally at its call site; the global filter is removed.
+  now scoped locally at its call site; the global filter is removed. Removing
+  it surfaced a second, genuine warning it had been masking (next item).
+- **MMR driver selection could be hijacked by a constant/pegged macro
+  column.** `rolling().corr()` emits `±inf` (not NaN) on near-zero-variance
+  windows — routine at 200+ macro columns (price-pegged ETFs, forward-filled
+  holiday runs). `+inf` passed the old `~np.isnan` validity mask and always
+  sorted last in the top-N driver selection, so a constant, information-free
+  column could permanently occupy a "top driver" slot and its downstream
+  `inf/inf` produced the `RuntimeWarning: invalid value encountered in scalar
+  divide` at `engines/nirnay.py`'s MMR row loop. Correlations are now
+  sanitized (non-finite → NaN, clipped to `[-1, 1]`) at the source, the row
+  validity mask uses `np.isfinite`, and the division guard rejects a
+  non-finite denominator.
+- **MMR "top driver" list emitted integer column positions as the driver
+  name**, and reported `|r|` instead of the signed correlation (an inversely
+  related driver showed as positively correlated). Both corrected — positions
+  now map back to the macro ticker name, and the signed last-bar correlation
+  is reported.
+- **Analog cards' "Extension (Z)" always read `+0.00`.** `AvgZ` was dropped
+  from the analog *matching* feature set in the 2.2 re-tune but the Precedent
+  tab's cards still read it from the per-analog dict, which never carried it
+  — every card's tier badge/color was keyed off a permanent default. `AvgZ`
+  is now carried as a display-only field (not matched on).
+- **Analog candidate pool included the engine's own warm-up rows**, whose
+  `NetBreadth` is genuinely missing (not neutral) — matching against a
+  median-filled fabrication is not a real state match. The pool now excludes
+  those rows; the Theiler exclusion gap is measured on the original temporal
+  row position (not the post-filter array offset) so it still means "N
+  trading days apart" after filtering.
+- **`r2_vs_rw`, in forward-return mode, benchmarked against the wrong null.**
+  It compared the forecast to "yesterday's realized forward return" as the
+  naive baseline — for a *return* forecast the martingale null is zero, not
+  the previous label; scored against the previous-label baseline, a
+  skill-less (always-zero) forecaster registered `r2_vs_rw ≈ +0.5` on pure
+  noise (measured by simulation). Forward mode now benchmarks against the
+  zero forecast; level/residual modes are unchanged (last-value RW baseline
+  is the correct null there).
+- **Regime-distribution stats (`get_regime_stats`) counted the engine's
+  warm-up rows** as `NEUTRAL`, diluting the Aarambh tab's "% of history
+  classified oversold/overbought" by roughly the warm-up's share of history.
+  Now excludes rows with no genuine forecast; the tab's percentage
+  denominator was updated to match.
+- **The `Actual` display column showed a literal `0.0000`** for the last
+  `FWD_HORIZON` rows — those rows' forward-return label doesn't exist yet and
+  was zero-filled only so the regression wouldn't choke on it, but the same
+  zero-filled array was reused for display. Now masked to NaN for display.
+- **DDM warm-up seeding had a look-ahead.** The drift-diffusion filter's
+  initial state, when its own leading input is NaN (the engine's warm-up
+  region), was seeded from the first *finite* observation — for a series
+  whose leading segment is NaN that value can be hundreds of rows in the
+  future. Now seeds a neutral 0.0 in that case, matching the filter's own
+  per-step NaN handling.
+- **Phase-3 terminal log printed hardcoded MSF/ROC/regime-sensitivity/
+  base-weight literals** instead of the `core/config.py` constants actually
+  passed to the engine — the console would silently disagree with a tuned
+  config. Now reads the same `NIRNAY_*` constants the engine call uses; two
+  previously-unlogged knobs (MMR top-N, oversold/overbought thresholds) are
+  now printed too.
+- **The Intelligence-calibration overlap gate decided *after* the "First-Pass
+  Conviction Model" console/progress label was already chosen** — a
+  low-overlap run that the gate correctly skipped still announced a "first
+  pass" that would never have a second. The gate (unchanged logic) now runs
+  immediately after the convergence-scoring summary, before any pass label
+  is chosen.
+- **Two distinct late-pipeline stages ("Detecting Divergences", "Walk-Forward
+  Validation") both posted 93% on the progress bar**, reading as a stall.
+  Re-sequenced the tail: 93 → 94 → 95 → 96 → 100, one number per stage.
+- **`theme.css` could crash the app on startup on non-UTF-8-locale Windows
+  systems.** `Path.read_text()` with no explicit encoding falls back to the
+  OS locale (commonly cp1252 on Windows), which cannot decode the
+  stylesheet's embedded Devanagari string — `UnicodeDecodeError` before
+  anything renders. Now reads with `encoding="utf-8"` explicitly.
+- **The app required Streamlit ≥1.42 but declared `>=1.30.0`.** `width=`
+  on `st.button`/`st.plotly_chart`/`st.dataframe` was introduced in 1.42; on
+  the declared minimum the app crashed at first render
+  (`TypeError: unexpected keyword 'width'`, reproduced on 1.37.1). Pin raised.
+
+### Added
+- **Hero verdict rebuilt as a pure function.** `ui.components.build_hero_verdict`
+  now holds 100% of the hero card's interpretation logic — headline-object
+  resolution (calibrated model → normalized consensus → Aarambh-only), signal-
+  label normalization, trust tiering, agreement tiering, and the precedent
+  evidence row — as a side-effect-free function returning a plain dict,
+  unit-tested independently of Streamlit. `render_hero_card` renders that
+  verdict as a structured, tagged evidence list (MODEL / PRECEDENT /
+  INTERNALS / RISK, each confirm/conflict/neutral/info) instead of a single
+  run-on interpretation paragraph. The precedent evidence row is gated on a
+  minimum of 5 *distinct* (post-Theiler) analogs before claiming agreement or
+  divergence — below that it reports "thin sample, not probative" instead of
+  a base rate built on 1-2 repeated episodes.
 
 ### Changed
 - Non-overlapping Val IC changes the hero/Aarambh-tab trust-chip thresholds
@@ -114,6 +210,42 @@ regime detection, and the data/cache layer.
   ("cheap/expensive valuation") it doesn't mean, and the OOS R² / ADF / KPSS
   cards no longer grade a magnitude-R²-near-zero forecast as if it were a
   failing level-regression model.
+- **UI/UX polish pass** (grid rhythm, motion, focus/a11y — no change to the
+  Obsidian Quant Terminal palette, typography, or card anatomy):
+  - Two silently-conflicting duplicate `@keyframes` (`pulse`, `shimmer`,
+    each defined twice with different motion) resolved by scoping the
+    earlier pair (`pulseDot`, `shimmerSkeleton`) to their actual consumers.
+  - Every `transition: all` in `theme.css` (21 sites) replaced with explicit
+    property lists — `all` was animating unintended properties and, at two
+    sites where a later same-selector rule's `transition` silently won the
+    whole property outright, had been masking which properties the earlier
+    rule's hover state actually needed.
+  - The metric-card entrance stagger (`.metric-card:nth-child(N)`) never
+    matched in practice — a metric card is always its own Streamlit column's
+    only child, so it was permanently `nth-child(1)`. Replaced with a stagger
+    keyed off the column's position in the row.
+  - Metric-tooltip: dead duplicate `white-space` declaration removed;
+    last-column tooltips in a row no longer clip past the viewport edge.
+  - Sidebar "CONFIGURE" hint's `onclick` handler removed — Streamlit
+    sanitizes inline handlers in markdown HTML, so it never fired; the
+    element is now honestly styled as the non-interactive pointer it is.
+  - `.stPlotlyChart`'s bottom margin no longer double-stacks with
+    `.section-gap` when a chart is the last element before a section
+    boundary (was 48px there vs. 32px everywhere else).
+  - Content width capped at 1720px on ultra-wide displays (was unbounded
+    98%); no visible change ≤1720px.
+  - `tabular-nums` applied to the remaining un-covered numeric readouts
+    (metric-card values, spec rows, hero score) so ticking values don't
+    jitter their container width.
+  - `:focus-visible` rings added for buttons/tabs (previously no visible
+    keyboard focus indicator anywhere in the app).
+  - Mobile: removed a rule that force-clamped every chart to 300px height
+    (was crushing the 680px 3-row Unified Signal stack); tab bar now scrolls
+    horizontally instead of wrapping; interactive touch targets raised to
+    the ≥44px WCAG 2.5.8 floor.
+  - z-index stacking order documented inline (-1 decorative glows / 0 ambient
+    textures / 1 card content / 10 sticky headers / 100 tooltips / 999 fixed
+    hint).
 
 ### Removed
 - Dead UI components with zero call sites: `render_collapsible_section(_close)`,

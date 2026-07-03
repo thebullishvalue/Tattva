@@ -1230,10 +1230,12 @@ def main():
             total = len(constituent_ohlcv)
             console.section("Per-Stock Analysis")
             console.item("Constituents", total)
-            console.item("MSF Length", 20)
-            console.item("ROC Length", 14)
-            console.item("Regime Sensitivity", 1.5)
-            console.item("Base Weight", 0.6)
+            console.item("MSF Length", NIRNAY_MSF_LENGTH)
+            console.item("ROC Length", NIRNAY_ROC_LEN)
+            console.item("Regime Sensitivity", NIRNAY_REGIME_SENSITIVITY)
+            console.item("Base Weight", NIRNAY_BASE_WEIGHT)
+            console.item("MMR Top-N Drivers", NIRNAY_MMR_NUM_VARS)
+            console.item("Oversold / Overbought", f"{NIRNAY_OVERSOLD} / {NIRNAY_OVERBOUGHT}")
             console.item("Macro Columns", len(macro_cols_list))
 
             for i, (sym, ohlcv_df) in enumerate(constituent_ohlcv.items()):
@@ -1426,6 +1428,34 @@ def main():
         console.item("Overlap Dates", overlap_count)
         console.success(f"Convergence scoring complete")
 
+        # ── Intelligence Mode overlap gate ───────────────────────────────
+        # Decided HERE (overlap_count is final) rather than just before the
+        # calibration block itself, because the "First-Pass"/"(initial pass)"
+        # labels below are chosen from _intel_enabled — deciding the gate
+        # after those labels were already picked meant a skip run advertised
+        # a "first pass" that would never have a second pass.
+        #
+        # Skip entirely when the Aarambh/Nirnay overlap is too thin (an
+        # Aarambh-only target with an empty/unresolvable basket, or a target
+        # whose basket barely overlaps the model's date range). With no
+        # overlap every date gets the same neutral nirnay_stats default
+        # (app.py's fallback above), so consensus_direction is always 0,
+        # convergence_score is a CONSTANT, and every dim score is constant —
+        # the tuner would still run its full trial budget scoring a
+        # degenerate, all-NaN-IC objective, then persist an arbitrary "best"
+        # (weights, thresholds) with val_ic == 0.0 that reads as a genuine,
+        # if marginal, calibration. 60 overlap dates is a low bar (~3 trading
+        # months) chosen only to exclude the genuinely-empty-basket case, not
+        # to second-guess a real but short-history calibration.
+        _MIN_OVERLAP_FOR_CALIBRATION = 60
+        if _intel_enabled and overlap_count < _MIN_OVERLAP_FOR_CALIBRATION:
+            console.warning(
+                f"Intelligence calibration skipped: only {overlap_count} Aarambh/Nirnay "
+                f"overlap dates (< {_MIN_OVERLAP_FOR_CALIBRATION}) — convergence_score would "
+                f"be a constant (no genuine Nirnay signal to calibrate against)."
+            )
+            _intel_enabled = False
+
         # ── 4a. First-pass conviction model ─────────────────────────────
         # First-pass DDM filter on the convergence_score from the first
         # validator pass. Labeled "first-pass" only when Intelligence Mode
@@ -1461,27 +1491,10 @@ def main():
         # search learns optimal (weights, thresholds) for this universe,
         # persists them to disk, and we immediately re-apply them below
         # so the user's signals reflect the calibrated state on THIS run.
-        #
-        # Skip entirely when the Aarambh/Nirnay overlap is too thin (an
-        # Aarambh-only target with an empty/unresolvable basket, or a target
-        # whose basket barely overlaps the model's date range). With no
-        # overlap every date gets the same neutral nirnay_stats default
-        # (app.py's fallback above), so consensus_direction is always 0,
-        # convergence_score is a CONSTANT, and every dim score is constant —
-        # the tuner would still run its full trial budget scoring a
-        # degenerate, all-NaN-IC objective, then persist an arbitrary "best"
-        # (weights, thresholds) with val_ic == 0.0 that reads as a genuine,
-        # if marginal, calibration. 60 overlap dates is a low bar (~3 trading
-        # months) chosen only to exclude the genuinely-empty-basket case, not
-        # to second-guess a real but short-history calibration.
-        _MIN_OVERLAP_FOR_CALIBRATION = 60
-        if _intel_enabled and overlap_count < _MIN_OVERLAP_FOR_CALIBRATION:
-            console.warning(
-                f"Intelligence calibration skipped: only {overlap_count} Aarambh/Nirnay "
-                f"overlap dates (< {_MIN_OVERLAP_FOR_CALIBRATION}) — convergence_score would "
-                f"be a constant (no genuine Nirnay signal to calibrate against)."
-            )
-            _intel_enabled = False
+        # (The overlap gate that can force _intel_enabled = False lives
+        # earlier now, right after the convergence-scoring summary — see
+        # "Intelligence Mode overlap gate" above — so it decides before the
+        # first-pass labels are chosen, not after.)
         _final_profile: _intel_mod.IntelligenceProfile | None = None
         if _intel_enabled:
             console.section("Intelligence Calibration")
@@ -1618,7 +1631,7 @@ def main():
         # unseen block. Many genuine OOS grades → distinguishes a durable edge
         # from a lucky recent regime. Results power the Diagnostics tab.
         console.section("Walk-Forward Validation")
-        progress_bar(progress_container, 93, "Walk-Forward Validation", "Rolling OOS IC · Re-Calibration")
+        progress_bar(progress_container, 94, "Walk-Forward Validation", "Rolling OOS IC · Re-Calibration")
         try:
             _hold_grid = tuple(_horizon_cfg["hold"])  # IC durability at the traded lens
             _wf_frame = _intel_mod._build_calibration_frame(
@@ -1645,11 +1658,11 @@ def main():
             f"{overlap_count} Overlap Dates · {len(events)} Divergence Events · "
             f"{'Calibrated Profile Applied' if (_intel_enabled and _final_profile is not None) else 'Factory Defaults'}"
         )
-        progress_bar(progress_container, 94, "Convergence Phase Complete", _conv_complete_sub)
+        progress_bar(progress_container, 95, "Convergence Phase Complete", _conv_complete_sub)
 
         # ── Phase 5: Final Assembly ───────────────────────────────────────
         console.start_phase("FINAL ASSEMBLY", 5, 5)
-        progress_bar(progress_container, 95, "Storing Results", "Session State · Cache")
+        progress_bar(progress_container, 96, "Storing Results", "Session State · Cache")
         console.section("Session State")
 
         st.session_state["engine"] = engine
@@ -1784,10 +1797,11 @@ def main():
     # ─── Primary Signal (Above Tabs, Always Visible) ───────────────────────
     _render_primary_signal(nishkarsh_norm, agreement, signal)
 
-    # ─── Sidebar Discovery Hint ─────────────────────────────────────────
+    # ─── Sidebar Discovery Hint (passive — the sidebar collapse control lives
+    # in Streamlit's own chrome; this is a directional pointer, not a button) ──
     st.markdown(
         """
-        <div class="sidebar-hint" onclick="document.querySelector('[data-testid=stSidebarCollapse]').click()" title="Open sidebar for configuration">
+        <div class="sidebar-hint">
             <svg class="sidebar-hint-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="15 18 9 12 15 6"></polyline>
             </svg>

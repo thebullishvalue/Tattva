@@ -1,7 +1,7 @@
 # LICENSE
 
 **TATTVA (तत्त्व) — Unified Convergence Engine**
-**Version 2.4.0**
+**Version 2.5.0**
 
 ---
 

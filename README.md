@@ -1,6 +1,6 @@
 # TATTVA — तत्त्व
 
-**Unified Convergence Engine** · v2.4.0 · *@thebullishvalue*
+**Unified Convergence Engine** · v2.5.0 · *@thebullishvalue*
 
 > *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality": the underlying
 > truth distilled from the convergence of evidence.
@@ -28,7 +28,7 @@ terminal:
 | **NIRNAY** | *What is the related complex doing bottom-up?* | Per-instrument MSF + MMR oscillators with HMM/GARCH/CUSUM regime detection across the target's basket (related miners/streamers for a commodity, or the index's own constituents), aggregated into breadth. |
 | **CONVERGENCE** | *Do the two agree, and how strongly?* | Adaptive-weighted, **directional** composite across Direction / Breadth / Magnitude / Regime, smoothed with a Drift-Diffusion filter. |
 | **INTELLIGENCE** | *Does the signal actually have edge?* | Optuna TPE calibration of the convergence weights/thresholds with a **purged k-fold CV objective** + held-out tail, plus an automatic **walk-forward IC** durability check (per `(target, lens)`). |
-| **PRECEDENT** | *When the state looked like today, what happened next?* | Covariance-aware **Mahalanobis** analog matching (Ledoit-Wolf) + trajectory + recency over Tattva's own state features → an empirical, non-parametric forward-return base rate at the lens horizons, independent of the model. |
+| **PRECEDENT** | *When the state looked like today, what happened next?* | Covariance-aware **Mahalanobis** analog matching (OAS shrinkage) over Tattva's own state features, under a **Theiler exclusion window** so returned analogs are genuinely distinct episodes → an empirical, non-parametric forward-return base rate at the lens horizons, independent of the model. |
 
 The headline output is a normalized convergence signal in `[-1, +1]`
 (STRONG BUY → HOLD → STRONG SELL) with an honest out-of-sample **Val IC** and a

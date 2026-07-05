@@ -42,8 +42,8 @@ LOOKBACK_WINDOWS = (5, 10, 20, 50, 100)
 #     forecast window more). Post-purge it VANISHES: 5 and 10 tie best (combined
 #     −0.004), 3 and 7 are worse. So 10 is chosen — identical skill at ~2× LESS
 #     walk-forward cost (notably cheaper on Streamlit Cloud). Cost ∝ 1/REFIT.
-MIN_TRAIN_SIZE = 750
-MAX_TRAIN_SIZE = 750
+MIN_TRAIN_SIZE = 15
+MAX_TRAIN_SIZE = 30
 REFIT_INTERVAL = 10
 RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0)
 HUBER_EPSILON = 1.35

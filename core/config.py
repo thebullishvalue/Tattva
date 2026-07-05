@@ -47,7 +47,7 @@ MAX_TRAIN_SIZE = 30
 REFIT_INTERVAL = 10
 RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0)
 HUBER_EPSILON = 1.35
-HUBER_MAX_ITER = 500
+HUBER_MAX_ITER = 1500
 
 # ── Walk-forward ensemble members ────────────────────────────────────────────
 # Which models the FairValueEngine fits per walk-forward window and averages.

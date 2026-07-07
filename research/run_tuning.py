@@ -181,7 +181,8 @@ def _run_one(key, report):
     print(banner, flush=True); report.write(banner)
     t0 = time.time()
     proc = subprocess.Popen([_sys.executable, "-u", str(_HERE / script)],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace")
     for line in proc.stdout:
         report.write(line)
         if not any(n in line for n in _NOISE):
@@ -252,7 +253,7 @@ def main():
 
     t0 = time.time()
     results = {}
-    with open(rpath, "w") as report:
+    with open(rpath, "w", encoding="utf-8") as report:
         report.write(f"Tattva tuning run · {datetime.now():%Y-%m-%d %H:%M} · studies={keys}\n")
         for k in keys:
             results[k] = _run_one(k, report)

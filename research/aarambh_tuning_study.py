@@ -31,6 +31,12 @@ from scipy.stats import spearmanr
 
 warnings.filterwarnings("ignore")
 
+# Windows consoles default to cp1252, which can't encode the → · glyphs used
+# in status prints below; force UTF-8 so this runs the same on Windows/Linux.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import os as _os, sys as _sys  # research/: put repo root on path so `from core...` resolves
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from core.config import (
@@ -178,7 +184,7 @@ def run():
     levers = _cfgs()
     done = _done_keys()
     new_file = not os.path.exists(RESULTS_CSV)
-    f = open(RESULTS_CSV, "a", newline="")
+    f = open(RESULTS_CSV, "a", newline="", encoding="utf-8")
     w = csv.writer(f)
     if new_file:
         w.writerow(["lever", "value", "target", "class", "horizon", "ic", "n"]); f.flush()

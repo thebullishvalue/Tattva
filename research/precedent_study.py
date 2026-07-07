@@ -30,6 +30,10 @@ from scipy.stats import spearmanr
 warnings.filterwarnings("ignore")
 
 import os as _os, sys as _sys  # research/: put repo root on path so `from core...` resolves
+# Windows consoles default to cp1252 which can't encode ← ◀ and other glyphs
+if hasattr(_sys.stdout, "reconfigure"):
+    _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from core.config import MIN_DATA_POINTS, MIN_TRAIN_SIZE, TARGET_EXCLUDED_PREDICTORS
 from data.fetcher import fetch_commodity_dataset

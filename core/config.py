@@ -33,18 +33,18 @@ LOOKBACK_WINDOWS = (5, 10, 20, 50, 100)
 #     horizons up; India-Eq +0.007 → +0.033), monotone over 300→500→750. Still
 #     leaves ~1500 OOS rows, so Intelligence calibration is not starved. (The old
 #     "MIN=500 is best" was a leakage artifact.)
-#   • MAX_TRAIN_SIZE = 750 — confirmed at MIN=750: 750/1000/1500 tie (~+0.020,
-#     within noise), so a ~3y window wins on cost + adaptivity. The one hard rule —
-#     never cap BELOW MIN: MAX=500 at MIN=750 collapses to −0.035 (throws away the
-#     well-conditioned window). MAX (750) ≥ MIN (750) satisfies it.
-#   • REFIT_INTERVAL = 10 — the OLD "more refit = monotonically more skill"
-#     (10→0.072 … 3→0.259) was PURE LEAKAGE (a fresher training tail overlapped the
-#     forecast window more). Post-purge it VANISHES: 5 and 10 tie best (combined
-#     −0.004), 3 and 7 are worse. So 10 is chosen — identical skill at ~2× LESS
-#     walk-forward cost (notably cheaper on Streamlit Cloud). Cost ∝ 1/REFIT.
+#   • MAX_TRAIN_SIZE = 1000 — RE-TUNED 2026-07-07. At MIN=750: MAX=750/1000/1500
+#     tie at +0.034 (within noise), but 1000 is the first saturation point — a
+#     ~4y window is slightly better conditioned than 3y at no cost. The hard
+#     rule still holds: never cap BELOW MIN (MAX=500 at MIN=750 → −0.009).
+#   • REFIT_INTERVAL = 7 — RE-TUNED 2026-07-07. The 2026-06-19 run had 5 and 10
+#     tied (combined −0.026); this full re-run shows 7 is the clear winner
+#     (combined IC −0.016 vs −0.026, best on both Cmdty/FX +0.023 and India-Eq
+#     −0.034). 3 (−0.028) and 10 (−0.026) are worse. 7 is a modest cost increase
+#     over 10 but buys real lift.
 MIN_TRAIN_SIZE = 750
-MAX_TRAIN_SIZE = 750
-REFIT_INTERVAL = 10
+MAX_TRAIN_SIZE = 1000
+REFIT_INTERVAL = 7
 RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0)
 HUBER_EPSILON = 1.35
 HUBER_MAX_ITER = 500
@@ -180,18 +180,21 @@ DDM_LONG_RUN_VAR = 100.0
 # dead: the engine ran on hardcoded literals in app.py / nirnay.py and these
 # constants were referenced nowhere). Not in the Optuna search, so they are
 # hand-set — but a 2026-06-20 structural sweep (research/nirnay_tuning_study.py +
-# research/nirnay_index_check.py: breadth-oscillator OOS IC vs forward return) CONFIRMS the
-# current values as the best global compromise. Findings: breadth is a weak
-# dimension everywhere (|IC| ≈ 0.02–0.06, no knob unlocks more); REGIME_SENSITIVITY
-# is INERT (1.0/1.5/2.0 identical) and MMR_NUM_VARS ~flat; MSF_LENGTH=10 beats 20 on
-# commodities (|IC| 0.057 vs 0.036) but LOSES on equity indices (0.025 vs 0.055) —
-# and indices are 26 of 33 targets, so 20 stays as the cross-universe optimum.
+# research/nirnay_index_check.py: breadth-oscillator OOS IC vs forward return) confirms
+# the values as the best global compromise (RE-TUNED 2026-07-07). Findings:
+# breadth is a weak dimension everywhere (|IC| ≈ 0.02–0.06, no knob unlocks more);
+# REGIME_SENSITIVITY is INERT (1.0/1.5/2.0 identical) and MMR_NUM_VARS ~flat;
+# MSF_LENGTH=10 beats 20 on commodities (|IC| 0.055 vs 0.048) but LOSES on equity
+# indices (0.099 vs 0.114) — indices are 27 of 34 targets, so 20 stays as the
+# cross-universe optimum. BASE_WEIGHT=0.4 is monotone-best (|IC| 0.054 > 0.048 >
+# 0.045 for 0.4/0.6/0.8; signed IC also monotone), meaning more MSF weight helps.
 NIRNAY_MSF_LENGTH = 20            # MSF oscillator rolling-window length
 NIRNAY_ROC_LEN = 14              # rate-of-change lookback inside MSF
 NIRNAY_REGIME_SENSITIVITY = 1.5  # clarity-weight exponent (corrected from a stale
                                  # 1.0 here that disagreed with the 1.5 the engine
                                  # actually ran — 1.5 preserves prior behaviour)
-NIRNAY_BASE_WEIGHT = 0.6         # MSF vs MMR base blend (0.6 → 60% MSF)
+NIRNAY_BASE_WEIGHT = 0.4         # MSF vs MMR base blend (0.4 → 60% MSF, re-tuned
+                                 # 2026-07-07: monotone |IC| 0.054 > 0.048 > 0.045)
 NIRNAY_MMR_NUM_VARS = 5          # top-N macro drivers selected per row in MMR
 
 # Nirnay condition thresholds (unified oscillator scale: -10 to +10). Classify the
@@ -775,16 +778,18 @@ UI_NIRNAY_BEARISH = 2
 # ── Unified-Signal plot marker thresholds (data-anchored) ────────────────────
 # The 3-row Unified Signal plot's reference lines + marker-color tiers. Set to the
 # p90 (strong) / p75 (moderate) quantiles of each signal's own distribution, pooled
-# across 8 targets / 17.6k days (research/markers_study.py), so "strong/moderate" means the
-# same extremeness on every row. This CORRECTED hand-set values that were badly
-# mis-scaled: the old Row-1 ±0.5 fired only 3% of days (too tight), while Row-2 ±20
-# and Row-3 ±2 fired 51% / 41% of days (too loose). The conviction rows are mean-
-# reverting (high extension → lower forward return, monotone), Nirnay-avg is flat
-# (interpretive guide only) — so these are EXTREMENESS markers, not actionable edges.
-UI_CONSENSUS_STRONG = 0.40      # Row 1 · norm_avg (consensus, [-1,1])
-UI_CONSENSUS_MODERATE = 0.25
-UI_CONVRAW_STRONG = 60          # Row 2 · ConvictionRaw (Aarambh, ~[-100,100])
-UI_CONVRAW_MODERATE = 40
+# across 8 targets (research/markers_study.py), so "strong/moderate" means the same
+# extremeness on every row. RE-TUNED 2026-07-07 (12.1k obs, 8 targets):
+#   Row 1 · norm_avg:    p90=0.39  p75=0.26  (was 0.40/0.25 — minor refinement)
+#   Row 2 · ConvictionRaw: p90=50  p75=20    (was 60/40 — both too tight)
+#   Row 3 · Avg_Signal:  p90=4.02  p75=2.88  (was single-tier 2.5 — kept as-is)
+# The conviction rows are mean-reverting (high extension → lower forward return,
+# monotone), Nirnay-avg is flat (interpretive guide only) — so these are
+# EXTREMENESS markers, not actionable edges.
+UI_CONSENSUS_STRONG = 0.39      # Row 1 · norm_avg (consensus, [-1,1])
+UI_CONSENSUS_MODERATE = 0.26
+UI_CONVRAW_STRONG = 50          # Row 2 · ConvictionRaw (Aarambh, ~[-100,100])
+UI_CONVRAW_MODERATE = 20
 UI_NIRNAY_AVG_THRESHOLD = 2.5   # Row 3 · Avg_Signal (Nirnay, [-10,10]) — single tier
 
 # Model spread thresholds

@@ -25,7 +25,7 @@ def main():
           f"(non-overlapping)", flush=True)
     print(f"  {'MSF_LEN':<8} {'mean|IC|':>9} {'mean IC':>9}   per-index IC", flush=True)
     t0 = time.time()
-    for v in [10, 20, 30]:
+    for v in [5, 10, 14, 20, 30, 40, 50]:
         cfg = dict(BASE); cfg["length"] = v
         ics = {t: breadth_ic(cfg, t) for t in INDICES}
         arr = np.array([x for x in ics.values() if np.isfinite(x)])

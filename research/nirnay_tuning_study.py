@@ -36,11 +36,11 @@ TARGETS = ["Gold", "Silver", "Copper", "Cotton", "USD/INR", "Brent Crude", "Jeer
 H = 10                                   # forward horizon (Tactical lens)
 BASE = dict(length=20, roc=14, sens=1.5, bw=0.6, nv=5)
 SWEEPS = {
-    "MSF_LENGTH":         ("length", [10, 20, 30]),
-    "ROC_LEN":            ("roc",    [7, 14, 21]),
-    "REGIME_SENSITIVITY": ("sens",   [1.0, 1.5, 2.0]),
-    "BASE_WEIGHT":        ("bw",     [0.4, 0.6, 0.8]),
-    "MMR_NUM_VARS":       ("nv",     [3, 5, 8]),
+    "MSF_LENGTH":         ("length", [5, 10, 14, 20, 30, 40, 50]),
+    "ROC_LEN":            ("roc",    [3, 7, 10, 14, 21, 28]),
+    "REGIME_SENSITIVITY": ("sens",   [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]),
+    "BASE_WEIGHT":        ("bw",     [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]),
+    "MMR_NUM_VARS":       ("nv",     [1, 2, 3, 5, 8, 12, 15]),
 }
 
 _DATA = {}

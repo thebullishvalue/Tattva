@@ -183,16 +183,20 @@ def main():
     H2 = [10, 20]
     print(f"\n### BLEND  W_MAHA/W_TRAJ/W_RECV  (horizons 10 / 20)", flush=True)
     print(f"  {'config':<22} " + "  ".join(f"{('+'+str(h)+'d'):>14}" for h in H2), flush=True)
-    for wm, wt, wr in [(1, 0, 0), (.7, .2, .1), (.55, .35, .10), (.4, .5, .1), (.5, .25, .25), (.45, .30, .25)]:
+    for wm, wt, wr in [
+        (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
+        (0.8, 0.1, 0.1), (0.7, 0.2, 0.1), (0.55, 0.35, 0.10),
+        (0.4, 0.5, 0.1), (0.33, 0.33, 0.34), (0.5, 0.25, 0.25),
+        (0.45, 0.30, 0.25), (0.2, 0.6, 0.2), (0.2, 0.2, 0.6)]:
         line(f"{wm}/{wt}/{wr}", _cfg(wm=wm, wt=wt, wr=wr), H2,
              "  ←current" if (wm, wt, wr) == (.55, .35, .10) else "")
 
     print(f"\n### TOP_N  (horizons 10 / 20)", flush=True)
-    for tn in [5, 10, 15, 20, 30]:
+    for tn in [1, 3, 5, 10, 15, 20, 30, 50]:
         line(f"top_n={tn}", _cfg(top_n=tn), H2, "  ←current" if tn == 10 else "")
 
     print(f"\n### RECENCY half-life days  (horizons 10 / 20)", flush=True)
-    for hl in [120, 250, 365, 730]:
+    for hl in [30, 60, 90, 120, 180, 250, 365, 500, 730, 1000]:
         line(f"halflife={hl}", _cfg(hl=hl, wr=0.20), H2, "")   # at wr=0.20 so recency bites
     print("    (tested at W_RECV=0.20 so the half-life actually matters)", flush=True)
 

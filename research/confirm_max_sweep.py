@@ -18,7 +18,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)
 from core.config import ALL_TARGETS
 from aarambh_tuning_study import _df, fit_ic, _class, BASE, HORIZONS
 
-MAXT = [500, 750, 1000, 1500]
+MAXT = [15, 30, 50, 100, 252, 500, 750, 1000, 1500]
 
 
 def main():

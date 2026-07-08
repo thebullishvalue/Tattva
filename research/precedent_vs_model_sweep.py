@@ -38,8 +38,8 @@ from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch, 
 import engines.aarambh as _aa
 _aa.ENSEMBLE_MODELS = ("ridge", "ols")
 
-HORIZONS = [10, 20]
-MOM = {10: 20, 20: 40}
+HORIZONS = [1, 5, 10, 20, 40, 60]
+MOM = {1: 5, 5: 10, 10: 20, 20: 40, 40: 60, 60: 90}
 TOP_N = 10
 W_MAHA, W_TRAJ, W_RECV = 0.55, 0.35, 0.10
 _DF = {}

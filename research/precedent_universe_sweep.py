@@ -47,8 +47,8 @@ from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch, 
 import engines.aarambh as _aa
 _aa.ENSEMBLE_MODELS = ("ridge", "ols")
 
-HORIZONS = [5, 10, 20, 40, 60]
-MOM = {5: 10, 10: 20, 20: 40, 40: 60, 60: 90}
+HORIZONS = [1, 3, 5, 10, 20, 40, 60, 90, 120]
+MOM = {1: 5, 3: 10, 5: 10, 10: 20, 20: 40, 40: 60, 60: 90, 90: 120, 120: 180}
 FIT_H, FIT_MOM = 20, 40          # single engine fit per target
 TOP_N = 10
 W_MAHA, W_TRAJ, W_RECV = 0.55, 0.35, 0.10

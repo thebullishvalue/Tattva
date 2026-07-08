@@ -16,8 +16,11 @@ Scope (one-factor-at-a-time around current defaults):
 Metric: mean NON-OVERLAPPING (stride = horizon) OOS Spearman IC of the Aarambh
 forward-return forecast (ts_data["FairValue"]) vs realized return.
 
-Robustness: results stream to a CSV (resumable — re-run to continue; skips done
-rows). Aggregate anytime with:  python3 aarambh_tuning_study.py --agg
+Robustness: results stream to a repo-local CSV under research/.tune_cache/
+(resumable — re-run to continue; skips done rows). Aggregate anytime with
+  python3 aarambh_tuning_study.py --agg
+Force a clean recompute (wipe the cache first) with
+  python3 aarambh_tuning_study.py --fresh
 
 Run: python3 -u aarambh_tuning_study.py
 """
@@ -46,7 +49,29 @@ from data.fetcher import fetch_commodity_dataset
 import engines.aarambh as aa
 from engines.aarambh import FairValueEngine
 
-RESULTS_CSV = "/tmp/aarambh_tune_results.csv"
+# Resumable results cache. Repo-local + OS-independent ON PURPOSE: the old
+# "/tmp/…" path resolved to DIFFERENT files under Windows Python (C:\tmp) vs
+# git-bash (/tmp), so a post-fix re-run silently resumed a STALE cache and skipped
+# every recompute (the 2026-07-08 11:18 report's stale aarambh_full section).
+_CACHE_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".tune_cache")
+RESULTS_CSV = _os.path.join(_CACHE_DIR, "aarambh_tune_results.csv")
+
+# Mechanical leakage guard. |non-overlapping OOS forward-return IC| this large is a
+# money-printer, i.e. forward-LABEL leakage — never real skill at these horizons.
+# aggregate() flags such rows (⚠LEAK) and refuses to recommend them. This is an
+# impossibility check, NOT an assumption about the tuning answer.
+_LEAK_IC = 0.35
+
+# Structural degenerate-window guard. A train window smaller than this cannot fit the
+# 219-predictor PCA(20) ensemble: after the purge gap only a handful of rows remain
+# (see the "n_samples=1/5/10" PCA-reduce warnings), the fit collapses to a near-constant
+# train-mean forecast, and its IC is small-sample NOISE — not a leak (stays < _LEAK_IC),
+# but not skill either, and it can spuriously "win" a lever. aggregate() flags such
+# window-lever rows (⚠small-win) and excludes them from the recommendation. This is a
+# structural floor (a 15-row model is incoherent), NOT a tuning opinion; the rows are
+# still DISPLAYED so the small windows the study was asked to probe remain visible.
+_MIN_SANE_WINDOW = 100
+
 HORIZONS = {10: 20, 20: 40}            # horizon : momentum window
 
 # OFAT base. ens defaults to the FAST (ridge+ols) basket so the non-ensemble levers
@@ -60,18 +85,22 @@ BASE = dict(refit=5, ens=("ridge", "ols"), maxt=750, mint=500, pca=20,
 # Each lever → list of (value, full-cfg-override-dict)
 def _cfgs():
     levers = {}
-    levers["REFIT_INTERVAL"] = [(v, {"refit": v}) for v in (3, 5, 7, 10)]
+    levers["REFIT_INTERVAL"] = [(v, {"refit": v}) for v in (1, 3, 5, 7, 10, 15, 21)]
     levers["ENSEMBLE_MODELS"] = [(("+".join(e)), {"ens": e}) for e in (
-        ("ols",), ("ols", "huber"), ("ridge", "ols"),
-        ("ridge", "ols", "huber"), ("ols", "huber", "elasticnet"))]
-    levers["MAX_TRAIN_SIZE"] = [(v, {"maxt": v}) for v in (500, 750, 1000, 1500)]
-    levers["MIN_TRAIN_SIZE"] = [(v, {"mint": v}) for v in (300, 500, 750)]
-    levers["PCA_COMPONENTS"] = [(v, {"pca": v}) for v in (10, 20, 30)]
+        ("ols",), ("ridge",), ("huber",),
+        ("ols", "huber"), ("ridge", "ols"), ("ridge", "huber"),
+        ("ridge", "ols", "huber"), ("ols", "huber", "elasticnet"),
+        ("ridge", "ols", "huber", "elasticnet"))]
+    levers["MAX_TRAIN_SIZE"] = [(v, {"maxt": v}) for v in (15, 30, 50, 100, 252, 500, 750, 1000, 1500)]
+    levers["MIN_TRAIN_SIZE"] = [(v, {"mint": v}) for v in (15, 30, 50, 100, 252, 500, 750, 1000, 1500)]
+    levers["PCA_COMPONENTS"] = [(v, {"pca": v}) for v in (5, 10, 15, 20, 25, 30, 40, 50)]
     # RIDGE_ALPHAS only bites with a ridge ensemble → evaluate on (ridge, ols).
     levers["RIDGE_ALPHAS"] = [
-        ("narrow(0.1,1,10)", {"ens": ("ridge", "ols"), "ralpha": (0.1, 1.0, 10.0)}),
+        ("ultra-narrow(0.1..10)", {"ens": ("ridge", "ols"), "ralpha": (0.1, 1.0, 10.0)}),
+        ("narrow(0.01..10)", {"ens": ("ridge", "ols"), "ralpha": (0.01, 0.1, 1.0, 10.0)}),
         ("default(.01..100)", {"ens": ("ridge", "ols"), "ralpha": (0.01, 0.1, 1.0, 10.0, 100.0)}),
-        ("wide(1,10,100,1k)", {"ens": ("ridge", "ols"), "ralpha": (1.0, 10.0, 100.0, 1000.0)}),
+        ("wide(0.01..1k)", {"ens": ("ridge", "ols"), "ralpha": (0.01, 0.1, 1.0, 10.0, 100.0, 1000.0)}),
+        ("ultra-wide(0.001..10k)", {"ens": ("ridge", "ols"), "ralpha": (0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0)}),
     ]
     return levers
 
@@ -182,6 +211,7 @@ def run():
     df = _df()
     targets = [t for t in ALL_TARGETS if t in df.columns and df[t].notna().mean() >= 0.5]
     levers = _cfgs()
+    os.makedirs(_CACHE_DIR, exist_ok=True)
     done = _done_keys()
     new_file = not os.path.exists(RESULTS_CSV)
     f = open(RESULTS_CSV, "a", newline="", encoding="utf-8")
@@ -213,18 +243,45 @@ def run():
     aggregate()
 
 
+def _live_cur():
+    """Build the '←current' marker map from LIVE config, so the ←current row and the
+    '← CHANGE from' flags reflect what the app ACTUALLY runs — not a hardcoded snapshot
+    that silently goes stale (as it had: it read 5/750/500 while config was 7/1000/750)."""
+    import importlib
+    cfg = importlib.import_module("core.config")
+    g = lambda name, default: getattr(cfg, name, default)
+    cur = {
+        "REFIT_INTERVAL":  str(g("REFIT_INTERVAL", BASE["refit"])),
+        "ENSEMBLE_MODELS": "+".join(g("ENSEMBLE_MODELS", BASE["ens"])),
+        "MAX_TRAIN_SIZE":  str(g("MAX_TRAIN_SIZE", BASE["maxt"])),
+        "MIN_TRAIN_SIZE":  str(g("MIN_TRAIN_SIZE", BASE["mint"])),
+        # PCA has no config constant — it is a literal at the live engine.fit call site
+        # (app.py: n_pca_components=20). Reference the study's baseline, which mirrors it.
+        "PCA_COMPONENTS":  str(BASE["pca"]),
+    }
+    # RIDGE_ALPHAS is a labelled grid here; match the live tuple to its label.
+    live_ra = tuple(g("RIDGE_ALPHAS", BASE["ralpha"]))
+    cur["RIDGE_ALPHAS"] = next(
+        (label for label, ov in _cfgs()["RIDGE_ALPHAS"] if tuple(ov.get("ralpha", ())) == live_ra),
+        "default(.01..100)")
+    return cur
+
+
 def aggregate():
     d = pd.read_csv(RESULTS_CSV)
     d = d[np.isfinite(d["ic"])]
+    cur = _live_cur()
     print("\n" + "=" * 78)
     print("  POST-PURGE AARAMBH TUNING — mean OOS IC (non-overlapping)")
-    print("  current defaults: REFIT=5 · ENS=ols+huber · MAX=750 · MIN=500 · PCA=20")
+    print(f"  current defaults (live config): REFIT={cur['REFIT_INTERVAL']} · "
+          f"ENS={cur['ENSEMBLE_MODELS']} · MAX={cur['MAX_TRAIN_SIZE']} · "
+          f"MIN={cur['MIN_TRAIN_SIZE']} · PCA={cur['PCA_COMPONENTS']}")
     print("  NOTE: non-ENSEMBLE levers use a fast ridge+ols base (relative ranking is")
     print("  what matters); ENSEMBLE_MODELS is tested with the real baskets.")
     print("=" * 78)
-    cur = {"REFIT_INTERVAL": "5", "ENSEMBLE_MODELS": "ols+huber", "MAX_TRAIN_SIZE": "750",
-           "MIN_TRAIN_SIZE": "500", "PCA_COMPONENTS": "20", "RIDGE_ALPHAS": "default(.01..100)"}
     recs = {}
+    any_leak = False
+    any_degen = False
     for lever in d["lever"].unique():
         sub = d[d["lever"] == lever]
         print(f"\n  {lever}")
@@ -239,15 +296,38 @@ def aggregate():
             cf = s[s["class"] == "Cmdty/FX"]["ic"].mean()
             ie = s[s["class"] == "India-Eq"]["ic"].mean()
             us = s[s["class"] == "US-Eq"]["ic"].mean()
+            leak = any(np.isfinite(x) and abs(x) > _LEAK_IC for x in (ic10, ic20, comb, cf, ie, us))
+            any_leak = any_leak or leak
+            # Degenerate window: a MAX/MIN_TRAIN value below the model's fitting floor.
+            degen = (lever in ("MAX_TRAIN_SIZE", "MIN_TRAIN_SIZE")
+                     and str(v).isdigit() and int(v) < _MIN_SANE_WINDOW)
+            any_degen = any_degen or degen
             mark = "  ←current" if str(v) == cur.get(lever, "") else ""
+            flag = "  ⚠LEAK" if leak else ("  ⚠small-win" if degen else "")
             print(f"    {str(v):<18} {ic10:>+7.3f} {ic20:>+7.3f} {comb:>+9.3f} "
-                  f"{cf:>+9.3f} {ie:>+9.3f} {us:>+7.3f}{mark}")
-            if np.isfinite(comb) and comb > best[1]:
+                  f"{cf:>+9.3f} {ie:>+9.3f} {us:>+7.3f}{mark}{flag}")
+            # A ⚠LEAK (leaked) or ⚠small-win (degenerate) row is NEVER recommendable.
+            if np.isfinite(comb) and not leak and not degen and comb > best[1]:
                 best = (str(v), comb)
         recs[lever] = best
+    if any_degen:
+        print(f"\n  NOTE: window values < {_MIN_SANE_WINDOW} are ⚠small-win — the post-purge fit "
+              "collapses to a near-\n  constant forecast (noise, not skill); shown for reference "
+              "but EXCLUDED from the\n  recommendation. Trust only windows large enough to fit the model.")
+    if any_leak:
+        print("\n" + "!" * 78)
+        print(f"  LEAKAGE DETECTED — one or more rows had |IC| > {_LEAK_IC:.2f}, impossible as")
+        print("  real forward-return skill at these horizons (the honest edge is ~0). It is")
+        print("  forward-LABEL leakage — almost always a too-small MAX/MIN_TRAIN_SIZE starving")
+        print("  the walk-forward purge gap. ⚠LEAK rows are EXCLUDED from the recommendations")
+        print("  below; fix the engine/window and re-run before trusting anything here.")
+        print("!" * 78)
     print("\n" + "=" * 78)
-    print("  RECOMMENDED post-purge defaults (best by combined 10d+20d IC):")
+    print("  RECOMMENDED post-purge defaults (best NON-LEAKED row by combined 10d+20d IC):")
     for lever, (v, ic) in recs.items():
+        if v is None:
+            print(f"    {lever:<18} {'—':<18} (no clean row — every value tripped the leak guard)")
+            continue
         chg = "" if str(v) == cur.get(lever, "") else f"   ← CHANGE from {cur.get(lever)}"
         print(f"    {lever:<18} {str(v):<18} (IC {ic:+.3f}){chg}")
 
@@ -256,4 +336,7 @@ if __name__ == "__main__":
     if "--agg" in sys.argv:
         aggregate()
     else:
+        if "--fresh" in sys.argv and os.path.exists(RESULTS_CSV):
+            os.remove(RESULTS_CSV)
+            print(f"--fresh: cleared results cache {RESULTS_CSV}", flush=True)
         run()

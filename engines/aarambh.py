@@ -426,7 +426,7 @@ class FairValueEngine:
                 self.model_spread[t_start_res:t_end_res] = spreads
                 last_models, valid_cols = models, v_cols
             except Exception as e:
-                logging.warning("Walk-forward chunk failed [%d:%d]: %s", t_start, t_end, e)
+                _warn_once(f"Walk-forward chunk [{t_start}:{t_end}]", e)
 
             if progress_callback:
                 progress_callback((i + 1) / total_chunks, f"Walking Forward... ({t_end}/{n})")
@@ -460,12 +460,26 @@ class FairValueEngine:
             start_idx = max_lookback
 
         # Purge gap: drop the last `purge` training rows whose forward-return
-        # labels overlap the forecast window [t_start, …]. Guard against starving
-        # the window (keep ≥50 rows); otherwise fall back to no purge for the chunk.
+        # labels overlap the forecast window [t_start, …].
         purge = getattr(self, "purge", 0)
         train_end = t_start - purge
         if train_end - start_idx < 50:
-            train_end = t_start
+            # A starved window must NOT be rescued by dropping the purge in
+            # forward_signal mode: y[s] is the (s, s+h] forward-return label, so
+            # setting train_end = t_start trains on rows whose label overlaps the
+            # forecast point — reintroducing the exact overlapping-label leakage
+            # the purge exists to remove. Empirically this inflated the OOS forecast
+            # IC toward +1 at a too-small MAX/MIN_TRAIN_SIZE (a money-printer that
+            # vanishes once the window is large enough for the gap to survive — the
+            # 2026-07 tuning report's smoking gun, MAX_TRAIN=15/30/50 → IC ≈ +0.85).
+            # Keep the purged end; a starved fit falls back to the purged train-mean
+            # below (weak, but leak-free). Only LEVELS mode (y a per-period level,
+            # no forward-window overlap) may safely drop the gap. At a sane
+            # MIN_TRAIN_SIZE (>> purge) this branch is never reached.
+            if getattr(self, "forward_signal", False) and purge > 0:
+                train_end = max(start_idx + 1, train_end)
+            else:
+                train_end = t_start
 
         models, scaler, valid_cols = self._fit_ensemble(
             X[start_idx:train_end], y[start_idx:train_end], t_start, global_weights,

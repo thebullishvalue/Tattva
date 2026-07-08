@@ -29,8 +29,8 @@ LOOKBACK_WINDOWS = (5, 10, 20, 50, 100)
 # VALUES PROVISIONAL — under active re-tuning, not settled. Re-tune on NON-OVERLAPPING
 # OOS rank IC via research/aarambh_tuning_study.py (+ research/confirm_max_sweep.py for
 # the MAX×MIN interaction), then refactor this note with the results.
-MIN_TRAIN_SIZE = 30
-MAX_TRAIN_SIZE = 30
+MIN_TRAIN_SIZE = 750
+MAX_TRAIN_SIZE = 1000
 REFIT_INTERVAL = 7
 RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0)
 HUBER_EPSILON = 1.35
@@ -136,12 +136,12 @@ DDM_LONG_RUN_VAR = 100.0
 # breadth-oscillator OOS IC vs forward return).
 # VALUES PROVISIONAL — under active re-tuning; refactor this note once those studies
 # have a clean result.
-NIRNAY_MSF_LENGTH = 14            # MSF oscillator rolling-window length
-NIRNAY_ROC_LEN = 10              # rate-of-change lookback inside MSF
-NIRNAY_REGIME_SENSITIVITY = 0.5  # clarity-weight exponent (must match the value the
+NIRNAY_MSF_LENGTH = 20            # MSF oscillator rolling-window length
+NIRNAY_ROC_LEN = 14              # rate-of-change lookback inside MSF
+NIRNAY_REGIME_SENSITIVITY = 1.5  # clarity-weight exponent (must match the value the
                                  # engine actually runs — was a stale 1.0 here)
-NIRNAY_BASE_WEIGHT = 0.0         # MSF vs MMR base blend (0.4 → 60% MSF)
-NIRNAY_MMR_NUM_VARS = 12          # top-N macro drivers selected per row in MMR
+NIRNAY_BASE_WEIGHT = 0.6         # MSF vs MMR base blend (0.4 → 60% MSF)
+NIRNAY_MMR_NUM_VARS = 5          # top-N macro drivers selected per row in MMR
 
 # Nirnay condition thresholds (unified oscillator scale: -10 to +10). Classify the
 # per-instrument signal into Oversold / Overbought / Neutral and gate buy/sell +

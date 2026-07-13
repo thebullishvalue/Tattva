@@ -49,6 +49,13 @@ def _safe_array_operation(
 
 
 # ─── Transformations ─────────────────────────────────────────────────────────
+# CANONICAL versions of Nirnay's private helpers (audit finding F11): this
+# module previously carried its OWN copies of sigmoid/zscore/ATR that were
+# dead (engines/nirnay.py always called its private _sigmoid/_zscore_clipped/
+# _calculate_atr instead) and, worse, NOT equivalent — zscore_clipped here
+# lacked Nirnay's ffill/min_periods=1/causal-shift(1) semantics, so a future
+# caller picking THIS module's version would silently get different numbers.
+# Nirnay now imports these; there is exactly one implementation of each.
 
 
 def sigmoid(x: np.ndarray | float, scale: float = 1.0) -> np.ndarray | float:
@@ -67,7 +74,12 @@ def sigmoid(x: np.ndarray | float, scale: float = 1.0) -> np.ndarray | float:
 
 
 def zscore_clipped(series: pd.Series, window: int, clip: float = 3.0) -> pd.Series:
-    """Rolling z-score with outlier clipping.
+    """Rolling CAUSAL z-score with outlier clipping.
+
+    Uses ``shift(1)`` so today's own value never biases the mean/std it is
+    scored against, and ffills/zero-fills leading gaps so the oscillator
+    stack (which consumes this on wide, sparsely-populated macro frames)
+    doesn't propagate NaN indefinitely.
 
     Parameters
     ----------
@@ -78,63 +90,15 @@ def zscore_clipped(series: pd.Series, window: int, clip: float = 3.0) -> pd.Seri
     clip : float
         Maximum absolute z-score before clipping.
     """
-    roll_mean = series.rolling(window).mean().shift(1)
-    roll_std = series.rolling(window).std().shift(1)
-    z = (series - roll_mean) / roll_std.replace(0, np.nan)
+    series_filled = series.ffill().fillna(0)
+    roll_mean = series_filled.rolling(window=window, min_periods=1).mean().shift(1).fillna(0)
+    roll_std = series_filled.rolling(window=window, min_periods=1).std().shift(1).fillna(0)
+    z = (series_filled - roll_mean) / roll_std.replace(0, np.nan)
     return z.clip(-clip, clip).fillna(0)
-
-
-def percentile_rank(value: float, history: np.ndarray) -> float:
-    """Percentile rank of a value within a historical distribution.
-
-    Parameters
-    ----------
-    value : float
-        The value to rank.
-    history : np.ndarray
-        Historical observations.
-    """
-    if len(history) == 0:
-        return 0.5
-    return float(np.sum(history <= value) / len(history))
-
-
-def adaptive_threshold(history: np.ndarray, percentile: float) -> float:
-    """Value at the given percentile of historical observations.
-
-    Parameters
-    ----------
-    history : np.ndarray
-        Historical observations.
-    percentile : float
-        Percentile (0-100) to compute.
-    """
-    if len(history) == 0:
-        return 0.0
-    return float(np.percentile(history, percentile))
-
-
-def gaussian_pdf(x: float, mean: float, std: float) -> float:
-    """Gaussian probability density function.
-
-    Parameters
-    ----------
-    x : float
-        Point to evaluate.
-    mean : float
-        Distribution mean.
-    std : float
-        Distribution standard deviation.
-    """
-    if std < 1e-8:
-        return 1.0 if abs(x - mean) < 1e-8 else 0.0
-    return float(np.exp(-0.5 * ((x - mean) / std) ** 2) / (std * np.sqrt(2 * np.pi)))
 
 
 def calculate_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     """Average True Range — exponential moving average variant.
-
-    Matches the original Nirnay implementation.
 
     Parameters
     ----------
@@ -143,13 +107,10 @@ def calculate_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     length : int
         Smoothing period.
     """
-    high = df["High"] if "High" in df.columns else df["high"]
-    low = df["Low"] if "Low" in df.columns else df["low"]
-    close = df["Close"] if "Close" in df.columns else df["close"]
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    high_low = df["High"] - df["Low"]
+    high_close = (df["High"] - df["Close"].shift()).abs()
+    low_close = (df["Low"] - df["Close"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / length, adjust=False).mean()
 
 

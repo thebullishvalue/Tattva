@@ -402,3 +402,106 @@ def summarize_forward(periods: list[dict], hold_horizons: tuple[int, ...]) -> di
                 "n": len(vals),
             }
     return out
+
+
+def analog_prediction_series(
+    ts: pd.DataFrame,
+    target_col: str,
+    hold_horizon: int,
+    *,
+    mom_window: int = 20,
+    top_n: int = 10,
+    step: int | None = None,
+) -> pd.DataFrame:
+    """Historical analog predictions over time — what the matcher would have
+    predicted at each past as-of date, using only information available then.
+
+    At each as-of position ``t`` (strided every ``step`` rows, default =
+    ``hold_horizon`` so consecutive evaluations are NON-overlapping):
+      • Candidate pool = rows with position ``p <= t - hold_horizon`` — the
+        analog's forward outcome window ``[p, p+H]`` has fully COMPLETED by
+        ``t``, so the prediction never peeks at an unrealized outcome
+        (mirrors research/hero_study.py's convention).
+      • Engine warm-up rows (``ValidRow`` False — fabricated NetBreadth) are
+        excluded from both the pool and the as-of grid, matching
+        ``find_similar_periods``.
+      • NaN cleaning uses POOL-ONLY column medians per as-of date — a
+        full-sample median would leak future distribution shape into past
+        cleaning (the look-ahead class audit finding F14 removed elsewhere).
+      • Scoring/selection = the SHIPPED config: pure Mahalanobis (ANALOG_W_*
+        1/0/0) under the same Theiler exclusion gap as the live matcher.
+
+    Returns a DataFrame with columns:
+      ``Date``      — the as-of date,
+      ``Predicted`` — analog-median +``hold_horizon``d forward return (%),
+      ``Realized``  — the target's actual +``hold_horizon``d return from that
+                      date (%; NaN for the last as-of dates whose window
+                      hasn't completed — the live predictions).
+    The final row is always the LATEST valid as-of date (appended off-stride
+    if needed) so the series ends at the same prediction the Precedent tab's
+    live cards show. Empty DataFrame when there is insufficient history.
+    """
+    feat, feature_cols = _build_feature_frame(ts, mom_window)
+    if feat.empty or len(feature_cols) < 2:
+        return pd.DataFrame(columns=["Date", "Predicted", "Realized"])
+
+    H = int(hold_horizon)
+    step = int(step) if step else H
+    n = len(feat)
+    F_all = feat[feature_cols].to_numpy(dtype=np.float64)
+    price = feat["Price"].to_numpy(dtype=np.float64)
+    dates = feat["Date"].to_numpy()
+    valid_row = (feat["ValidRow"].to_numpy(dtype=bool)
+                 if "ValidRow" in feat.columns else np.ones(n, dtype=bool))
+    gap = max(int(mom_window), H, 1)
+
+    start = max(mom_window + 30, H + 30)
+    as_of_grid = list(range(start, n, step))
+    if as_of_grid and as_of_grid[-1] != n - 1:
+        as_of_grid.append(n - 1)   # always include the latest as-of date
+
+    rows: list[dict] = []
+    for t in as_of_grid:
+        if not valid_row[t]:
+            continue                       # as-of state itself is warm-up fabrication
+        pool_end = t + 1 - H               # outcomes completed by t (p + H <= t)
+        if pool_end < 30:
+            continue
+        pool_pos = np.flatnonzero(valid_row[:pool_end])
+        if len(pool_pos) < 30:
+            continue
+
+        Fp = F_all[pool_pos].copy()
+        cur = F_all[t].copy()
+        # Pool-only median fill (causal cleaning).
+        for j in range(Fp.shape[1]):
+            col = Fp[:, j]
+            ok = np.isfinite(col)
+            med = float(np.median(col[ok])) if ok.any() else 0.0
+            Fp[~ok, j] = med
+            if not np.isfinite(cur[j]):
+                cur[j] = med
+
+        cov = np.cov(Fp, rowvar=False)
+        if cov.ndim < 2:
+            cov = np.array([[max(float(cov), 1e-6)]])
+        dist = mahalanobis_distance_batch(Fp, cur, cov)
+        dmax = dist.max() if dist.max() > 0 else 1.0
+        sim = 1.0 - dist / dmax
+
+        accepted = select_analogs_theiler(sim, top_n, gap, positions=pool_pos)
+        sel = pool_pos[accepted]
+        fwd = [(price[p + H] / price[p] - 1) * 100.0
+               for p in sel if price[p] > 0]          # p + H <= t < n always
+        if not fwd:
+            continue
+
+        realized = ((price[t + H] / price[t] - 1) * 100.0
+                    if (t + H < n and price[t] > 0) else np.nan)
+        rows.append({
+            "Date": pd.Timestamp(dates[t]) if not isinstance(dates[t], (int, np.integer)) else dates[t],
+            "Predicted": float(np.median(fwd)),
+            "Realized": float(realized) if np.isfinite(realized) else np.nan,
+        })
+
+    return pd.DataFrame(rows, columns=["Date", "Predicted", "Realized"])

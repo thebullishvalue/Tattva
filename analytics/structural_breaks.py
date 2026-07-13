@@ -76,6 +76,8 @@ def _rolling_mean_breaks(
     determined solely from data up to and including that point.
     """
     n = len(series)
+    if n < 3:
+        return []
     window = max(int(n * trim), 5)
     trim_n = int(n * trim)
 
@@ -94,8 +96,12 @@ def _rolling_mean_breaks(
     # Pick top-k non-adjacent peaks; break index maps directly back to the
     # original series (diff[t] reflects the change arriving at t+1).
     break_indices = []
+    if len(diffs) == 0:
+        return break_indices
     diffs_copy = diffs.copy()
     for _ in range(max_breaks):
+        if len(diffs_copy) == 0 or np.max(diffs_copy) == 0:
+            break
         peak = int(np.argmax(diffs_copy))
         if diffs_copy[peak] == 0:
             break

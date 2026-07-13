@@ -46,7 +46,9 @@
     /* ---- Ink ---- */
     --ink-primary: #F1F5F9;
     --ink-secondary: #94A3B8;
-    --ink-tertiary: #4B5563;
+    --ink-tertiary: #5B6675;   /* lifted from #4B5563 (2.55:1) → 3.31:1 on bg-base
+                                  to clear the WCAG UI-contrast floor; still clearly
+                                  the muted/de-emphasized tier (secondary is 7.5:1). */
     --ink-inverse: #0A0E17;
 
     /* ---- Accent palette — Terminal Glass ---- */
@@ -1520,6 +1522,56 @@ footer {
 .signal-card .hero-evidence-row.conflict .hero-text {
     color: var(--ink-primary);
 }
+
+/* DECISION line — the integrated action tier synthesized from ALL evidence
+   rows (see ui/components._synthesize_action). Sits below the evidence it is
+   derived from; tier color mirrors the evidence-dot vocabulary. */
+.signal-card .hero-action {
+    margin-top: var(--sp-5);
+    padding: var(--sp-4) var(--sp-5);
+    border-radius: var(--r-sm);
+    border: 1px solid var(--border);
+    background: rgba(148, 163, 184, 0.06);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--sp-3) var(--sp-4);
+}
+
+.signal-card .hero-action-label {
+    font-family: var(--display);
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--ink-secondary);
+}
+
+.signal-card .hero-action-prose {
+    font-family: var(--data);
+    font-size: 0.76rem;
+    line-height: 1.6;
+    color: var(--ink-secondary);
+}
+
+.signal-card .hero-action-drivers {
+    flex-basis: 100%;
+    font-family: var(--data);
+    font-size: 0.66rem;
+    letter-spacing: 0.02em;
+    color: var(--ink-tertiary);
+}
+
+.signal-card .hero-action.high { border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.08); }
+.signal-card .hero-action.high .hero-action-label { color: var(--emerald); }
+.signal-card .hero-action.moderate { border-color: rgba(52, 211, 153, 0.25); background: rgba(52, 211, 153, 0.05); }
+.signal-card .hero-action.moderate .hero-action-label { color: var(--emerald); }
+.signal-card .hero-action.low { border-color: rgba(212, 168, 83, 0.35); background: rgba(212, 168, 83, 0.07); }
+.signal-card .hero-action.low .hero-action-label { color: #D4A853; }
+.signal-card .hero-action.stand_aside { border-color: rgba(251, 113, 133, 0.4); background: rgba(251, 113, 133, 0.08); }
+.signal-card .hero-action.stand_aside .hero-action-label { color: var(--rose); }
+.signal-card .hero-action.stand_aside .hero-action-prose { color: var(--ink-primary); }
 
 /* ================================================================
    Status badges
@@ -4598,7 +4650,7 @@ div[data-multi-file-uploader] > div {
 
 .kv-table thead th {
     background: linear-gradient(180deg, rgba(10, 14, 23, 0.95) 0%, rgba(10, 14, 23, 0.85) 100%);
-    color: #4B5563;
+    color: var(--ink-tertiary);   /* was hardcoded #4B5563 — now tracks the token */
     font-size: 0.62rem;
     font-weight: 600;
     text-transform: uppercase;

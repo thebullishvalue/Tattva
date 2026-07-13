@@ -146,6 +146,67 @@ def style_axes(fig, y_title: str = "", x_title: str = "", y_range=None, row=None
         hoverformat=".2f",
         **kw,
     )
+    # Backfill a 2-decimal hover on every visible trace. style_axes runs after
+    # all traces are added and right before st.plotly_chart on every chart, so
+    # this is the one place that fixes hover precision for ALL plots at once.
+    apply_default_hover(fig)
+
+
+def apply_default_hover(fig, precision: int = 2) -> None:
+    """Give every visible trace a 2-decimal hover, robustly.
+
+    We do NOT rely on a d3 number format inside the hovertemplate
+    (``%{y:.2f}``): under ``hovermode="x unified"`` Plotly leaves that format
+    UNAPPLIED and the hover leaks full float precision (e.g.
+    "Consensus (50/50): -0.3687992004699925"). Instead the values are
+    pre-formatted to strings in Python and stashed in ``customdata``, then the
+    template just inserts the finished string (``%{customdata[0]}``) — no
+    client-side number formatting involved, so it cannot be ignored.
+
+    Idempotent-ish: skips ``hoverinfo="skip"`` fills. Traces that already carry
+    a hover string via ``customdata`` (i.e. previously processed) are re-set
+    safely. Keeps the marker ``text`` label (e.g. the hero "S. Buy"/"Hold") and
+    the trace name when present.
+    """
+    for tr in fig.data:
+        if getattr(tr, "hoverinfo", None) == "skip":
+            continue
+        # Preserve two kinds of intentional templates:
+        #  • "%{x…}" — traces that show the X value on hover (e.g. the precedent
+        #    Z-vs-forward scatter, "Z: %{x:.2f}"); those run in closest mode where
+        #    d3 formats fine and the X is the point of the hover.
+        #  • "%{customdata…}" — already pre-formatted (by us on a prior pass, so
+        #    this stays idempotent across multi-row style_axes calls, or by a
+        #    caller that wants a custom label with a clipped value).
+        # Everything else (bare traces, and signal lines whose %{y:.2f} silently
+        # fails under x-unified) we (re)format via customdata below.
+        _ht = getattr(tr, "hovertemplate", None)
+        if _ht and ("%{x" in _ht or "%{customdata" in _ht):
+            continue
+        y = getattr(tr, "y", None)
+        if y is None:
+            continue
+        cd = []
+        for v in y:
+            try:
+                if v is None or (isinstance(v, float) and v != v):
+                    cd.append("—")
+                else:
+                    cd.append(f"{float(v):.{precision}f}")
+            except (TypeError, ValueError):
+                cd.append("—")           # non-numeric (category/text) → dash
+        try:
+            tr.customdata = [[s] for s in cd]
+        except (ValueError, TypeError):
+            continue
+        has_text = getattr(tr, "text", None) is not None
+        name = getattr(tr, "name", None)
+        if has_text:
+            tr.hovertemplate = "%{customdata[0]} · %{text}<extra></extra>"
+        elif name:
+            tr.hovertemplate = "%{fullData.name}: %{customdata[0]}<extra></extra>"
+        else:
+            tr.hovertemplate = "%{customdata[0]}<extra></extra>"
 
 
 def inject_css() -> None:

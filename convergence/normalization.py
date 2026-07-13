@@ -8,9 +8,29 @@ card values are guaranteed to match the plot.
 
 Pipeline:
   align(aarambh_ts, nirnay_daily)   →  dates, raw_a[], raw_n[]
-  compute_norm_params(raw_a, raw_n) →  {mu_a, sigma_a, mu_n, sigma_n}
-  zscore_clip(arr, mu, sigma)       →  (arr - mu) / sigma / 3 clipped to [-1, +1]
+  causal_normalize(arr)             →  causal expanding-z, /3, clipped to [-1, +1]
   classify_normalized_signal(v)     →  STRONG BUY / BUY / HOLD / SELL / STRONG SELL
+
+TWO DISTINCT SIGNALS, TWO DISTINCT CLASSIFIERS (audit finding F1) ─────────────
+This module computes the NORMALIZED CONSENSUS — a causal expanding-z average
+of raw Aarambh/Nirnay readings. It is a DIAGNOSTIC (shown on the Convergence
+tab, reconciled explicitly in the hero evidence row), not what Intelligence
+Mode calibrates. ``convergence.intelligence.ConvergenceTuner`` learns its
+(weights, thresholds) against the DIRECTIONAL COMPOSITE
+(``-consensus_direction * (agreement+1)/2``, computed from the calibrated
+dim_* weights, with consensus_direction the CONTINUOUS mean of the engines'
+signed strengths — see cross_validator's orientation block) — a
+differently-constructed distribution than this module's expanding-z
+consensus of raw engine readings. Applying one set of learned cut-points to
+both would classify a series they were never validated on.
+So: ``classify_normalized_signal`` here always uses the FACTORY thresholds
+(the consensus is never calibrated). The calibrated thresholds instead
+classify ``convergence_score`` (the composite, ±100 scale, AFTER
+``intelligence.apply_calibrated_weights`` has re-weighted it) via
+``classify_convergence_score`` below — that pairing is what
+``app.py``'s hero card and Convergence-tab headline read as the product
+signal (see ``convergence.intelligence`` module docstring for the full
+calibration story).
 """
 
 from __future__ import annotations
@@ -25,8 +45,23 @@ import pandas as pd
 # These match the plot marker thresholds and are also the fallback when
 # Intelligence Mode is not active. The calibrated thresholds in a saved
 # profile may be asymmetric (`buy_strong != -sell_strong`).
-_STRONG = 0.5
-_MODERATE = 0.3
+#
+# TWO SEPARATE FACTORY SETS — one per distribution (the F1 principle:
+# thresholds are only valid for the distribution they were anchored on).
+# BOTH are anchored at the pooled p75 (moderate) / p90 (strong) of their own
+# |signal| distribution — the markers-study percentile convention — so a
+# "STRONG" label means the same extremeness on the hero card, the Unified
+# Signal plot markers, and the hero-history bands (one vocabulary).
+#   • DEFAULT_THRESHOLDS   — for the NORMALIZED CONSENSUS (expanding-z avg).
+#   • COMPOSITE_THRESHOLDS — for the DIRECTIONAL COMPOSITE (raw/calibrated
+#     product signal).
+# Study: `hero_thresholds` (research/hero_threshold_study.py) — its
+# threshold-separation sweep finds no pair with a believable forward-return
+# spread, so BOTH sets carry the occupancy-convention anchors PRINTED by the
+# latest suite run (per its decision rule); measurements live in
+# research/TUNING_COVERAGE.md and the CHANGELOG.
+_STRONG = 0.41
+_MODERATE = 0.26
 
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "buy_strong":     -_STRONG,
@@ -35,20 +70,31 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "sell_strong":    +_STRONG,
 }
 
+COMPOSITE_THRESHOLDS: dict[str, float] = {
+    "buy_strong":     -0.16,
+    "buy_moderate":   -0.11,
+    "sell_moderate":  +0.11,
+    "sell_strong":    +0.16,
+}
+
 
 def classify_normalized_signal(
     v: float,
     thresholds: dict[str, float] | None = None,
 ) -> str:
-    """Map a normalized convergence value (in ``[-1, +1]``) to a signal label.
+    """Map a normalized-CONSENSUS value (in ``[-1, +1]``) to a signal label.
 
     Args:
-        v: the normalized convergence value.
-        thresholds: optional dict with keys ``buy_strong``, ``buy_moderate``,
-            ``sell_moderate``, ``sell_strong``. When ``None``, falls back to
-            the symmetric factory defaults (``±0.3`` / ``±0.5``). Used by
-            Intelligence Mode to apply calibrated thresholds from a saved
-            profile.
+        v: the normalized consensus value (see ``compute_normalized_convergence``).
+        thresholds: optional override. When ``None``, uses the symmetric factory
+            defaults (``DEFAULT_THRESHOLDS`` — p75/p90 occupancy-anchored).
+
+    NOTE (audit finding F1): this classifies the normalized CONSENSUS, a
+    different distribution than the one Intelligence Mode calibrates (see
+    module docstring). Do not pass a saved profile's learned thresholds here —
+    they were fit against ``classify_convergence_score``'s input, not this
+    function's. ``compute_normalized_convergence`` (below) always calls this
+    with the factory defaults for that reason.
     """
     t = thresholds or DEFAULT_THRESHOLDS
     if v <= t["buy_strong"]:
@@ -60,6 +106,30 @@ def classify_normalized_signal(
     if v >= t["sell_moderate"]:
         return "SELL"
     return "HOLD"
+
+
+def classify_convergence_score(
+    score_pm100: float,
+    thresholds: dict[str, float] | None = None,
+) -> str:
+    """Map ``convergence_score`` (the directional composite, ``±100`` scale) to
+    a signal label (thresholds on the ``±1`` scale — rescale by /100).
+
+    This is the pairing Intelligence Mode actually calibrates:
+    ``convergence.intelligence.ConvergenceTuner`` learns ``(weights,
+    thresholds)`` by scoring ``_composite_signal`` (which — after
+    ``apply_calibrated_weights`` re-weights ``convergence_df`` — IS
+    ``convergence_score / 100``) against forward returns and binning it with
+    these exact thresholds. Use this function (not
+    ``classify_normalized_signal``) wherever the raw or calibrated product
+    signal is classified — the hero card and the Convergence tab's headline
+    (audit findings F1/F2). ``thresholds=None`` falls back to
+    ``COMPOSITE_THRESHOLDS`` — the composite's OWN data-anchored factory
+    cut-points, NOT the consensus's DEFAULT_THRESHOLDS (which sit far into the
+    composite's tail and would label almost every day HOLD).
+    """
+    return classify_normalized_signal(float(score_pm100) / 100.0,
+                                      thresholds or COMPOSITE_THRESHOLDS)
 
 
 def _nirnay_signal_column(df: pd.DataFrame) -> str | None:
@@ -133,75 +203,83 @@ def align_aarambh_nirnay(
     return dates, raw_a, raw_n
 
 
-def compute_norm_params(raw_a: list[float], raw_n: list[float]) -> dict[str, float]:
-    """Compute mean/std for z-scoring using only history up to the last point.
+def causal_normalize(arr: np.ndarray) -> np.ndarray:
+    """Causal expanding-window z-score, ``/3`` and clipped to ``[-1, +1]``.
 
-    Uses an expanding window anchored at the first observation so the stats
-    at each point are computed only from data available at that time.
-    The returned mu/sigma reflect the state at the END of the series (i.e.
-    the most recent causal estimate) and are used to normalize the latest
-    value for the metric cards.  ``sigma`` is floored at 1e-10.
+    Each point is normalised using only the history available up to that
+    date (an expanding, not rolling, window) — no future data leakage.
+    SINGLE SOURCE OF TRUTH for this transform: it previously had two
+    hand-written copies (here and in ``ui/tabs/tab_convergence.py``'s
+    per-config cache-building block) that had to be kept in exact sync by
+    inspection for the tab's plot to match this module's card values (audit
+    finding F16). Both now call this helper.
     """
-    arr_a = np.array(raw_a, dtype=np.float64) if raw_a else np.array([])
-    arr_n = np.array(raw_n, dtype=np.float64) if raw_n else np.array([])
-
-    def _expanding_stats(arr: np.ndarray) -> tuple[float, float]:
-        if len(arr) == 0:
-            return 0.0, 1.0
-        s = pd.Series(arr)
-        mu = float(s.expanding().mean().iloc[-1])
-        sigma = max(float(s.expanding().std().iloc[-1]), 1e-10) if len(arr) > 1 else 1.0
-        return mu, sigma
-
-    mu_a, sigma_a = _expanding_stats(arr_a)
-    mu_n, sigma_n = _expanding_stats(arr_n)
-    return {"mu_a": mu_a, "sigma_a": sigma_a, "mu_n": mu_n, "sigma_n": sigma_n}
-
-
-def zscore_clip(arr: np.ndarray, mu: float, sigma: float) -> np.ndarray:
-    """Z-score with ``/3`` and clip to ``[-1, +1]`` (matches plot convention)."""
-    if sigma < 1e-10:
-        return np.zeros_like(arr)
+    arr = np.asarray(arr, dtype=np.float64)
+    if len(arr) == 0:
+        return arr
+    s = pd.Series(arr)
+    mu = s.expanding().mean().to_numpy()
+    sigma = s.expanding().std().clip(lower=1e-10).fillna(1.0).to_numpy()
     return np.clip((arr - mu) / sigma / 3.0, -1.0, 1.0)
+
+
+def consensus_series(
+    aarambh_ts: pd.DataFrame | None,
+    nirnay_daily: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """FULL normalized-consensus history: the exact series the Unified Signal
+    plot's top row draws and — since the consensus-headline product decision —
+    the series whose last point IS the hero card's headline value.
+
+    Columns: ``NormA`` (causal-z Aarambh ConvictionRaw), ``NormN`` (causal-z
+    Nirnay Avg_Signal), ``Consensus`` (their 50/50 mean, in [-1, +1], negative
+    = bullish), indexed by DatetimeIndex. Empty frame when there is no
+    Aarambh∩Nirnay overlap. Single source of truth — the latest-point dict
+    (``compute_normalized_convergence``) and the hero-history plot both
+    derive from this construction, so card, plot, and hero can never drift.
+    """
+    dates, raw_a, raw_n = align_aarambh_nirnay(aarambh_ts, nirnay_daily)
+    if not raw_a:
+        return pd.DataFrame(columns=["NormA", "NormN", "Consensus", "RawA", "RawN"])
+    arr_a = np.array(raw_a, dtype=np.float64)
+    arr_n = np.array(raw_n, dtype=np.float64)
+    norm_a = causal_normalize(arr_a)
+    norm_n = causal_normalize(arr_n)
+    idx = pd.to_datetime(pd.Index(dates), errors="coerce")
+    return pd.DataFrame(
+        {"NormA": norm_a, "NormN": norm_n, "Consensus": (norm_a + norm_n) / 2.0,
+         "RawA": arr_a, "RawN": arr_n},
+        index=idx,
+    )
 
 
 def compute_normalized_convergence(
     aarambh_ts: pd.DataFrame | None,
     nirnay_daily: pd.DataFrame | None,
-    thresholds: dict[str, float] | None = None,
 ) -> dict | None:
-    """Latest normalized convergence value + per-system contributions.
+    """Latest normalized-CONSENSUS value + per-system contributions.
 
-    Mirrors what the Unified Signal plot's top row displays at its last point.
-    Returns ``None`` if alignment yields no rows.
+    The last point of :func:`consensus_series` — what the Unified Signal
+    plot's top row displays at its right edge, the TATTVA CONVICTION card
+    shows, and (per the consensus-headline product decision) the hero card
+    headlines. Returns ``None`` if alignment yields no rows.
 
-    Args:
-        aarambh_ts, nirnay_daily: time-series inputs.
-        thresholds: optional calibrated thresholds (from Intelligence Mode).
-            When ``None``, the symmetric factory defaults are used for the
-            ``signal`` label.
+    Its ``signal`` label always uses the symmetric FACTORY thresholds (no
+    ``thresholds`` parameter: a previous revision accepted the Intelligence
+    Mode calibrated thresholds here, applying cut-points learned against a
+    differently-shaped distribution — audit finding F1). The calibrated
+    composite is classified separately via ``classify_convergence_score``.
     """
-    _, raw_a, raw_n = align_aarambh_nirnay(aarambh_ts, nirnay_daily)
-    if not raw_a:
+    ser = consensus_series(aarambh_ts, nirnay_daily)
+    if ser.empty:
         return None
-    arr_a = np.array(raw_a, dtype=np.float64)
-    arr_n = np.array(raw_n, dtype=np.float64)
-    # Causal expanding-window z-scores: each point is normalised using only
-    # the history available up to that date (no future data leakage).
-    s_a, s_n = pd.Series(arr_a), pd.Series(arr_n)
-    exp_mu_a = s_a.expanding().mean()
-    exp_sigma_a = s_a.expanding().std().clip(lower=1e-10).fillna(1.0)
-    exp_mu_n = s_n.expanding().mean()
-    exp_sigma_n = s_n.expanding().std().clip(lower=1e-10).fillna(1.0)
-    norm_a = np.clip((arr_a - exp_mu_a.to_numpy()) / exp_sigma_a.to_numpy() / 3.0, -1.0, 1.0)
-    norm_n = np.clip((arr_n - exp_mu_n.to_numpy()) / exp_sigma_n.to_numpy() / 3.0, -1.0, 1.0)
-    norm_avg = (norm_a + norm_n) / 2.0
-    latest = float(norm_avg[-1])
+    last = ser.iloc[-1]
+    latest = float(last["Consensus"])
     return {
         "value": latest,
-        "signal": classify_normalized_signal(latest, thresholds),
-        "aarambh_norm": float(norm_a[-1]),
-        "nirnay_norm": float(norm_n[-1]),
-        "aarambh_raw": float(arr_a[-1]),
-        "nirnay_raw": float(arr_n[-1]),
+        "signal": classify_normalized_signal(latest),
+        "aarambh_norm": float(last["NormA"]),
+        "nirnay_norm": float(last["NormN"]),
+        "aarambh_raw": float(last["RawA"]),
+        "nirnay_raw": float(last["RawN"]),
     }

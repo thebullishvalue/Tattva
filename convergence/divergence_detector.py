@@ -69,7 +69,15 @@ class CrossSystemDivergenceDetector:
         self.lookback = lookback
         self.persistence_threshold = persistence_threshold
         self.events: list[DivergenceEvent] = []
-        self._recent_types: list[str] = []
+        # (date, divergence_type) pairs for persistence tracking — a DATE
+        # window, not a detection-count window (audit finding F7). `detect()`
+        # is only called for dates where SOME divergence fires (it returns
+        # None otherwise), so a plain "last `lookback` detections" list can
+        # span months of calendar time when divergences are sparse — the
+        # PERSISTENT flag then fires on events that aren't actually clustered
+        # in time. Storing the date lets the window be pruned by calendar
+        # distance from the current date, not by detection count.
+        self._recent: list[tuple[str, str]] = []
 
     def detect(
         self,
@@ -156,11 +164,21 @@ class CrossSystemDivergenceDetector:
         if div_type is None:
             return None
 
-        self._recent_types.append(div_type)
-        if len(self._recent_types) > self.lookback:
-            self._recent_types.pop(0)
+        self._recent.append((date, div_type))
+        # Prune to a DATE window (calendar days back from THIS event's date),
+        # not a count window — a sparse run of divergences should not read as
+        # "persistent" just because the count window happens to span months.
+        try:
+            _cutoff = pd.Timestamp(date) - pd.Timedelta(days=int(self.lookback * 1.5))
+            self._recent = [(d, t) for d, t in self._recent if pd.Timestamp(d) >= _cutoff]
+        except (ValueError, TypeError):
+            # Non-parseable date sentinel (e.g. an integer row index used by
+            # some research callers) — fall back to the old count-window
+            # behaviour rather than raising.
+            if len(self._recent) > self.lookback:
+                self._recent = self._recent[-self.lookback:]
 
-        persistent = self._recent_types.count(div_type) >= self.persistence_threshold
+        persistent = sum(1 for _, t in self._recent if t == div_type) >= self.persistence_threshold
 
         event = DivergenceEvent(
             date=date,

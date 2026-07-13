@@ -15,7 +15,7 @@ for two structural decisions in the Convergence layer:
      ``convergence/normalization.py``: the four cut-points that map a
      normalized convergence value (in [-1, +1]) to STRONG BUY / BUY /
      HOLD / SELL / STRONG SELL. The static defaults are symmetric
-     (±0.3 moderate, ±0.5 strong). Real return distributions are
+     (p75/p90-anchored per distribution). Real return distributions are
      skewed — optimal buy/sell thresholds usually aren't symmetric.
 
 Objective: maximize the mean Spearman Information Coefficient of the
@@ -62,7 +62,26 @@ from core.config import (
 
 log = logging.getLogger(__name__)
 
-PROFILE_VERSION = "v1-tattva-convergence"
+# Bumped v1 -> v2 (audit findings F1/F2/F3): profiles saved under v1 were
+# calibrated under (a) an asymmetric DDM gain across lenses (Positional's
+# steady-state gain was 2x Tactical's — see core.config.SIGNAL_HORIZONS'
+# ddm_drift/ddm_leak invariant note) and (b) a UI that applied the learned
+# thresholds to the normalized-consensus diagnostic instead of the composite
+# they were actually scored against. Both changes shift what "calibrated"
+# means, so a v1 profile's (weights, thresholds) are stale evidence for the
+# CURRENT pipeline — load_profile_for below refuses to load a version
+# mismatch (treats it as absent, prompting fresh calibration) rather than
+# silently applying thresholds tuned for a different signal.
+#
+# Bumped v2 -> v3 (continuous consensus direction): the convergence_score's
+# orientation changed from a hard {-1,0,+1} consensus gate — which a real-
+# data diagnosis showed hard-zeroed the composite on 60.7% of days (Gold,
+# 810 scored days), making the calibration objective rank mostly-tied
+# zeros — to the CONTINUOUS mean of the engines' signed strengths (see
+# cross_validator's orientation block). v2 profiles were fit against the
+# spike-train distribution and their thresholds/ICs do not describe the
+# continuous signal.
+PROFILE_VERSION = "v3-tattva-convergence"
 
 # Disk location: ~/.cache/tattva/intelligence/profiles.json
 _PROFILE_DIR = Path.home() / ".cache" / "tattva" / "intelligence"
@@ -76,13 +95,17 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "w_regime":    CONV_WEIGHT_REGIME,
 }
 
-DEFAULT_THRESHOLDS: dict[str, float] = {
-    # Symmetric defaults from convergence/normalization.py
-    "buy_strong":     -0.5,   # below this → STRONG BUY
-    "buy_moderate":   -0.3,   # below this (but above buy_strong) → BUY
-    "sell_moderate":  +0.3,   # above this (but below sell_strong) → SELL
-    "sell_strong":    +0.5,   # above this → STRONG SELL
-}
+# The composite's data-anchored factory cut-points — single source of truth
+# is convergence.normalization.COMPOSITE_THRESHOLDS (pooled p75/p90 of
+# |composite|; re-validated 2026-07-12 on 8 targets — see the provenance
+# comment there). These bin the DIRECTIONAL COMPOSITE, the
+# exact quantity this module's tuner scores — NOT the normalized consensus,
+# whose p75/p90 defaults live separately in
+# normalization.DEFAULT_THRESHOLDS (a previous revision used the consensus
+# numbers here too, which sat deep in the composite's tail).
+from convergence.normalization import COMPOSITE_THRESHOLDS as _COMPOSITE_THRESHOLDS
+
+DEFAULT_THRESHOLDS: dict[str, float] = dict(_COMPOSITE_THRESHOLDS)
 
 # Forward-return horizons for IC scoring (trading days)
 HOLD_HORIZONS = (3, 5, 10, 20)
@@ -160,7 +183,7 @@ def _read_all() -> dict[str, dict]:
     if not _PROFILE_FILE.exists():
         return {}
     try:
-        with open(_PROFILE_FILE, "r") as f:
+        with open(_PROFILE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         log.warning("Profile file read failed: %s", e)
@@ -171,7 +194,7 @@ def _write_all(profiles: dict[str, dict]) -> None:
     _ensure_dir()
     tmp = _PROFILE_FILE.with_suffix(".json.tmp")
     try:
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(profiles, f, indent=2, default=str)
         tmp.replace(_PROFILE_FILE)
     except Exception as e:
@@ -189,11 +212,24 @@ def save_profile(profile: IntelligenceProfile) -> None:
 
 
 def load_profile_for(universe: str, index: str | None) -> IntelligenceProfile | None:
-    """Load the profile fit for this (universe, index), or None."""
+    """Load the profile fit for this (universe, index), or None.
+
+    Refuses a version mismatch (treats it as absent) rather than silently
+    applying (weights, thresholds) calibrated under a since-changed pipeline
+    — see PROFILE_VERSION's docstring. The stale entry is left on disk (not
+    deleted) so ``list_profiles``/the Passport can still show it existed;
+    the NEXT calibration run overwrites it under the current key.
+    """
     profiles = _read_all()
     key = _profile_key(universe, index)
     raw = profiles.get(key)
     if not raw:
+        return None
+    if raw.get("version") != PROFILE_VERSION:
+        log.info(
+            "Profile %s is version %r, current is %r — ignoring stale calibration.",
+            key, raw.get("version"), PROFILE_VERSION,
+        )
         return None
     try:
         return IntelligenceProfile.from_dict(raw)
@@ -317,7 +353,11 @@ def _composite_signal(frame: pd.DataFrame, w: dict[str, float]) -> np.ndarray:
         agreement  = Σ wₖ · (2·score_k − 1)            ∈ [−1, +1]  (agreement strength)
         directional = −consensus_direction · (agreement + 1) / 2   (negative = bullish)
     The per-dim scores are AGREEMENT scores (not bull/bear), so the consensus
-    direction is what orients the signal. Falls back to the legacy agreement-only
+    direction is what orients the signal. ``consensus_direction`` is CONTINUOUS
+    ∈ [-1, +1] (mean of the engines' signed strengths — see cross_validator's
+    orientation block; the earlier hard {-1,0,+1} gate zeroed the composite on
+    60%+ of real days). This formula is agnostic to that: any d ∈ [-1,+1]
+    flows through unchanged. Falls back to the legacy agreement-only
     composite if a frame predates the ``consensus_direction`` column.
     """
     weights = _normalize_weights(w)
@@ -642,7 +682,10 @@ def _optimize_frame(
     def _obj(trial: "optuna.Trial") -> float:
         w = {k: trial.suggest_float(k, 0.05, 1.0)
              for k in ("w_direction", "w_breadth", "w_magnitude", "w_regime")}
-        bs = trial.suggest_float("buy_strong", -0.85, -0.30)
+        # buy_strong floor widened -0.30 → -0.10 after the continuous-consensus
+        # fix: pooled |composite| p90 ≈ 0.18 (4 real targets), so a -0.30 floor
+        # sat beyond p97 and made a learnable STRONG BUY cut-point unreachable.
+        bs = trial.suggest_float("buy_strong", -0.85, -0.10)
         bm = trial.suggest_float("buy_moderate", bs + 0.05, -0.05)
         sm = trial.suggest_float("sell_moderate", 0.05, 0.50)
         ssg = trial.suggest_float("sell_strong", sm + 0.05, 0.85)
@@ -803,7 +846,10 @@ class ConvergenceTuner:
             "w_regime":    trial.suggest_float("w_regime",    0.05, 1.0),
         }
         # Thresholds — ordered: buy_strong < buy_moderate < 0 < sell_moderate < sell_strong
-        buy_strong   = trial.suggest_float("buy_strong",   -0.85, -0.30)
+        # buy_strong floor widened -0.30 → -0.10 after the continuous-consensus
+        # fix (pooled |composite| p90 ≈ 0.18; the old floor was beyond p97 and
+        # made a learnable STRONG BUY cut-point unreachable — see _optimize_frame).
+        buy_strong   = trial.suggest_float("buy_strong",   -0.85, -0.10)
         buy_moderate = trial.suggest_float("buy_moderate", buy_strong + 0.05, -0.05)
         sell_moderate = trial.suggest_float("sell_moderate", 0.05, 0.50)
         sell_strong   = trial.suggest_float("sell_strong", sell_moderate + 0.05, 0.85)

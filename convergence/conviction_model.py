@@ -22,17 +22,43 @@ from core.config import (
     CONV_DDM_LEAK_RATE,
     CONV_DDM_DRIFT_SCALE,
     CONV_DDM_LONG_RUN_VAR,
-    CONVICTION_STRONG,
-    CONVICTION_MODERATE,
-    CONVICTION_WEAK,
 )
+from convergence.normalization import COMPOSITE_THRESHOLDS
 from analytics.ddm_filter import drift_diffusion_filter
 from analytics.utils import _apply_conviction_bounds
+
+# Classification cut-points for the DDM-filtered CONVERGENCE SCORE (±100
+# composite scale) — the composite's OWN data-anchored factory set, ×100
+# (single source: convergence.normalization.COMPOSITE_THRESHOLDS; p75/p90 of
+# pooled |composite|). This model previously binned with the ENGINE's
+# CONVICTION_MODERATE/STRONG (40/60) — thresholds anchored on a DIFFERENT
+# distribution (ConvictionBounded); on the composite's honest distribution
+# those sat at ~p98/p100, so the conviction card read NEUTRAL on ~96% of days
+# and never printed STRONG (F1 threshold-distribution pairing violation,
+# found by research/ui_anchors_study.py 2026-07-12). WEAK is the measured p50
+# of pooled |convergence_score| (5.76 → 6.0) — the "any lean at all" floor.
+_TIER_STRONG = abs(COMPOSITE_THRESHOLDS["sell_strong"]) * 100.0    # 18
+_TIER_MODERATE = abs(COMPOSITE_THRESHOLDS["sell_moderate"]) * 100.0  # 11
+_TIER_WEAK = 6.0
 
 
 @dataclass
 class UnifiedConvictionResult:
     """Output of the unified conviction model for a single date.
+
+    NOTE on naming (audit finding F22): the ``nishkarsh_*`` field/session-key
+    prefix is inherited from Tattva's sibling fork (Nishkarsh) this engine was
+    ported from — it is NOT a Tattva product concept (Tattva's own terms are
+    "convergence" / "conviction" / "calibrated signal"; see convergence's
+    module docstrings). Left as-is rather than mechanically renamed: this
+    exact field name is a dataclass public API read across 4 files
+    (convergence/conviction_model.py, app.py, ui/components.py,
+    ui/tabs/tab_convergence.py — grep ``nishkarsh`` before touching any of
+    them), and Tattva/Nishkarsh actively cross-port audit fixes between the
+    two forks' engines, where a renamed field is exactly the kind of surface
+    a port might silently miss. If this is ever renamed, do it as one
+    dedicated, grep-verified pass across all 4 files in the same commit —
+    not incrementally.
 
     Attributes
     ----------
@@ -170,17 +196,22 @@ class UnifiedConvictionModel:
 
     @staticmethod
     def _classify_signal(conviction: float) -> str:
-        """Classify a conviction score into a human-readable signal label."""
-        if conviction < -CONVICTION_STRONG:
+        """Classify a conviction score into a human-readable signal label.
+
+        Cut-points are the composite's own anchored set (see _TIER_* above) —
+        this series IS the DDM-smoothed composite, so it must be binned on its
+        own distribution, not the engine's.
+        """
+        if conviction < -_TIER_STRONG:
             return "STRONG BUY"
-        if conviction < -CONVICTION_MODERATE:
+        if conviction < -_TIER_MODERATE:
             return "BUY"
-        if conviction < -CONVICTION_WEAK:
+        if conviction < -_TIER_WEAK:
             return "WEAK BUY"
-        if conviction > CONVICTION_STRONG:
+        if conviction > _TIER_STRONG:
             return "STRONG SELL"
-        if conviction > CONVICTION_MODERATE:
+        if conviction > _TIER_MODERATE:
             return "SELL"
-        if conviction > CONVICTION_WEAK:
+        if conviction > _TIER_WEAK:
             return "WEAK SELL"
         return "NEUTRAL"

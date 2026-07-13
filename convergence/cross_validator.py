@@ -63,7 +63,10 @@ class ConvergenceSignal:
     dimension_scores: dict[str, float]
     dimension_weights: dict[str, float]
     date: str
-    consensus_direction: float = 0.0  # +1 bullish, -1 bearish, 0 disagree/neutral
+    consensus_direction: float = 0.0  # CONTINUOUS ∈ [-1,+1], bullish-positive:
+    # mean of the engines' signed strengths (-conviction/100 and breadth
+    # spread/100). Was a hard {-1, 0, +1} gate that zeroed the composite on
+    # 60%+ of real days — see compute_convergence's orientation block.
 
 
 class CrossValidator:
@@ -213,18 +216,34 @@ class CrossValidator:
             + adaptive_weights["magnitude"] * (2 * magnitude_score - 1)
             + adaptive_weights["regime"] * (2 * regime_score - 1)
         )
-        # ── Orient the score directionally ──────────────────────────────
+        # ── Orient the score directionally (CONTINUOUS consensus) ────────
         # `composite` measures AGREEMENT strength (the four dims are agreement
         # scores, not bull/bear), so on its own it has no direction — a high
-        # value could be agreement on a top or a bottom. Multiply by the
-        # consensus direction so the score is a genuine directional conviction
-        # (zone convention: negative = bullish), consistent with the normalized
-        # convergence signal. When the two systems disagree, the directional
-        # conviction collapses to ~0 (DIVERGENT).
-        if aarambh_direction == nirnay_direction and aarambh_direction != 0:
-            consensus_direction = float(aarambh_direction)  # +1 bullish, -1 bearish
-        else:
-            consensus_direction = 0.0
+        # value could be agreement on a top or a bottom. Direction comes from
+        # the engines' own SIGNED strengths, combined continuously:
+        #   aarambh_bull = -conviction/100          (DDM-bounded, ∈ [-1, +1])
+        #   nirnay_bull  = (oversold% − overbought%)/100  (breadth spread)
+        #   consensus_direction = their mean, ∈ [-1, +1] (bullish-positive)
+        #
+        # A previous revision used a HARD gate here: consensus = sign(aarambh)
+        # only when sign(aarambh) == sign(nirnay) != 0, else EXACTLY 0 — and
+        # nirnay's sign is 0 on every breadth tie (0% oversold vs 0%
+        # overbought is a common day). Measured on real data (Gold, 810 scored
+        # days, 2026-07 diagnosis) that gate hard-zeroed the ENTIRE composite
+        # on 60.7% of days, and the surviving days jumped to |composite| ≈
+        # 0.84 median — an on/off spike train, not a conviction signal: the
+        # product signal read exactly 0.00 most days, its DDM trend
+        # flatlined, and the Optuna calibration objective was ranking
+        # mostly-tied zeros. The continuous form degrades gracefully instead:
+        # disagreement PARTIALLY CANCELS (small |score| — the DIVERGENT
+        # zone's actual meaning) rather than snapping to 0, ties contribute 0
+        # from that engine without silencing the other, and full alignment
+        # still produces the strongest readings. Sign convention preserved:
+        # negative convergence_score = bullish.
+        aarambh_bull = float(np.clip(
+            -float(aarambh_signal.get("conviction_score", 0)) / 100.0, -1.0, 1.0))
+        nirnay_bull = float(np.clip((nirnay_os - nirnay_ob) / 100.0, -1.0, 1.0))
+        consensus_direction = (aarambh_bull + nirnay_bull) / 2.0
         agreement_strength = (composite + 1.0) / 2.0  # [-1,1] agreement → [0,1]
         convergence_score = -consensus_direction * agreement_strength * 100.0
 

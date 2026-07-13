@@ -13,6 +13,289 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [2.6.0] — 2026-07-13 — *Signal tables · hero decision synthesis · full system re-tune · universe expansion*
+
+Ships the Obsidian-Quant data tables and 2-decimal hover across every plot, a
+hero-card decision-synthesis layer that weighs all evidence rows (not just the
+raw consensus), a chart-palette single source of truth, an accessibility lift on
+the muted text tier, an instrument-universe expansion (11 macro predictors + 7
+Nirnay basket members), and a full from-scratch re-tune of every engine/interp
+constant against widened 10→3000 grids — with config now tracking the tuning
+report's recommendation outputs literally. `ENSEMBLE_MODELS` kept at
+`("ols","huber")` (the report's single-member "huber" pick is declined to
+preserve the Model Spread indicator).
+
+### Added
+- **Obsidian-Quant signal tables everywhere (`render_data_table`).** Ported the
+  Position-Guide table design from the sibling Pragyam app into a single reusable
+  component in `ui/components.py` and wired it into **every** tabular view — the
+  Data-tab dataset viewer, Convergence "Recent Divergences", the Nirnay
+  constituent board, and the three Diagnostics tables (feature impact, signal
+  performance, saved profiles) — replacing all six `st.dataframe` calls. Rounded
+  glass card, uppercase amber-ruled sticky header, zebra rows with amber hover,
+  right-aligned tabular numerics, and a bold Space-Grotesk label column. It
+  renders via `components.html` (an iframe that can't see `theme.css` `:root`
+  vars), so the Obsidian-Quant tokens are resolved and inlined; the component is
+  generic (auto numeric detection, per-column precision, NaN em-dash, optional
+  sign-colouring of signed columns like the Nirnay oscillators) and scrolls
+  horizontally/vertically under a fixed height, so it is safe on both the 10-row
+  divergence table and the full dataset (capped to the most recent 300 rows on
+  screen; full set still exportable via CSV).
+- **Hero card DECISION synthesis.** The hero card's top-line label was previously
+  read straight off the raw normalized-consensus value (factory ±0.3/±0.5
+  thresholds); MODEL, CALIBRATED, TREND, PRECEDENT, INTERNALS and RISK were
+  display-only commentary that never changed the recommendation — a CALIBRATED
+  conflict could say "stand aside" in small print under a headline still shouting
+  BUY. `build_hero_verdict` now folds the trust tier and every evidence row into
+  an explicit action tier (`_synthesize_action`): HIGH / MODERATE / LOW
+  CONVICTION · STAND ASIDE · NO ACTION, with documented ordinal weights
+  (calibrated conflict −2, coherent precedent divergence −2, engines split −2,
+  trend contradiction −1, recent divergences −1, confirmations +1), a hard
+  no-edge gate (validated Val IC ≤ 0 → stand aside regardless of soft evidence),
+  and a cap at MODERATE when the edge is unvalidated. The headline itself remains
+  the normalized consensus (reconciliation invariant with the Unified Signal plot
+  and the TATTVA CONVICTION card) — the new DECISION line, rendered below the
+  evidence with its itemised drivers, is what the card now recommends acting on.
+  Pinned by a new decision-table check group in `research/test_hero_verdict.py`.
+
+### Removed
+- **Hero MODEL-row noise copy.** Dropped the `Calibrated <timestamp>.` suffix and
+  the `(Val IC is measured on the calibrated variant — see CALIBRATED row.)`
+  attribution note from the MODEL evidence row, along with the now-dead
+  `profile_age` plumbing (`_trust_tier` → `build_hero_verdict` → `app.py`).
+
+### Changed
+- **Tuning suite grid depth ~doubled + full deep-grid re-run (2026-07-12).**
+  All 11 studies' parameter grids densified: Aarambh REFIT 7→13 values,
+  ENSEMBLE 9→12 baskets, MAX/MIN_TRAIN 9→16/15 values (dense 100–2000),
+  PCA 8→14 (2–60), RIDGE_ALPHAS 5→8 grids; Nirnay 32→57 OFAT values; analog
+  blend 12→22 / TOP_N 8→15 / recency 10→16 + pairwise feature drops + two new
+  aggregation modes (equal mean, 20% trimmed mean); precedent sweeps +7/15/30d
+  horizons; markers percentiles p50–p99. The aarambh study resumes its
+  (lever,value,target,horizon)-keyed CSV cache, so only new grid values cost
+  compute — with the explicit warning that changing the OFAT BASE requires
+  `--fresh`. Suite re-run clean (11/11 exit 0, 273 min, zero ⚠LEAK rows):
+  `research/reports/tuning_20260712_010302.txt`. Verdict: every engine lever's
+  variation sits inside ±0.01–0.04 IC noise — the live config is confirmed
+  optimal within resolution; no engine constant moved.
+- **`UI_NIRNAY_AVG_THRESHOLD` 2.5 → 2.9.** The Row-3 (Nirnay Avg_Signal) marker
+  tier re-anchored to the freshly measured p75 (2.88, n=12135 pooled) per the
+  block's stated p90/p75 anchoring policy; 2.5 sat at ~p65 and colored ~35% of
+  days as extreme. Rows 1–2 already matched their anchors exactly (0.39/0.26,
+  50/20).
+- **Config rationale notes refreshed from the clean deep-grid report.** The
+  "VALUES PROVISIONAL — under active re-tuning" placeholders on the Aarambh
+  window/ensemble blocks, the Nirnay knobs, and the marker thresholds were
+  replaced with validated 2026-07-12 figures. The `SIGNAL_HORIZONS` comment no
+  longer cites pre-purge leaked analog ICs (+20d 0.162 "peak") as justification —
+  post-purge the analog is ≈0 at 1–5d and negative ≥7d; the 1–10d band is carried
+  by the purged model forecast (+1d IC +0.069, 31/34 targets), and Positional 20d
+  is documented as a turnover lens, not an edge claim.
+
+### Added
+- **Hero classification-threshold study (`research/hero_threshold_study.py`,
+  suite key `hero_thresholds`).** The hero card's BUY/SELL/STRONG cut-points had
+  never had a dedicated study — the markers study anchors the *plot guides*, not
+  the *action classifier*. The new study pools the exact live constructions
+  (causal consensus at 10d/20d; CrossValidator composite at 5d/10d) across 8
+  targets on non-overlapping windows, sweeps 30 percentile-anchored
+  (moderate, strong) pairs plus the current pair on forward-return tier
+  separation with occupancy floors, and applies an explicit decision rule:
+  adopt a sweep winner only if its separation is believable (|t|≳2 on both
+  horizons), otherwise anchor at the p75/p90 occupancy convention. Wired into
+  `run_tuning.py` (T5) with both threshold dicts in the tuned-config reference.
+- **`DEFAULT_THRESHOLDS` (hero consensus classifier) re-anchored ±0.3/±0.5 →
+  ±0.26/±0.39.** First run (reports/tuning_20260712_141326.txt): no threshold
+  pair shows believable forward-return separation (max |t|≈0.9, spreads flip
+  sign across horizons) → occupancy anchoring applies. The old hand-set pair sat
+  at p82/p93 and disagreed with the Row-1 plot markers (0.26/0.39 = p75/p90 of
+  the same distribution); the hero classifier, plot markers, and hero-history
+  bands now share one extremeness vocabulary. `COMPOSITE_THRESHOLDS`
+  (±0.11/±0.18) re-validated on 8 targets (p75/p90 = 0.107/0.174, matches
+  within rounding) — PROVISIONAL tag removed, values unchanged.
+
+- **Three-arm hero-headline comparison (`calibration_lift_study.py`, suite key
+  `calibration_lift`).** Extended the calibrated-vs-raw lift study with a paired
+  CONSENSUS arm (the hero's live headline object), all three scored on identical
+  purged test blocks with the same non-overlapping sign-flipped Spearman, one
+  engine fit per target (shared ts/nd memo). First run (48 paired windows,
+  8 targets, `reports/calibration_lift_20260712.txt`): pooled IC consensus
+  +0.039 vs raw +0.022 vs calibrated +0.022; cal−raw lift +0.000 ± 0.004 (the
+  Optuna layer adds nothing out-of-sample); consensus > calibrated in 48% of
+  windows, +0.017 ± 0.031. Verdict: the consensus-primary hero headline stands
+  on evidence, not just architecture; the calibrated composite remains an
+  evidence row. Registered in `run_tuning.py` (T5) so every re-run re-answers
+  this.
+
+- **Full tuning-coverage audit — every constant classified, three new studies
+  (`research/TUNING_COVERAGE.md`).** Every tunable constant is now study-tuned,
+  data-anchored, structural, or budget — none justified by assertion. New suite
+  members: `ddm` (both drift-diffusion filter sets swept on a leak grid at
+  constant gain — both shipped sets sit on the IC plateau, kept), `conv_weights`
+  (17 unfitted dim-weight vectors — the whole grid within ±0.01 IC of the
+  factory 0.30/0.25/0.25/0.20, kept as validated-insensitive), `ui_anchors`
+  (pooled live distributions for every remaining tier constant), plus
+  HUBER_EPSILON and LOOKBACK_WINDOWS levers in `aarambh_full`.
+
+### Changed
+- **Six tier families re-anchored to their measured distributions
+  (`ui_anchors`, 2026-07-12).** The audit found several tier vocabularies
+  unreachable or meaningless in practice:
+  `CONVICTION_WEAK/MODERATE/STRONG` 20/40/60 → 9/17/27 (old STRONG = p100:
+  printed on 0.5% of days); `UI_AGREEMENT_MODERATE/STRONG` 0.5/0.7 → 0.82/0.91
+  (old STRONG = p50: half of all days "strong agreement");
+  `CONV_*_BULLISH/BEARISH` label tiers ±10/30/60 → ±11/18/27 (old STRONG
+  unreachable — max observed |score| ≈ 35; new values = COMPOSITE_THRESHOLDS×100);
+  `UI_NIRNAY_BULLISH/BEARISH` ±2 → ±2.9 (p75, unified with
+  UI_NIRNAY_AVG_THRESHOLD); `UI_MODEL_SPREAD_HIGH` 50 → 35 bps (p90 under the
+  LIVE ols+huber basket). Validated-and-kept: NIRNAY_OVERSOLD/OVERBOUGHT (±5 =
+  p81), UI_BREADTH_HIGH (≈p96 alert), both DDM sets, CONV_WEIGHT_*.
+
+### Changed
+- **Config now tracks the tuning report's recommendation outputs literally
+  (policy change, per user directive).** The latest from-scratch report's
+  explicit RECOMMENDED/best/anchor lines were applied as-is — no sub-SE
+  judgment holds: Aarambh `MIN/MAX_TRAIN` 750/1000 → **150/350**,
+  `REFIT_INTERVAL` 7 → **63**, `ENSEMBLE_MODELS` → **("huber",)**,
+  `RIDGE_ALPHAS` → high(1..1k), `HUBER_EPSILON` 1.35 → **1.1**,
+  `LOOKBACK_WINDOWS` → **(3,5,10)** (breadth now quantized in 33% steps),
+  app.py PCA literal 20 → **2**; Nirnay `ROC_LEN` 14 → **2**,
+  `REGIME_SENSITIVITY` 1.5 → **6.0**, `BASE_WEIGHT` 0.6 → **0.0** (fixed half
+  of the blend goes fully to MMR), `MMR_NUM_VARS` 5 → **4**, and `MSF_LENGTH`
+  20 → **18** (universe-share-weighted winner across the commodity + equity
+  result tables; the commodity-slice winner 10 is universe-weighted WORSE than
+  20); DDM engine filter → **leak 0.65/drift 1.219**, consensus filter →
+  **leak 0.15/drift 0.18** (lens dict co-updated at the 1.2× gain invariant);
+  `CONV_WEIGHT_*` → **0.50/0.20/0.20/0.10**; consensus `DEFAULT_THRESHOLDS`
+  strong → **±0.41**, `COMPOSITE_THRESHOLDS` strong → **±0.16** (per
+  hero_thresholds' printed occupancy anchors; conviction-model tiers derive
+  automatically). Markers/UI tiers/CONV label tiers unchanged (their studies
+  measured current values on-anchor). Operational notes: with a single-member
+  ensemble the ModelSpread tile loses its cross-member meaning if the engine
+  fits only huber, and several adopted values sit on noise-level margins by
+  the reports' own spreads — the next re-run may legitimately move them again.
+
+### Docs
+- **Config comment hygiene — measurement snapshots removed.** `core/config.py`
+  (and the factory-threshold block in `convergence/normalization.py`) carried
+  run-dated tuning snapshots (ICs, percentiles, correlation values, report
+  filenames) that go stale with every re-run. All tuned/anchored constants now
+  follow one convention, stated once at the top of the config: comments carry
+  the constant's ROLE, its validating study key, and any hard GUARD that must
+  survive a re-tune (cross-universe MSF rule, F1 threshold-distribution pairing,
+  F3 constant-gain DDM sweeps, same-barrel Brent exclusions, live-basket
+  ModelSpread anchoring, USD/INR rejected-alternative). Measurements, dates and
+  report paths live in `research/TUNING_COVERAGE.md` and this CHANGELOG. No
+  constant values changed — verified by assertion and both regression suites.
+
+### Added
+- **Instrument-universe audit → 11 macro predictors + 7 basket members
+  (2026-07-13).** Audited GLOBAL_MACRO_MAP / MACRO_SYMBOLS_YF for factor-space
+  coverage and every Nirnay commodity/FX basket for cohesion; every addition was
+  verified fetchable on yfinance (5y) and, for basket members, co-directional
+  with its target. Macro spine: EM FX legs `USD/MXN·BRL·ZAR` (LatAm/Africa were
+  absent) + `USD/THB·TWD·MYR` (used in the USD/INR basket but missing from the
+  spine), ag depth `Cocoa`/`Soybean Oil` (edible-oil import complex), refined
+  products `RBOB Gasoline`/`Heating Oil` (added to the Brent target's exclusion
+  list — same-barrel logic as WTI), and `^MOVE` bond volatility. Baskets: Copper
+  +FM.TO/+LUN.TO (r +0.49/+0.52 — the largest missing pure-plays), Silver
+  +AYA.TO/+USAS (r +0.53/+0.49; scarcity is structural, GATO/SILV delisted via
+  M&A), Brent +SU/+CNQ (r +0.56/+0.60; refiner exclusion now documented —
+  crack-spread businesses are not co-directional), Cotton +ZW=F (completes the
+  acreage-competition triangle). USD/INR and Jeera baskets validated as-is
+  (both already data-curated). New symbols enter the predictor pool on the next
+  data refresh; the tuning suite should be re-run after that refresh, not before.
+
+### Changed
+- **Full tuning suite re-run FROM SCRATCH — zero config changes warranted
+  (2026-07-13, `reports/tuning_20260713_004005.txt`).** Wiped the Aarambh result
+  cache and ran all 16 studies on the widened grids (~12.5h; aarambh_full alone
+  ~8.4h with no cache to resume). Every study reproduced its prior verdict and no
+  constant moved: Aarambh window/refit/PCA/huber/ridge/lookback all noise-level
+  (the widened 10→3000 window sweep confirms saturation past ~625 and the same
+  sub-SE short-window hump, not adopted; the new 10-row window correctly trips the
+  ⚠LEAK guard and is excluded); Nirnay MSF=20 holds on the cross-universe equity
+  check (commodity winner MSF=10 stays worse on the 27-index majority); both DDM
+  sets sit on their plateaus; SIGNAL_HORIZONS unchanged (analog ≈0 standalone, the
+  purged model carries 1–10d); analog/blend/TOP_N/recency all noise; markers
+  anchors byte-match the shipped p75/p90 (consensus ±0.26/±0.39, ConvictionRaw
+  ±20/±50, Nirnay ±2.9); hero thresholds find no separation (occupancy-anchored,
+  unchanged); calibration_lift reconfirms consensus (+0.039) ≥ calibrated (+0.023)
+  with cal−raw lift −0.001; conv_weights flat; every ui_anchors tier matches its
+  occupancy target. The recompute also validated the cache was never stale (≥100-row
+  Aarambh rows byte-match). Config comments updated with the from-scratch provenance.
+
+### Changed
+- **Tuning grids widened again (depth pass 2, 2026-07-13).** Every study's test
+  grid was expanded to span from near-degenerate to well past the current optima
+  so the full response curve is visible: Aarambh windows now sweep **10 → 3000**
+  (MIN capped at 2000 by the 9-yr sample; MAX ≥ sample saturates and is kept to
+  confirm the plateau), REFIT 1–63, PCA 2–150, HUBER_EPSILON 1.0–4.0, plus two
+  wider ridge grids and two denser lookback sets; Nirnay knobs densified (e.g.
+  MSF 3–100, BASE_WEIGHT in 0.05 steps); analog TOP_N 1–150 and recency 15–3000d;
+  both precedent horizon sweeps get a fine 1–25d band out to 120–180d;
+  `conv_weights` 17 → 31 vectors (every simplex face); `ddm` leaks 0.01–0.80;
+  `hero_thresholds` 30 → 96 percentile pairs; markers/ui_anchors percentiles down
+  to p25/up to p99.5. The Aarambh resumable cache means only ~33 new configs
+  (~2h) recompute; `hero_threshold`'s quantile set is now derived from its P_MOD/
+  P_STR grids so a widened grid can't reference a missing key. Suite ETAs updated.
+- **Chart palette centralized to a single source of truth (zero pixel change).**
+  Design-system audit found the app shipped *two* palettes for the same semantic
+  colors — the Plotly charts (`config.COLOR_*` + inline `rgba()`) used the
+  brighter Tailwind-400 family while the CSS surfaces used a -500/custom family
+  (only amber-gold was shared). Introduced `core.config._PALETTE_RGB` + an
+  `rgba(name, alpha)` helper as the one definition for the chart palette, and
+  migrated the 70 scattered inline `rgba(r,g,b,a)` literals across the four chart
+  tabs to it. **Values are byte-identical** — this is centralization, not a
+  recolor, so a future palette reconciliation is now a one-line-per-color edit.
+  The chart↔CSS hue divergence is documented at `_PALETTE_RGB` for a later,
+  deliberate decision.
+- **Muted text tier lifted to clear the accessibility floor.** `--ink-tertiary`
+  `#4B5563` (2.55:1 on `--bg-base` — below the WCAG 3:1 UI-contrast minimum, and
+  it drives table headers, section subtitles, and chart annotations) → `#5B6675`
+  (3.31:1). Still clearly the de-emphasized tier (secondary is 7.5:1); the
+  hardcoded `.kv-table` header color now tracks the token instead of duplicating
+  it.
+
+### Fixed
+- **False `COLOR_PURPLE` comment.** It claimed "matches CSS `--violet`" while the
+  two differ by Δ47 (`#A78BFA` vs `#8B5CF6`); comment corrected as part of the
+  palette centralization.
+- **Hover values across every plot now clip to 2 decimals.** Plotly silently
+  ignores a d3 number format inside a hovertemplate (`%{y:.2f}`) — and the axis
+  `hoverformat` — under `hovermode="x unified"`, so hover boxes leaked full float
+  precision (e.g. `Consensus (50/50): -0.3687992004699925`). Fixed centrally in
+  `ui/theme.apply_default_hover`, called from `style_axes` (which every chart
+  invokes right before `st.plotly_chart`): each visible trace's y-values are
+  pre-formatted to strings in Python and inserted via `%{customdata[0]}`, which
+  has no client-side format to ignore. Preserves `hoverinfo="skip"` fills,
+  intentional `%{x…}` templates (the precedent Z-vs-forward scatter), custom
+  `%{customdata}` labels (the fair-value "Implied target"), and marker `text`
+  labels (the hero "S. Buy"/"Hold"); idempotent across multi-row subplots.
+- **conviction_model binned the smoothed COMPOSITE with the ENGINE's tiers
+  (F1 pairing violation).** `UnifiedConvictionModel._classify_signal` used
+  CONVICTION_MODERATE/STRONG (anchored on ConvictionBounded) to bin the
+  DDM-filtered convergence score — on that distribution the old 40/60 sat at
+  ~p98/p100, so the TATTVA CONVICTION card read NEUTRAL ~96% of days and never
+  printed STRONG. It now bins on the composite's own anchored set
+  (COMPOSITE_THRESHOLDS × 100 → ±11/±18, WEAK at measured p50 ≈ 6).
+- **CI band-width tier removed (measured degenerate).** The DDM's mean-reverting
+  variance pins band width to 40.2–42.5 (p1–p99), so UI_BAND_NARROW/WIDE (30/60)
+  could never fire — the interpretation-card sentence permanently read "Band
+  moderate — some uncertainty". The sentence and both constants are deleted
+  (a percentile-vs-history replacement would be a new unvalidated indicator —
+  the class this audit exists to eliminate); the CI band itself remains drawn
+  on the conviction chart, and ui_anchors keeps an informational distribution
+  row so a future regime change in band width would still be visible.
+- **Stale "current" markers in three studies.** `confirm_max_sweep.py` hardcoded
+  `MIN=750` and flagged `←current` at MAX=750 (live: MAX=1000) — now reads
+  `core.config` live; `markers_study.py` printed hardcoded current markers
+  (0.5/0.25, 40/20, 2/2) instead of the live `UI_*` constants; `analog_confirm.py`
+  labelled the live maha-only blend as ".55/.35/.10". All three now self-report
+  from live config.
+
+---
+
 ## [2.5.0] — 2026-07-04 — *Audit hardening · hero verdict rebuild · UI/UX polish*
 
 Resolves an end-to-end statistical/correctness/infra/docs audit spanning the

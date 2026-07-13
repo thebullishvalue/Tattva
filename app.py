@@ -110,7 +110,7 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT, UI_AGREEMENT_STRONG, UI_AGREEMENT_MODERATE
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT, UI_AGREEMENT_STRONG, UI_AGREEMENT_MODERATE, INTEL_N_TRIALS, RAW_YIELD_PREDICTORS, DIV_LOOKBACK, TIMEFRAME_TRADING_DAYS, PRECEDENT_HONORARY_HORIZON
 from core.config import GLOBAL_MACRO_MAP, MACRO_SYMBOLS_YF, INDEX_TARGETS_MAP
 
 # Friendly column name → ticker, for resolving each predictor/target column to its
@@ -130,11 +130,22 @@ _BUNDLE_KEYS = (
     "nishkarsh_conv_normalized", "wf_results",
     "intelligence_active_weights", "intelligence_active_thresholds",
     "intelligence_active_profile",
+    # The consensus headline's full history + DDM-smoothed trend
+    # (hero-history plot / TREND row; the headline scalar itself lives in
+    # nishkarsh_conv_normalized above), and the calibrated variant
+    # (CALIBRATED evidence row / amber overlay) — must all travel with the
+    # bundle so a cached target switch-back doesn't leave the PREVIOUS
+    # target's headline state in session state.
+    "hero_series", "hero_smoothed",
+    "nishkarsh_calibrated_score", "nishkarsh_calibrated_signal",
+    "calibrated_conv_series",
     # Per-target UI metadata that must travel with the result bundle —
     # otherwise a cached target switch-back leaves the PREVIOUS target's
     # value in session state (e.g. the Nirnay tab showing a stale
-    # "basket source: snapshot" hint for a target resolved live).
-    "nirnay_basket_source",
+    # "basket source: snapshot" hint for a target resolved live, or the
+    # Convergence tab's "breadth carried forward" notice firing/missing
+    # based on the WRONG target's basket-freshness timestamp).
+    "nirnay_basket_source", "nirnay_native_last",
 )
 # Keep the last N configs. The comment here previously said "the 3
 # commodities" — stale since the universe grew to 30+ targets (commodities,
@@ -144,6 +155,39 @@ _BUNDLE_KEYS = (
 # (e.g. all commodities, or an index + its close comparators) without
 # recomputing.
 _RESULTS_CACHE_MAX = 6
+
+# Baskets at/above this size get their per-constituent frames trimmed before
+# entering the _RESULTS_CACHE_MAX-deep results_cache LRU (audit finding F19).
+# nirnay_constituent_dfs carries ~200 columns per constituent (the full
+# run_full_analysis output); only the ~9 the Nirnay tab's drill-down actually
+# displays (_NIRNAY_DRILLDOWN_COLS) are needed once the result is just sitting
+# in the switch-back cache. A small commodity basket (~15-20 names) is cheap
+# either way and kept at full width so nothing else that might read the wider
+# frame in-session breaks; an uncapped large index (S&P 500 ~500 names) is
+# where the ~200-column full width, multiplied across up to 6 LRU entries,
+# actually matters.
+_CONSTITUENT_TRIM_THRESHOLD = 60
+_NIRNAY_DRILLDOWN_COLS = (
+    "Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition",
+    "Regime", "Vol_Regime", "Change_Point", "Confidence",
+)
+
+
+def _bundle_nirnay_constituent_dfs(dfs: dict) -> dict:
+    """Trim nirnay_constituent_dfs to the Nirnay tab's drill-down columns
+    before it enters the per-config results_cache LRU, for baskets at/above
+    _CONSTITUENT_TRIM_THRESHOLD names. Only affects the SNAPSHOT stored in
+    results_cache — the live session_state copy the active render reads
+    (and engines.nirnay.aggregate_constituent_timeseries, which needs the
+    full width and runs before this snapshot is taken) is never touched.
+    """
+    if not dfs or len(dfs) < _CONSTITUENT_TRIM_THRESHOLD:
+        return dfs
+    trimmed = {}
+    for sym, df in dfs.items():
+        cols = [c for c in _NIRNAY_DRILLDOWN_COLS if c in df.columns]
+        trimmed[sym] = df[cols] if cols else df.iloc[:, :0]
+    return trimmed
 
 
 # ─── UI Rendering helpers ────────────────────────────────────────────────────
@@ -223,15 +267,38 @@ def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
     All interpretation logic lives in ``ui.components.build_hero_verdict`` (a
     pure, unit-testable function); this wrapper only gathers session-state
     inputs and hands the verdict to ``render_hero_card``. The headline chain
-    is calibrated model -> normalized consensus -> Aarambh-only, always paired
-    with an honest trust read (non-overlapping Val IC + walk-forward
-    durability) and a minimum-n-gated precedent second opinion.
+    is NORMALIZED CONSENSUS -> Aarambh-only, always paired with an honest
+    trust read (non-overlapping Val IC + walk-forward durability, attributed
+    to the calibrated composite variant), the CALIBRATED variant as a
+    second-opinion evidence row, and a minimum-n-gated precedent read.
+
+    The headline is ``nishkarsh_norm`` (passed in) — the normalized
+    consensus, the SAME object as the Unified Signal plot's top row and the
+    TATTVA CONVICTION card, so hero/card/plot reconcile identically by
+    construction. The calibrated composite (Phase 4e) feeds the CALIBRATED
+    evidence row; ``hero_smoothed`` (DDM of the consensus) feeds TREND.
     """
-    calib       = st.session_state.get("nishkarsh_result")            # UnifiedConvictionResult | None
     profile     = st.session_state.get("intelligence_active_profile")  # dict | None
     wf          = st.session_state.get("wf_results")                   # list[dict] | None
     div_events  = st.session_state.get("divergence_events")            # DataFrame | None
     prec        = st.session_state.get("precedent_summary")            # dict | None
+    hero_smoothed = st.session_state.get("hero_smoothed")               # pd.Series | None
+    calib_score  = st.session_state.get("nishkarsh_calibrated_score")   # float | None
+    calib_signal = st.session_state.get("nishkarsh_calibrated_signal")  # str | None
+
+    # DEGENERATE-CONVERGENCE GATE: `nishkarsh_norm` is None exactly when the
+    # Aarambh∩Nirnay alignment found no overlap (empty/unresolvable basket) —
+    # the headline chain then falls through to the honest "Aarambh only (no
+    # basket convergence)" source automatically. The calibrated composite is
+    # gated too: with no basket it was computed against neutral PLACEHOLDER
+    # nirnay stats (a half-weight Aarambh-only signal wearing a convergence
+    # label), and divergence events are silenced for the same reason — the
+    # detector compared Aarambh against a basket that doesn't exist.
+    _has_genuine_convergence = nishkarsh_norm is not None
+    if not _has_genuine_convergence:
+        hero_smoothed = None
+        calib_score, calib_signal = None, None
+
     # Forecast horizon of the active Signal Horizon lens - for interpretation copy.
     FWD_HORIZON = SIGNAL_HORIZONS.get(
         st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
@@ -244,11 +311,31 @@ def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
         except (TypeError, ValueError): val_ic = None
     wf_ics = [r["ic"] for r in wf if isinstance(r, dict) and r.get("ic") == r.get("ic")] if wf else []
     wf_pos = (sum(1 for v in wf_ics if v > 0) / len(wf_ics)) if wf_ics else None
-    n_div = int(len(div_events)) if div_events is not None and hasattr(div_events, "__len__") else 0
+    wf_n = len(wf_ics) if wf_ics else None
+    # RECENT divergence count only (audit finding F7) — div_events spans the
+    # WHOLE history (6+ years), so a bare len() reads in the hundreds and is a
+    # permanent, meaningless alarm ("N divergence events flagged"). Count only
+    # events within the last DIV_LOOKBACK trading days of the series (the same
+    # window CrossSystemDivergenceDetector uses for its own persistence flag),
+    # anchored on the LATEST event date in the table (a proxy for "today" —
+    # div_events carries no direct handle on the engine's current as-of date).
+    n_div = 0
+    if (_has_genuine_convergence and div_events is not None
+            and hasattr(div_events, "__len__") and len(div_events)):
+        try:
+            _div_dates = pd.to_datetime(div_events.index, errors="coerce")
+            _valid_dates = _div_dates.dropna()
+            if len(_valid_dates):
+                _cutoff = _valid_dates.max() - pd.Timedelta(days=int(DIV_LOOKBACK * 1.5))
+                n_div = int((_div_dates >= _cutoff).sum())
+            else:
+                n_div = int(len(div_events))
+        except Exception:
+            n_div = int(len(div_events))
 
     verdict = build_hero_verdict(
-        calib_conviction=(float(calib.nishkarsh_conviction) if calib is not None else None),
-        calib_signal=(calib.nishkarsh_signal if calib is not None else None),
+        calib_conviction=(float(calib_score) if calib_score is not None else None),
+        calib_signal=(calib_signal if calib_signal is not None else None),
         has_profile=bool(profile),
         consensus=nishkarsh_norm,
         aarambh_signal=aarambh_signal,
@@ -260,6 +347,13 @@ def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
         horizon_days=FWD_HORIZON,
         agreement_strong=UI_AGREEMENT_STRONG,
         agreement_moderate=UI_AGREEMENT_MODERATE,
+        # DDM-smoothed value of the SAME consensus series ([-1,+1]) — lets
+        # the card interpret today's print against its own trend (TREND row)
+        # instead of leaving that to the hero-history plot.
+        smoothed=(float(hero_smoothed.iloc[-1])
+                  if hero_smoothed is not None and len(hero_smoothed) else None),
+        wf_n=wf_n,
+        div_window=DIV_LOOKBACK,
     )
     render_hero_card(verdict)
     section_gap()
@@ -283,16 +377,26 @@ def _render_model_passport_sidebar(current_universe: str, current_index: str | N
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-title">Model Passport</div>', unsafe_allow_html=True)
 
-    # Intelligence-mode toggle. Default ON. When OFF, factory weights are
-    # used regardless of any saved profile.
+    # Intelligence-mode toggle. Default ON. When OFF, any saved profile is
+    # ignored and CrossValidator falls back to its ±10% adaptive-shift
+    # heuristic on top of the factory 0.30/0.25/0.25/0.20 base allocation —
+    # NOT the bare fixed weights (audit finding F20: the help text previously
+    # implied the base weights are applied verbatim when OFF; the ±10%
+    # per-day clarity-based shift always runs on top of them in that path —
+    # see convergence.cross_validator.CrossValidator.compute_convergence).
+    # Thresholds ARE the bare factory defaults when OFF — the composite's own
+    # p75/p90-anchored COMPOSITE_THRESHOLDS (no equivalent heuristic exists
+    # for thresholds).
     intelligence_mode = st.toggle(
         "Intelligence Mode",
         value=bool(st.session_state.get("intelligence_mode", True)),
         help=(
             "When ON, Tattva uses the persisted calibrated profile for the "
-            "selected universe (if one exists). When OFF, Tattva runs on "
-            "the factory 0.30 / 0.25 / 0.25 / 0.20 dimension weights and "
-            "symmetric ±0.3 / ±0.5 thresholds."
+            "selected universe (if one exists). When OFF, Tattva runs on the "
+            "factory 0.30 / 0.25 / 0.25 / 0.20 dimension weights (adaptively "
+            "shifted ±10% per day by signal clarity — not applied verbatim) "
+            "and the composite's data-anchored factory thresholds "
+            "(±0.11 moderate / ±0.18 strong)."
         ),
         key="passport_intel_toggle",
     )
@@ -725,7 +829,13 @@ def main():
                     progress_container.empty()
                 for _k in ("engine", "engine_cache", "aarambh_engine", "aarambh_fit_key",
                            "wf_results", "results_cache", "nishkarsh_result",
-                           "precedent_summary", "_prec_key", "conv_norm_params"):
+                           "precedent_summary", "_prec_key", "_precedent_analogs_cache", "conv_norm_params",
+                           # Lens-independent Nirnay cache (audit finding F17) —
+                           # must be dropped on a live re-fetch too, else Refresh
+                           # Data re-pulls Aarambh's macro universe live but
+                           # silently keeps serving the PRE-refresh Nirnay
+                           # basket/constituent analysis.
+                           "_nirnay_fetch_cache", "_nirnay_analysis_cache"):
                     st.session_state.pop(_k, None)
                 # The convergence tab's actual per-config normalization cache key is
                 # "conv_norm_causal::<engine_cache>" (ui/tabs/tab_convergence.py) — the
@@ -819,9 +929,10 @@ def main():
                 # that HAD it, which may itself be stale. Surface which
                 # columns and how old, rather than a silent log.warning no
                 # one watching a Streamlit deploy will ever see.
-                from data.fetcher import STALE_BACKFILLS
-                if STALE_BACKFILLS:
-                    _sb_items = sorted(STALE_BACKFILLS.items(), key=lambda kv: kv[1])
+                from data.fetcher import _current_stale_backfills
+                _stale_backfills = _current_stale_backfills()
+                if _stale_backfills:
+                    _sb_items = sorted(_stale_backfills.items(), key=lambda kv: kv[1])
                     _sb_preview = ", ".join(f"{k} (as of {v})" for k, v in _sb_items[:5])
                     _sb_more = f" +{len(_sb_items) - 5} more" if len(_sb_items) > 5 else ""
                     render_info_box(
@@ -947,6 +1058,14 @@ def main():
         if "valid_rows" in _prep:
             console.item("Rows · usable (momentum warmup trimmed)", _prep["valid_rows"])
             console.item("Labels · real (tail forecasts excluded)", _prep["label_valid"])
+        if _prep.get("interior_gap_rows", 0):
+            # Rows lost to a non-finite predictor value AFTER the leading warmup
+            # has already ended (e.g. a yield/price print at/below zero, a
+            # temporary data gap) — distinct from the expected warmup trim above.
+            # Was previously invisible: the row-wise validity check silently
+            # dropped these for every target (audit finding F4).
+            console.item("Rows · lost to interior gap (non-finite predictor mid-series)",
+                         _prep["interior_gap_rows"])
         if stage == "complete":
             console.checkpoint(f"Data spine ≥ {MIN_DATA_POINTS}", "OK")
 
@@ -1054,7 +1173,29 @@ def main():
     FWD_MOM_K = _horizon_cfg["momentum"]    # trailing momentum window for predictors
     _prep["fwd_h"], _prep["fwd_k"] = FWD_HORIZON, FWD_MOM_K
     _lvl = data[[active_target] + active_features].astype(float)
-    _ret = np.log(_lvl.where(_lvl > 0)).diff().replace([np.inf, -np.inf], np.nan)
+    # Log-return for prices/levels (the target is always one of these — every
+    # ALL_TARGETS entry is a price/level, never a raw yield). RAW_YIELD_PREDICTORS
+    # (^IRX/^FVX/^TNX/^TYX) are percent-point RATE series, not prices: they can
+    # print at/near/below zero (2020-21 zero-rate era), and log() of a
+    # non-positive value is NaN. Previously that NaN poisoned _mom.notna().all()
+    # for EVERY predictor on that row (the row-wise validity check requires ALL
+    # features finite) — silently deleting rows for every target around the most
+    # informative volatility regime (audit finding F4). Yield columns instead get
+    # an arithmetic level-diff, which is well-defined at any sign and is the
+    # economically correct "momentum" for a rate series (a move, not a return).
+    # Built as separate blocks and joined via ONE pd.concat rather than
+    # assigning each block into an initially-empty frame column-by-column —
+    # the latter triggers pandas' "highly fragmented DataFrame"
+    # PerformanceWarning on every rerun (same fragmentation hazard already
+    # documented in engines/nirnay.py's block-build comments).
+    _yield_feats = [f for f in active_features if f in RAW_YIELD_PREDICTORS]
+    _price_cols = [c for c in _lvl.columns if c not in _yield_feats]
+    _ret_parts = []
+    if _price_cols:
+        _ret_parts.append(np.log(_lvl[_price_cols].where(_lvl[_price_cols] > 0)).diff().replace([np.inf, -np.inf], np.nan))
+    if _yield_feats:
+        _ret_parts.append(_lvl[_yield_feats].diff())
+    _ret = pd.concat(_ret_parts, axis=1)[_lvl.columns]
     _mom = _ret[active_features].rolling(FWD_MOM_K, min_periods=FWD_MOM_K).sum()
     _fwd = _ret[active_target].rolling(FWD_HORIZON, min_periods=FWD_HORIZON).sum().shift(-FWD_HORIZON)
     # Keep only rows with fully-formed momentum features (drop the warmup head);
@@ -1063,6 +1204,16 @@ def main():
     _label_valid = _fwd.loc[_valid].notna().to_numpy()   # False for last FWD_HORIZON rows (no real label)
     _prep["valid_rows"] = int(_valid.sum())
     _prep["label_valid"] = int(_label_valid.sum())
+    # Rows invalid AFTER the leading warmup has ended (first True in _valid) are
+    # an INTERIOR gap — a predictor printed non-finite momentum mid-series (see
+    # RAW_YIELD_PREDICTORS comment above) — as opposed to the expected warmup
+    # trim before any window is fully formed. Surfaced so a future predictor
+    # with the same non-positive-print risk doesn't silently delete rows again.
+    if _valid.any():
+        _first_valid = int(np.argmax(_valid))
+        _prep["interior_gap_rows"] = int((~_valid[_first_valid:]).sum())
+    else:
+        _prep["interior_gap_rows"] = 0
     # Date-range fingerprint for the cache key. `data` carries a RangeIndex (reset at
     # load), so the real dates live in the active_date column, not the index — using
     # the index here would be integers (AttributeError on .date()). Fall back to a
@@ -1108,70 +1259,101 @@ def main():
         # so the bar continues from where the fetch left it (~15%) with no gap.
 
         # ── Phase 1: Data Loading ─────────────────────────────────────────
-        console.start_phase("DATA ACQUISITION", 1, 5)
-        progress_bar(progress_container, 16, "Resolving Basket", f"{active_target} · related producers / constituents / sector ETFs")
-
-        console.section("Basket Resolution")
-        constituents, src_msg = get_commodity_basket(active_target)
-        # Surfaced in the Nirnay tab (not just the console — audit finding B4):
-        # a "snapshot (N)" source means live scrape + cache both failed, and
-        # for an uncapped large index (S&P 500 / Nasdaq 100) N is a small
-        # fraction of the true index, so breadth there is read from a partial
-        # basket, not the full constituent set.
-        st.session_state["nirnay_basket_source"] = src_msg
-        console.item("Target", active_target)
-        console.item("Source", src_msg)
-        console.item("Count", len(constituents))
-        if constituents:
-            console.item("Symbols", f"{', '.join(constituents[:3])}...")
-        console.success(f"Resolved {len(constituents)}-instrument {active_target} basket")
-        progress_bar(progress_container, 17, "Fetching Nirnay Macro Data", "yfinance · Global Macro ETFs · FX · Commodities · ~9y")
-
-        console.section("Macro Data")
-        end_date = pd.Timestamp.today()
-        # Match the Aarambh model-dataset window (~9y) so the Nirnay basket and
-        # macro features overlap the FULL series — convergence + Intelligence
-        # calibration then run on real data, not neutral placeholders.
-        start_date = end_date - pd.Timedelta(days=365 * 9)
-        macro_df = fetch_macro_live(start_date, end_date)
-        console.item("Date Range", f"{start_date.date()} to {end_date.date()}")
-        if not macro_df.empty:
-            console.item("YF Columns", f"{len(macro_df.columns)} symbols")
-            console.item("Rows", len(macro_df))
-            console.success(f"Macro data: {len(macro_df.columns)} symbols × {len(macro_df)} rows")
+        # LENS-INDEPENDENT: basket resolution, macro fetch, and constituent
+        # OHLCV depend only on active_target, never on FWD_HORIZON/FWD_MOM_K
+        # (the lens). Cached separately (audit finding F17) so switching
+        # Signal Horizon doesn't re-pull/re-fetch this data — the walk-forward
+        # engine cache_key includes the lens, this one deliberately doesn't.
+        _nirnay_fetch_key = f"nirnay_fetch::{active_target}"
+        _nf_cache = st.session_state.get("_nirnay_fetch_cache")
+        if _nf_cache is not None and _nf_cache.get("key") == _nirnay_fetch_key:
+            console.start_phase("DATA ACQUISITION", 1, 5)
+            constituents = _nf_cache["constituents"]
+            src_msg = _nf_cache["src_msg"]
+            constituent_ohlcv = _nf_cache["constituent_ohlcv"]
+            nirnay_macro_df = _nf_cache["nirnay_macro_df"]
+            macro_cols_list = _nf_cache["macro_cols_list"]
+            st.session_state["nirnay_basket_source"] = src_msg
+            console.item("Basket/Macro/OHLCV", "reused cached fetch (lens-independent)")
+            progress_bar(progress_container, 20, "Data Acquisition Reused", f"{len(constituent_ohlcv)} Constituents · {len(macro_cols_list)} Macros (cached)")
+            console.end_phase("DATA ACQUISITION")
         else:
-            console.warning("No macro data available")
-        progress_bar(progress_container, 18, "Fetching Constituent OHLCV", f"yfinance · {len(constituents)} basket constituents")
+            console.start_phase("DATA ACQUISITION", 1, 5)
+            progress_bar(progress_container, 16, "Resolving Basket", f"{active_target} · related producers / constituents / sector ETFs")
 
-        console.section("Constituent OHLCV")
-        constituent_ohlcv = {}
-        if constituents:
-            constituent_ohlcv = fetch_constituent_ohlcv(constituents, start_date, end_date)
-            console.item("Requested", len(constituents))
-            console.item("Downloaded", len(constituent_ohlcv))
-            if constituent_ohlcv:
-                sample = list(constituent_ohlcv.items())[0]
-                console.item("Sample", f"{sample[0]}: {len(sample[1])} rows")
-            console.success(f"OHLCV data for {len(constituent_ohlcv)} constituents")
-        progress_bar(progress_container, 19, "Assembling Macro Indicators", f"{len(constituent_ohlcv)} constituents downloaded · aligning macro frame")
+            console.section("Basket Resolution")
+            constituents, src_msg = get_commodity_basket(active_target)
+            # Surfaced in the Nirnay tab (not just the console — audit finding B4):
+            # a "snapshot (N)" source means live scrape + cache both failed, and
+            # for an uncapped large index (S&P 500 / Nasdaq 100) N is a small
+            # fraction of the true index, so breadth there is read from a partial
+            # basket, not the full constituent set.
+            st.session_state["nirnay_basket_source"] = src_msg
+            console.item("Target", active_target)
+            console.item("Source", src_msg)
+            console.item("Count", len(constituents))
+            if constituents:
+                console.item("Symbols", f"{', '.join(constituents[:3])}...")
+            console.success(f"Resolved {len(constituents)}-instrument {active_target} basket")
+            progress_bar(progress_container, 17, "Fetching Nirnay Macro Data", "yfinance · Global Macro ETFs · FX · Commodities · ~9y")
 
-        console.section("Nirnay Macro Assembly")
-        nirnay_macro_df = macro_df.copy() if macro_df is not None and not macro_df.empty else pd.DataFrame()
-        if not nirnay_macro_df.empty:
-            console.item("YF Symbols", len(nirnay_macro_df.columns))
-            console.success(f"Macro indicators: {len(nirnay_macro_df.columns)} × {len(nirnay_macro_df)} rows")
-        macro_cols_list = list(nirnay_macro_df.columns) if not nirnay_macro_df.empty else []
-        console.end_phase("DATA ACQUISITION")
-        progress_bar(progress_container, 20, "Data Acquisition Complete", f"{len(constituent_ohlcv)} Constituents · {len(nirnay_macro_df.columns)} Macros")
+            console.section("Macro Data")
+            end_date = pd.Timestamp.today()
+            # Match the Aarambh model-dataset window (~9y) so the Nirnay basket and
+            # macro features overlap the FULL series — convergence + Intelligence
+            # calibration then run on real data, not neutral placeholders.
+            start_date = end_date - pd.Timedelta(days=365 * 9)
+            macro_df = fetch_macro_live(start_date, end_date)
+            console.item("Date Range", f"{start_date.date()} to {end_date.date()}")
+            if not macro_df.empty:
+                console.item("YF Columns", f"{len(macro_df.columns)} symbols")
+                console.item("Rows", len(macro_df))
+                console.success(f"Macro data: {len(macro_df.columns)} symbols × {len(macro_df)} rows")
+            else:
+                console.warning("No macro data available")
+            progress_bar(progress_container, 18, "Fetching Constituent OHLCV", f"yfinance · {len(constituents)} basket constituents")
+
+            console.section("Constituent OHLCV")
+            constituent_ohlcv = {}
+            if constituents:
+                constituent_ohlcv = fetch_constituent_ohlcv(constituents, start_date, end_date)
+                console.item("Requested", len(constituents))
+                console.item("Downloaded", len(constituent_ohlcv))
+                if constituent_ohlcv:
+                    sample = list(constituent_ohlcv.items())[0]
+                    console.item("Sample", f"{sample[0]}: {len(sample[1])} rows")
+                console.success(f"OHLCV data for {len(constituent_ohlcv)} constituents")
+            progress_bar(progress_container, 19, "Assembling Macro Indicators", f"{len(constituent_ohlcv)} constituents downloaded · aligning macro frame")
+
+            console.section("Nirnay Macro Assembly")
+            nirnay_macro_df = macro_df.copy() if macro_df is not None and not macro_df.empty else pd.DataFrame()
+            if not nirnay_macro_df.empty:
+                console.item("YF Symbols", len(nirnay_macro_df.columns))
+                console.success(f"Macro indicators: {len(nirnay_macro_df.columns)} × {len(nirnay_macro_df)} rows")
+            macro_cols_list = list(nirnay_macro_df.columns) if not nirnay_macro_df.empty else []
+            console.end_phase("DATA ACQUISITION")
+            progress_bar(progress_container, 20, "Data Acquisition Complete", f"{len(constituent_ohlcv)} Constituents · {len(nirnay_macro_df.columns)} Macros")
+
+            st.session_state["_nirnay_fetch_cache"] = {
+                "key": _nirnay_fetch_key,
+                "constituents": constituents, "src_msg": src_msg,
+                "constituent_ohlcv": constituent_ohlcv,
+                "nirnay_macro_df": nirnay_macro_df, "macro_cols_list": macro_cols_list,
+            }
 
         # ── Phase 2: Aarambh FairValueEngine ─────────────────────────────
         console.start_phase("AARAMBH ENGINE", 2, 5)
         progress_bar(progress_container, 20, "Running Aarambh Engine", f"Walk-Forward · {len(active_features)} Predictors · {len(data)} Rows")
 
+        # PCA component count per the aarambh_full PCA lever recommendation of the
+        # latest suite run (research/TUNING_COVERAGE.md). Single local so the
+        # console line below and the engine.fit call can never disagree.
+        _N_PCA = 2
+
         console.section("Engine Configuration")
         console.item("Mode", f"Predictive · forecast {FWD_HORIZON}d forward return")
         console.item("Target", active_target)
-        console.item("Features", f"{len(active_features)} macro momentum ({FWD_MOM_K}d) → PCA(20) causal")
+        console.item("Features", f"{len(active_features)} macro momentum ({FWD_MOM_K}d) → PCA({_N_PCA}) causal")
         console.item("Observations", f"{len(data)} rows")
         console.item("Min Data Points", MIN_DATA_POINTS)
         console.item("Lookback Windows", f"{LOOKBACK_WINDOWS}")
@@ -1196,7 +1378,7 @@ def main():
             # h-day FORWARD-return target y (which would sum each daily return
             # up to h times — see FairValueEngine.fit's `price` docstring).
             _price_level = data[active_target].to_numpy(dtype=np.float64)
-            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=20, purge=FWD_HORIZON, label_mask=_label_valid, price=_price_level, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
+            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=_N_PCA, purge=FWD_HORIZON, label_mask=_label_valid, price=_price_level, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
             # Carry the raw price LEVEL on the engine output too (returns-space
             # modeling otherwise leaves only return-scale columns). Used by the
             # Aarambh tab for price display and by the Intelligence tuner.
@@ -1220,91 +1402,127 @@ def main():
         progress_bar(progress_container, 40, "Aarambh Engine Complete", f"Signal: {sig['signal']} ({sig['strength']}) · Conviction: {sig['conviction_score']:+.0f}")
 
         # ── Phase 3: Nirnay Constituent Analysis ──────────────────────────
+        # LENS-INDEPENDENT (audit finding F17): per-constituent MSF/MMR/regime
+        # analysis and aggregation depend only on active_target's basket +
+        # macro window, never on the Signal Horizon lens. This is the ~30s
+        # (Nifty 50) to ~5min (uncapped S&P 500) cost the lens switch used to
+        # re-pay for byte-identical output. Cached under the SAME
+        # _nirnay_fetch_key as Phase 1; only the target-calendar reindex below
+        # (cheap — no yfinance calls) re-runs per lens, since a different
+        # lens's warm-up trim can shift the target's date spine slightly.
         console.start_phase("NIRNAY ENGINE", 3, 5)
         progress_bar(progress_container, 42, "Running Nirnay Engine", f"MSF+MMR+Regime · {len(constituent_ohlcv)} Constituents")
 
-        nirnay_daily = pd.DataFrame()
-        nirnay_constituent_dfs = {}
+        _na_cache = st.session_state.get("_nirnay_analysis_cache")
+        if _na_cache is not None and _na_cache.get("key") == _nirnay_fetch_key:
+            nirnay_constituent_dfs = _na_cache["nirnay_constituent_dfs"]
+            nirnay_daily_pre_reindex = _na_cache["nirnay_daily_pre_reindex"]
+            console.item("Per-Stock Analysis", "reused cached fit (lens-independent)")
+            progress_bar(progress_container, 74, "Nirnay Engine Reused", f"{len(nirnay_constituent_dfs)} Stocks (cached)")
+        else:
+            nirnay_daily_pre_reindex = pd.DataFrame()
+            nirnay_constituent_dfs = {}
 
-        if constituent_ohlcv:
-            total = len(constituent_ohlcv)
-            console.section("Per-Stock Analysis")
-            console.item("Constituents", total)
-            console.item("MSF Length", NIRNAY_MSF_LENGTH)
-            console.item("ROC Length", NIRNAY_ROC_LEN)
-            console.item("Regime Sensitivity", NIRNAY_REGIME_SENSITIVITY)
-            console.item("Base Weight", NIRNAY_BASE_WEIGHT)
-            console.item("MMR Top-N Drivers", NIRNAY_MMR_NUM_VARS)
-            console.item("Oversold / Overbought", f"{NIRNAY_OVERSOLD} / {NIRNAY_OVERBOUGHT}")
-            console.item("Macro Columns", len(macro_cols_list))
+            if constituent_ohlcv:
+                total = len(constituent_ohlcv)
+                console.section("Per-Stock Analysis")
+                console.item("Constituents", total)
+                console.item("MSF Length", NIRNAY_MSF_LENGTH)
+                console.item("ROC Length", NIRNAY_ROC_LEN)
+                console.item("Regime Sensitivity", NIRNAY_REGIME_SENSITIVITY)
+                console.item("Base Weight", NIRNAY_BASE_WEIGHT)
+                console.item("MMR Top-N Drivers", NIRNAY_MMR_NUM_VARS)
+                console.item("Oversold / Overbought", f"{NIRNAY_OVERSOLD} / {NIRNAY_OVERBOUGHT}")
+                console.item("Macro Columns", len(macro_cols_list))
 
-            for i, (sym, ohlcv_df) in enumerate(constituent_ohlcv.items()):
-                try:
-                    merged = ohlcv_df.copy()
-                    if nirnay_macro_df is not None and not nirnay_macro_df.empty:
-                        merged = merged.join(nirnay_macro_df, how="left")
-                        merged[macro_cols_list] = merged[macro_cols_list].ffill()
+                for i, (sym, ohlcv_df) in enumerate(constituent_ohlcv.items()):
+                    try:
+                        merged = ohlcv_df.copy()
+                        if nirnay_macro_df is not None and not nirnay_macro_df.empty:
+                            merged = merged.join(nirnay_macro_df, how="left")
+                            merged[macro_cols_list] = merged[macro_cols_list].ffill()
 
-                    n_rows = len(merged)
-                    has_macro = len([c for c in macro_cols_list if c in merged.columns])
+                        n_rows = len(merged)
+                        has_macro = len([c for c in macro_cols_list if c in merged.columns])
 
-                    result_df, _ = run_full_analysis(
-                        merged, length=NIRNAY_MSF_LENGTH, roc_len=NIRNAY_ROC_LEN,
-                        regime_sensitivity=NIRNAY_REGIME_SENSITIVITY, base_weight=NIRNAY_BASE_WEIGHT,
-                        num_vars=NIRNAY_MMR_NUM_VARS,
-                        oversold=NIRNAY_OVERSOLD, overbought=NIRNAY_OVERBOUGHT,
-                        macro_columns=macro_cols_list,
-                    )
-                    nirnay_constituent_dfs[sym] = result_df
+                        result_df, _ = run_full_analysis(
+                            merged, length=NIRNAY_MSF_LENGTH, roc_len=NIRNAY_ROC_LEN,
+                            regime_sensitivity=NIRNAY_REGIME_SENSITIVITY, base_weight=NIRNAY_BASE_WEIGHT,
+                            num_vars=NIRNAY_MMR_NUM_VARS,
+                            oversold=NIRNAY_OVERSOLD, overbought=NIRNAY_OVERBOUGHT,
+                            macro_columns=macro_cols_list,
+                        )
+                        nirnay_constituent_dfs[sym] = result_df
 
-                    last_row = result_df.iloc[-1]
-                    osc = last_row.get('Unified_Osc', 0)
-                    cond = last_row.get('Condition', 'N/A')
-                    regime = last_row.get('Regime', 'N/A')
-                    console.detail(f"[{i+1}/{total}] {sym}: osc={osc:+.1f} [{cond}] regime={regime} rows={n_rows} macros={has_macro}")
+                        last_row = result_df.iloc[-1]
+                        osc = last_row.get('Unified_Osc', 0)
+                        cond = last_row.get('Condition', 'N/A')
+                        regime = last_row.get('Regime', 'N/A')
+                        console.detail(f"[{i+1}/{total}] {sym}: osc={osc:+.1f} [{cond}] regime={regime} rows={n_rows} macros={has_macro}")
 
-                    pct_val = int(45 + (i + 1) / total * 30)
-                    progress_bar(progress_container, pct_val, f"Analyzing {sym}", f"Osc={osc:+.1f} [{cond}] Regime={regime}")
+                        pct_val = int(45 + (i + 1) / total * 30)
+                        progress_bar(progress_container, pct_val, f"Analyzing {sym}", f"Osc={osc:+.1f} [{cond}] Regime={regime}")
 
-                except Exception as e:
-                    console.failure(f"{sym}", str(e))
+                    except Exception as e:
+                        console.failure(f"{sym}", str(e))
 
-            if nirnay_constituent_dfs:
-                console.section("Aggregation")
-                nirnay_daily = aggregate_constituent_timeseries(nirnay_constituent_dfs)
-                # Re-orient breadth to the target's direction for inverse baskets
-                # (no-op for co-directional baskets, i.e. all current targets).
-                _polarity = TARGET_POLARITY.get(active_target, 1)
-                if _polarity < 0:
-                    nirnay_daily = apply_polarity(nirnay_daily, _polarity)
-                    console.item("Polarity", f"{_polarity} (basket inverted to target)")
+                if nirnay_constituent_dfs:
+                    console.section("Aggregation")
+                    nirnay_daily_pre_reindex = aggregate_constituent_timeseries(nirnay_constituent_dfs)
+                    # Re-orient breadth to the target's direction for inverse baskets
+                    # (no-op for co-directional baskets, i.e. all current targets).
+                    _polarity = TARGET_POLARITY.get(active_target, 1)
+                    if _polarity < 0:
+                        nirnay_daily_pre_reindex = apply_polarity(nirnay_daily_pre_reindex, _polarity)
+                        console.item("Polarity", f"{_polarity} (basket inverted to target)")
 
-                # Carry the basket forward onto the TARGET's trading calendar. The
-                # constituents (often global / US-listed) trade on a different calendar
-                # than the target — on a Monday-morning IST run, or when the target's
-                # market is open but the basket's is on holiday, the basket's last close
-                # IS its current value. Reindexing it onto the target's dates (ff-fill)
-                # lets the SIGNAL, cards and plots all reach the target's latest session
-                # instead of truncating to the slowest constituent. We record the
-                # basket's true last-native date so the UI can flag how much is carried
-                # over (the partial-session notice covers the row-level staleness).
-                st.session_state["nirnay_native_last"] = pd.Timestamp(nirnay_daily.index.max())
-                if active_date in data.columns:
-                    _cal = pd.DatetimeIndex(sorted(pd.to_datetime(
-                        data[active_date], errors="coerce").dropna().dt.normalize().unique()))
-                    _nd = nirnay_daily.copy()
-                    _nd.index = pd.to_datetime(_nd.index).normalize()
-                    _nd = _nd[~_nd.index.duplicated(keep="last")].sort_index()
-                    nirnay_daily = _nd.reindex(_cal, method="ffill").dropna(how="all")
-                console.item("Trading Days", len(nirnay_daily))
-                if len(nirnay_daily) > 0:
-                    last = nirnay_daily.iloc[-1]
-                    console.item("Avg Signal", f"{last.get('Avg_Signal', 0):+.2f}")
-                    console.item("Oversold %", f"{last.get('Oversold_Pct', 0):.0f}%")
-                    console.item("Overbought %", f"{last.get('Overbought_Pct', 0):.0f}%")
-                    console.item("Buy Signals", int(last.get('Buy_Signals', 0)))
-                    console.item("Sell Signals", int(last.get('Sell_Signals', 0)))
-                console.success(f"Nirnay aggregation: {len(nirnay_daily)} trading days")
+            st.session_state["_nirnay_analysis_cache"] = {
+                "key": _nirnay_fetch_key,
+                "nirnay_constituent_dfs": nirnay_constituent_dfs,
+                "nirnay_daily_pre_reindex": nirnay_daily_pre_reindex,
+            }
+
+        # ── LENS-DEPENDENT tail: reindex onto the target's calendar ─────────
+        # Cheap (pure pandas, no yfinance) — re-runs every lens since a
+        # different lens's warm-up trim can shift the target's date spine.
+        nirnay_daily = nirnay_daily_pre_reindex
+        if not nirnay_daily.empty:
+            # Carry the basket forward onto the TARGET's trading calendar. The
+            # constituents (often global / US-listed) trade on a different calendar
+            # than the target — on a Monday-morning IST run, or when the target's
+            # market is open but the basket's is on holiday, the basket's last close
+            # IS its current value. Reindexing it onto the target's dates (ff-fill)
+            # lets the SIGNAL, cards and plots all reach the target's latest session
+            # instead of truncating to the slowest constituent. We record the
+            # basket's true last-native date so the UI can flag how much is carried
+            # over (the partial-session notice covers the row-level staleness).
+            st.session_state["nirnay_native_last"] = pd.Timestamp(nirnay_daily.index.max())
+            if active_date in data.columns:
+                _cal = pd.DatetimeIndex(sorted(pd.to_datetime(
+                    data[active_date], errors="coerce").dropna().dt.normalize().unique()))
+                _nd = nirnay_daily.copy()
+                _nd.index = pd.to_datetime(_nd.index).normalize()
+                _nd = _nd[~_nd.index.duplicated(keep="last")].sort_index()
+                # _Native marks rows that are a genuine basket observation
+                # (present in _nd BEFORE the reindex) vs carried forward by
+                # the ffill below (the basket's market was closed/hadn't
+                # posted that day). Carried through so the calibration
+                # overlap gate can require NATIVE overlap, not ffilled
+                # rows masquerading as fresh Nirnay signal (audit finding
+                # F21) — the UI's own "breadth carried forward" notice
+                # already discloses this to the user; the gate didn't.
+                _native_dates = set(_nd.index)
+                nirnay_daily = _nd.reindex(_cal, method="ffill").dropna(how="all")
+                nirnay_daily["_Native"] = nirnay_daily.index.isin(_native_dates)
+            console.item("Trading Days", len(nirnay_daily))
+            if len(nirnay_daily) > 0:
+                last = nirnay_daily.iloc[-1]
+                console.item("Avg Signal", f"{last.get('Avg_Signal', 0):+.2f}")
+                console.item("Oversold %", f"{last.get('Oversold_Pct', 0):.0f}%")
+                console.item("Overbought %", f"{last.get('Overbought_Pct', 0):.0f}%")
+                console.item("Buy Signals", int(last.get('Buy_Signals', 0)))
+                console.item("Sell Signals", int(last.get('Sell_Signals', 0)))
+            console.success(f"Nirnay aggregation: {len(nirnay_daily)} trading days")
 
         console.end_phase("NIRNAY ENGINE")
         progress_bar(progress_container, 75, "Nirnay Engine Complete", f"{len(nirnay_constituent_dfs)} Stocks · {len(nirnay_daily)} Trading Days")
@@ -1376,6 +1594,7 @@ def main():
 
         console.section("Daily Convergence Scoring")
         overlap_count = 0
+        native_overlap_count = 0
         skipped_warmup = 0
         total_dates = len(aarambh_ts.index)
         for i, ts_idx in enumerate(aarambh_ts.index):
@@ -1410,6 +1629,8 @@ def main():
                     "num_constituents": int(row_n.get("Total_Analyzed", 0)),
                 }
                 overlap_count += 1
+                if bool(row_n.get("_Native", True)):
+                    native_overlap_count += 1
             else:
                 nirnay_stats = {
                     "oversold_pct": 50, "overbought_pct": 50, "avg_unified_osc": 0,
@@ -1425,7 +1646,8 @@ def main():
 
         console.item("Total Aarambh Dates", len(aarambh_ts))
         console.item("Skipped (warm-up, no genuine forecast)", skipped_warmup)
-        console.item("Overlap Dates", overlap_count)
+        console.item("Overlap Dates", f"{overlap_count} ({native_overlap_count} native, "
+                     f"{overlap_count - native_overlap_count} carried-forward)")
         console.success(f"Convergence scoring complete")
 
         # ── Intelligence Mode overlap gate ───────────────────────────────
@@ -1439,20 +1661,31 @@ def main():
         # Aarambh-only target with an empty/unresolvable basket, or a target
         # whose basket barely overlaps the model's date range). With no
         # overlap every date gets the same neutral nirnay_stats default
-        # (app.py's fallback above), so consensus_direction is always 0,
-        # convergence_score is a CONSTANT, and every dim score is constant —
-        # the tuner would still run its full trial budget scoring a
-        # degenerate, all-NaN-IC objective, then persist an arbitrary "best"
-        # (weights, thresholds) with val_ic == 0.0 that reads as a genuine,
-        # if marginal, calibration. 60 overlap dates is a low bar (~3 trading
-        # months) chosen only to exclude the genuinely-empty-basket case, not
-        # to second-guess a real but short-history calibration.
+        # (app.py's fallback above), so the continuous consensus direction
+        # degenerates to aarambh_bull/2 and every nirnay-driven dim score is
+        # constant — the tuner would then "calibrate" what is really a
+        # half-weight Aarambh-only signal against forward returns and persist
+        # it as a convergence profile (under the old hard direction gate the
+        # score was a constant 0 and the objective all-NaN; the continuous
+        # form makes the gate MORE necessary, since the degenerate signal now
+        # looks alive). 60 overlap dates is a low bar (~3 trading months)
+        # chosen only to exclude the genuinely-empty-basket case, not to
+        # second-guess a real but short-history calibration.
+        #
+        # Gated on NATIVE overlap, not raw overlap (audit finding F21):
+        # nirnay_daily is forward-filled onto the target's calendar before
+        # this loop runs (the basket's own market may be closed on a day the
+        # target trades), so `overlap_count` alone would happily count a long
+        # run of carried-forward, non-fresh Nirnay rows as "signal to
+        # calibrate against" — the SAME breadth reading repeated across many
+        # dates, not genuinely new cross-sectional information each day.
         _MIN_OVERLAP_FOR_CALIBRATION = 60
-        if _intel_enabled and overlap_count < _MIN_OVERLAP_FOR_CALIBRATION:
+        if _intel_enabled and native_overlap_count < _MIN_OVERLAP_FOR_CALIBRATION:
             console.warning(
-                f"Intelligence calibration skipped: only {overlap_count} Aarambh/Nirnay "
-                f"overlap dates (< {_MIN_OVERLAP_FOR_CALIBRATION}) — convergence_score would "
-                f"be a constant (no genuine Nirnay signal to calibrate against)."
+                f"Intelligence calibration skipped: only {native_overlap_count} NATIVE "
+                f"Aarambh/Nirnay overlap dates (< {_MIN_OVERLAP_FOR_CALIBRATION}; "
+                f"{overlap_count} total overlap incl. carried-forward rows) — "
+                f"convergence_score would be dominated by repeated, non-fresh breadth."
             )
             _intel_enabled = False
 
@@ -1498,7 +1731,7 @@ def main():
         _final_profile: _intel_mod.IntelligenceProfile | None = None
         if _intel_enabled:
             console.section("Intelligence Calibration")
-            _n_trials = int(st.session_state.get("intel_n_trials", 50))
+            _n_trials = int(st.session_state.get("intel_n_trials", INTEL_N_TRIALS))
             progress_bar(
                 progress_container, 84,
                 "Intelligence Mode · Setup",
@@ -1591,8 +1824,20 @@ def main():
             console.success(f"Re-fit complete with calibrated profile")
             _active_w = _final_profile.weights
             _active_t = _final_profile.thresholds
+        elif _prior_profile is not None:
+            # Intelligence Mode OFF, or the overlap gate skipped calibration
+            # THIS run — but `validator` above was already constructed with
+            # `_prior_w` (a saved profile's weights), so convergence_df's
+            # dim_* composite reflects the PRIOR calibrated weights, not
+            # factory defaults. Publish what actually ran, so the Passport /
+            # Convergence cards don't report "Default" while the computed
+            # series is calibrated (previously always fell to the defaults
+            # branch below regardless of whether a prior profile seeded the
+            # first pass).
+            _active_w = _prior_w
+            _active_t = _prior_t
         else:
-            # Intelligence Mode OFF — record the default state.
+            # Genuinely no profile involved — record the true default state.
             _active_w = _intel_mod.DEFAULT_WEIGHTS.copy()
             _active_t = _intel_mod.DEFAULT_THRESHOLDS.copy()
 
@@ -1601,20 +1846,50 @@ def main():
         st.session_state["intelligence_active_weights"] = _active_w
         st.session_state["intelligence_active_thresholds"] = _active_t
         st.session_state["intelligence_active_profile"] = (
-            _final_profile.to_dict() if _final_profile is not None else None
+            _final_profile.to_dict() if _final_profile is not None
+            else (_prior_profile.to_dict() if _prior_profile is not None else None)
         )
 
-        # ── 4d. Normalized convergence with calibrated thresholds ───────
-        from convergence.normalization import compute_normalized_convergence
-        _nishkarsh_norm = compute_normalized_convergence(
-            aarambh_ts, nirnay_daily, thresholds=_active_t,
+        # ── 4d. NORMALIZED CONSENSUS — the HEADLINE object ───────────────────
+        # Product decision (consensus-headline): the hero card headlines the
+        # normalized consensus — the causal expanding-z average of Aarambh's
+        # ConvictionRaw and Nirnay's Avg_Signal, classified with its OWN
+        # factory p75/p90-anchored thresholds (±0.26/±0.39). This is the SAME object as the
+        # Unified Signal plot's top row and the TATTVA CONVICTION card, so
+        # hero, card and plot reconcile identically by construction (no
+        # cross-object reconciliation needed), and it is the object
+        # hero_study historically validated as the directional read. It is
+        # never classified with calibrated thresholds (audit finding F1) —
+        # the calibrated composite below is a separate evidence row.
+        # `consensus_series` is the single source for the full history
+        # (hero-history plot + DDM trend); the dict is its last point.
+        from convergence.normalization import (
+            compute_normalized_convergence, consensus_series, classify_convergence_score,
         )
+        _consensus_full = consensus_series(aarambh_ts, nirnay_daily)
+        _nishkarsh_norm = compute_normalized_convergence(aarambh_ts, nirnay_daily)
         if _nishkarsh_norm:
-            console.section("Normalized Convergence (UI display)")
+            console.section("Normalized Consensus (headline)")
             console.item("Conviction", f"{_nishkarsh_norm['value']:+.2f}")
             console.item("Signal", _nishkarsh_norm['signal'])
             console.item("  Aarambh contribution", f"{_nishkarsh_norm['aarambh_norm']:+.2f}")
             console.item("  Nirnay contribution",  f"{_nishkarsh_norm['nirnay_norm']:+.2f}")
+
+        # ── 4e. CALIBRATED SIGNAL — the learned variant (evidence row) ──────
+        # convergence_score (post apply_calibrated_weights, ±100 scale) IS the
+        # exact quantity Intelligence Mode's Optuna search scores and bins
+        # with _active_t — so this is the one place the learned thresholds are
+        # semantically valid (audit findings F1/F2). Not the headline: it
+        # feeds the hero's CALIBRATED evidence row (second opinion on the
+        # consensus read) and carries the Val IC the trust chip reports. The
+        # RAW factory-weight composite is no longer surfaced in the UI at all
+        # — it remains the research baseline in
+        # research/calibration_lift_study.py (raw-vs-calibrated ablation).
+        _calibrated_score = float(convergence_df["convergence_score"].iloc[-1]) if not convergence_df.empty else 0.0
+        _calibrated_signal = classify_convergence_score(_calibrated_score, _active_t)
+        console.section("Calibrated Signal (evidence)")
+        console.item("Score", f"{_calibrated_score:+.1f}")
+        console.item("Signal", _calibrated_signal)
 
         console.section("Divergence Detection")
         progress_bar(progress_container, 93, "Detecting Divergences", "Cross-System Disagreement Analysis")
@@ -1674,24 +1949,59 @@ def main():
         st.session_state["divergence_events"] = events
         st.session_state["nishkarsh_result"] = results[-1] if results else None
         st.session_state["last_agreement"] = convergence_df["agreement_ratio"].iloc[-1] if not convergence_df.empty else 0
-        # Full calibrated convergence series (DDM-filtered conviction, ±100 → [-1,+1])
-        # so the Unified Signal plot can overlay the model line the hero headline
-        # reflects — keeps card and plot on the same (calibrated) object.
+        # THE CALIBRATED variant (CALIBRATED evidence row + trust-chip Val IC
+        # — Phase 4e). The headline itself is the normalized consensus
+        # (nishkarsh_conv_normalized below + hero_series), so no separate
+        # headline scalars are stored.
+        st.session_state["nishkarsh_calibrated_score"] = _calibrated_score
+        st.session_state["nishkarsh_calibrated_signal"] = _calibrated_signal
+
+        # Series for the hero-history plot + TREND row.
+        #   • hero_series   — the HEADLINE object's full history: the
+        #     normalized consensus ([-1,+1], from consensus_series — the
+        #     single source shared with the Unified Signal plot's top row)
+        #   • hero_smoothed — DDM of the SAME consensus (lens-tuned params,
+        #     tanh-bounded like every other DDM consumer) — the trend the
+        #     hero's TREND row compares today's print against
+        #   • calibrated_conv_series — DDM of the CALIBRATED composite (the
+        #     Unified Signal plot's amber overlay); index converted to a
+        #     genuine DatetimeIndex (convergence_df's index is DATE STRINGS —
+        #     a string index would silently reindex to all-NaN, verification
+        #     finding V1)
+        if not _consensus_full.empty:
+            st.session_state["hero_series"] = _consensus_full["Consensus"].rename("HeroConsensus")
+            from analytics.ddm_filter import drift_diffusion_filter as _ddm
+            from analytics.utils import _apply_conviction_bounds as _bound
+            _cons_filt, _, _ = _ddm(
+                _consensus_full["Consensus"].to_numpy() * 100.0,
+                leak_rate=_horizon_cfg["ddm_leak"],
+                drift_scale=_horizon_cfg["ddm_drift"],
+                long_run_var=_horizon_cfg["ddm_lrv"],
+            )
+            st.session_state["hero_smoothed"] = pd.Series(
+                _bound(_cons_filt) / 100.0, index=_consensus_full.index,
+                name="HeroConsensusSmoothed",
+            )
+        else:
+            st.session_state["hero_series"] = None
+            st.session_state["hero_smoothed"] = None
         if results:
+            _ccs_index = pd.to_datetime(convergence_df.index, errors="coerce")
             st.session_state["calibrated_conv_series"] = pd.Series(
                 [r.nishkarsh_conviction / 100.0 for r in results],
-                index=convergence_df.index, name="CalibratedConvergence",
+                index=_ccs_index, name="CalibratedConvergence",
             )
         else:
             st.session_state["calibrated_conv_series"] = None
 
-        # Reuse the normalized convergence computed in the Conviction Model
-        # section above — single source of truth from convergence/normalization.py,
-        # shared with the metric cards and the Unified Signal plot.
+        # THE HEADLINE: the normalized consensus dict (value + signal +
+        # per-engine contributions) — single source of truth from
+        # convergence/normalization.py, shared verbatim with the TATTVA
+        # CONVICTION card and the Unified Signal plot's top row.
         st.session_state["nishkarsh_conv_normalized"] = _nishkarsh_norm
 
-        # Display signal = what the UI cards show (normalized if available,
-        # else fall back to the DDM-derived signal).
+        # Display signal = what the UI cards show: the consensus headline,
+        # then the DDM signal as a last resort.
         display_signal = (
             _nishkarsh_norm["signal"] if _nishkarsh_norm
             else (results[-1].nishkarsh_signal if results else "N/A")
@@ -1726,7 +2036,13 @@ def main():
         # restores instantly. LRU-evict to keep memory bounded.
         _rcache = st.session_state.setdefault("results_cache", {})
         _rcache.pop(cache_key, None)
-        _rcache[cache_key] = {bk: st.session_state.get(bk) for bk in _BUNDLE_KEYS}
+        _bundle_snapshot = {bk: st.session_state.get(bk) for bk in _BUNDLE_KEYS}
+        # Trim large baskets' per-constituent frames before they enter the LRU
+        # (audit finding F19) — see _bundle_nirnay_constituent_dfs's docstring.
+        _bundle_snapshot["nirnay_constituent_dfs"] = _bundle_nirnay_constituent_dfs(
+            _bundle_snapshot.get("nirnay_constituent_dfs") or {}
+        )
+        _rcache[cache_key] = _bundle_snapshot
         while len(_rcache) > _RESULTS_CACHE_MAX:
             _rcache.pop(next(iter(_rcache)))
 
@@ -1767,10 +2083,22 @@ def main():
     # the part that's load-bearing here, not the exact ICs.
     # Content-aware key (not just row count): include the latest Price so an intraday
     # refresh that updates the last bar without adding a row still recomputes.
+    #
+    # Computed ONCE here with the SUPERSET hold grid (lens hold + the Precedent
+    # tab's honorary +1d tile) and cached as the raw analog list — the tab
+    # (ui/tabs/tab_precedent.py) previously called find_similar_periods AGAIN
+    # with its own (slightly wider) hold_horizons on every render, re-running
+    # the expensive part (feature-frame build incl. rolling Hurst, Mahalanobis
+    # distance, Theiler selection) a second time for the same ts/target/
+    # mom_window (audit finding F18). summarize_forward is cheap (pure
+    # aggregation), so both the hero's single-horizon read and the tab's
+    # per-horizon cards derive from this one cached analog list.
     _plast = float(ts["Price"].iloc[-1]) if "Price" in ts.columns and len(ts) else 0.0
     _pkey = f"{active_target}|{st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}|{len(ts)}|{_plast:.6g}"
     if st.session_state.get("_prec_key") != _pkey:   # recompute only when inputs change
         _prec_summary = None
+        _cached_analogs: list = []
+        _cached_display_hold: tuple = ()
         try:
             from analytics.analogs import find_similar_periods as _fsp, summarize_forward as _sf
             _hlens = SIGNAL_HORIZONS.get(
@@ -1778,7 +2106,16 @@ def main():
                 SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
             )
             _hold = tuple(_hlens["hold"])
-            _analogs = _fsp(ts, active_target, hold_horizons=_hold, mom_window=_hlens["momentum"])
+            # Superset = lens hold grid + honorary +1d (mirrors
+            # ui/tabs/tab_precedent.py's display_hold construction exactly, so
+            # the cached analogs cover every horizon either consumer needs).
+            if PRECEDENT_HONORARY_HORIZON is not None and PRECEDENT_HONORARY_HORIZON not in _hold:
+                _display_hold = tuple(sorted(set((PRECEDENT_HONORARY_HORIZON,) + _hold)))
+            else:
+                _display_hold = _hold
+            _analogs = _fsp(ts, active_target, hold_horizons=_display_hold, mom_window=_hlens["momentum"])
+            _cached_analogs = _analogs
+            _cached_display_hold = _display_hold
             _ps = _sf(_analogs, _hold) if _analogs else {}
             _hp = max(_hold)                         # lens primary horizon
             _row = _ps.get(int(_hp))
@@ -1792,6 +2129,9 @@ def main():
         except Exception:
             _prec_summary = None
         st.session_state["precedent_summary"] = _prec_summary
+        st.session_state["_precedent_analogs_cache"] = {
+            "pkey": _pkey, "periods": _cached_analogs, "display_hold": _cached_display_hold,
+        }
         st.session_state["_prec_key"] = _pkey
 
     # ─── Primary Signal (Above Tabs, Always Visible) ───────────────────────
@@ -1814,7 +2154,10 @@ def main():
     # ─── Timeframe Filter — with robust persistence ───────────────────────
     if 'tf_selected' not in st.session_state:
         st.session_state.tf_selected = '6M'
-    TIMEFRAMES = {'3M': 63, '6M': 126, '1Y': 252, '2Y': 504, 'ALL': None}
+    # Derived from TIMEFRAME_TRADING_DAYS (core/config.py) rather than a
+    # second hard-coded {3M:63, 6M:126, ...} literal — the two used to drift
+    # independently with no shared source (audit finding F15).
+    TIMEFRAMES = {**TIMEFRAME_TRADING_DAYS, 'ALL': None}
 
     tf_cols = st.columns(len(TIMEFRAMES), gap="small")
     for i, tf in enumerate(TIMEFRAMES.keys()):
@@ -1835,7 +2178,6 @@ def main():
             cutoff = max_date - offsets.get(selected_tf, DateOffset(years=1))
             ts_filtered = ts[ts["Date"] >= cutoff]
         else:
-            from core.config import TIMEFRAME_TRADING_DAYS
             n_days = TIMEFRAME_TRADING_DAYS.get(selected_tf, 252)
             ts_filtered = ts.iloc[max(0, len(ts) - n_days):]
     x_axis = ts_filtered["Date"]
@@ -1882,9 +2224,20 @@ def main():
         _safe_render("Aarambh", lambda: render_aarambh_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats, regime_stats, ts, active_target))
     with tab3:
         _safe_render("Nirnay", lambda: render_nirnay_tab(selected_tf=selected_tf))
+    # Reuse the analog list already computed above (Precedent base-rate for the
+    # hero) instead of having the tab call find_similar_periods a second time
+    # for the same (ts, target, mom_window) — audit finding F18. Guarded on
+    # the pkey matching THIS render's ts/target/lens; a mismatch (shouldn't
+    # happen since the precompute above always runs first) falls back to None,
+    # and the tab recomputes itself exactly as before.
+    _prec_cache = st.session_state.get("_precedent_analogs_cache")
+    _cached_periods = (
+        _prec_cache["periods"] if _prec_cache and _prec_cache.get("pkey") == _pkey else None
+    )
     with tab4:
         _safe_render("Precedent", lambda: render_precedent_tab(
-            ts, active_target, tuple(_lens["hold"]), _lens["momentum"], _lens["horizon"]))
+            ts, active_target, tuple(_lens["hold"]), _lens["momentum"], _lens["horizon"],
+            precomputed_periods=_cached_periods))
     with tab5:
         _safe_render("Diagnostics", lambda: render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats))
     with tab6:

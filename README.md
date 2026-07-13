@@ -1,6 +1,6 @@
 # TATTVA — तत्त्व
 
-**Unified Convergence Engine** · v2.5.0 · *@thebullishvalue*
+**Unified Convergence Engine** · v2.6.0 · *@thebullishvalue*
 
 > *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality": the underlying
 > truth distilled from the convergence of evidence.

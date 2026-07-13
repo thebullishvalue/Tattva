@@ -30,7 +30,7 @@ from core.config import (
     INDEX_TARGETS_MAP,
     ALL_TARGETS,
 )
-from data.cache import ohlcv_cache, macro_cache
+from data.cache import ohlcv_cache, macro_cache, _current_session_key
 from data.circuit_breaker import (
     yfinance_circuit,
     CircuitBreakerError,
@@ -138,14 +138,30 @@ def _load_macro_snapshots_newest_first() -> list[pd.DataFrame]:
     return snaps
 
 
-# Module-level registry of the most recent backfill's per-column staleness —
+# Registry of the most recent backfill's per-column staleness —
 # {ticker: last_native_date} for columns filled from a snapshot that was
 # itself older than STALE_BACKFILL_DAYS behind the current frame. Read by
 # app.py's freshness section (see B1 in the audit) to surface a warning
 # instead of silently ffilling a possibly weeks-old value across the whole
 # frame with no user-visible signal beyond a log line nobody sees on
-# Streamlit. Cleared/repopulated on every call to _backfill_missing_columns.
-STALE_BACKFILLS: dict[str, str] = {}
+# Streamlit.
+#
+# Keyed by Streamlit session id (mirrors data.cache._FORCE_UNTIL /
+# _current_session_key): Streamlit serves every concurrent session from ONE
+# process, so a plain module-level dict let one session's backfill notice
+# bleed into every other concurrent session's freshness banner (or get
+# clobbered by a concurrent fetch) — the same single-process/multi-session
+# hazard already fixed for the force-refresh window. Falls back to one shared
+# key outside a Streamlit run context (research/ scripts), identical to the
+# old global-dict behaviour there since there's only ever one "session".
+# Cleared/repopulated FOR THE CALLING SESSION on every call to
+# _backfill_missing_columns.
+STALE_BACKFILLS: dict[str, dict[str, str]] = {}
+
+
+def _current_stale_backfills() -> dict[str, str]:
+    """The calling session's stale-backfill registry (read-only view for callers)."""
+    return STALE_BACKFILLS.get(_current_session_key(), {})
 
 # How many trading days a backfilled column's true last-native observation is
 # allowed to lag the frame's end before it's dropped instead of filled. A
@@ -179,8 +195,20 @@ def _backfill_missing_columns(combined: pd.DataFrame, tickers: tuple[str, ...]) 
     """
     if combined.empty:
         return combined
+    session_key = _current_session_key()
+    registry: dict[str, str] = {}
+    STALE_BACKFILLS.pop(session_key, None)   # re-insert at the end (freshest)
+    STALE_BACKFILLS[session_key] = registry
+    # Size-bounded eviction of the OLDEST sessions' registries (dict preserves
+    # insertion order) so this doesn't grow unbounded over a long-running
+    # server. Deliberately NOT "delete every other session's entry": that
+    # would let one session's fetch wipe another live session's freshness
+    # banner mid-flight — the exact cross-session interference the
+    # per-session keying exists to prevent (verification finding V3).
+    _MAX_SESSIONS = 50
+    while len(STALE_BACKFILLS) > _MAX_SESSIONS:
+        STALE_BACKFILLS.pop(next(iter(STALE_BACKFILLS)))
     missing = [t for t in tickers if t not in combined.columns or combined[t].isna().all()]
-    STALE_BACKFILLS.clear()
     if not missing:
         return combined
 
@@ -206,7 +234,7 @@ def _backfill_missing_columns(combined: pd.DataFrame, tickers: tuple[str, ...]) 
                         dropped.append(t)
                         missing.remove(t)
                         continue
-                    STALE_BACKFILLS[t] = str(pd.Timestamp(last_native).date())
+                    registry[t] = str(pd.Timestamp(last_native).date())
                 combined[t] = snap_aligned[t]
                 filled.append(t)
                 missing.remove(t)

@@ -139,11 +139,16 @@ class Cache:
     def get_stale(self, *args: Any) -> Any | None:
         """Return last-good value even if expired. Used as fetch-failure fallback."""
         key = self._key(*args)
-        if key in self._memory:
-            val, _ = self._memory[key]
-            with self._lock:
+        # Read + stats update under ONE lock acquisition (audit finding F23) —
+        # every other _memory access in this class (get/put/invalidate) reads
+        # under the lock; this method previously checked/read the dict first
+        # and only took the lock afterward to bump stale_hits, a narrow window
+        # where a concurrent put() could mutate the dict mid-read.
+        with self._lock:
+            if key in self._memory:
+                val, _ = self._memory[key]
                 self.stale_hits += 1
-            return val
+                return val
         disk_path = self._disk_dir / f"{key}.pkl"
         if disk_path.exists():
             try:

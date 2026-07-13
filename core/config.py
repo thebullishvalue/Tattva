@@ -9,13 +9,22 @@ CORE — Merged from both Aarambh (correl.py) and Nirnay (nirnay_core.py) monoli
 
 # Single source of truth for the app version — ui/theme.py imports these (do not
 # redefine elsewhere; past drift between config and theme is why this is centralized).
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 PRODUCT_NAME = "Tattva"
 COMPANY = "@thebullishvalue"
 
 # ─── Aarambh Engine Defaults ─────────────────────────────────────────────────
+# TUNED-CONSTANT CONVENTION: every tuned/anchored value in this file is
+# study-validated. Comments state the constant's ROLE, its validating study
+# key, and any hard guard that must survive a re-tune — measurement numbers,
+# run dates and report files live in research/TUNING_COVERAGE.md and the
+# CHANGELOG, not here.
 
-LOOKBACK_WINDOWS = (5, 10, 20, 50, 100)
+# Z-score band lengths driving the Z_lb/AvgZ/breadth STATE features (not the
+# forecast regression). Set per the `aarambh_full` LOOKBACK_WINDOWS lever
+# recommendation of the latest suite run ("ultra-short(3-10)"). NOTE: 3 bands
+# quantize the breadth columns to 33% steps (was 20% with 5 bands).
+LOOKBACK_WINDOWS = (3, 5, 10)
 # ── Walk-forward windowing ───────────────────────────────────────────────────
 # Expanding-window walk-forward bounds + refit cadence for FairValueEngine.
 #   • MIN_TRAIN_SIZE — OOS forecasting starts here; also the floor on the training
@@ -26,14 +35,16 @@ LOOKBACK_WINDOWS = (5, 10, 20, 50, 100)
 # The walk-forward PURGES forward-label overlap: FairValueEngine.fit(purge=h) drops
 # training rows within h of the forecast point (their labels span (t, t+h] and would
 # otherwise leak into the forecast window).
-# VALUES PROVISIONAL — under active re-tuning, not settled. Re-tune on NON-OVERLAPPING
-# OOS rank IC via research/aarambh_tuning_study.py (+ research/confirm_max_sweep.py for
-# the MAX×MIN interaction), then refactor this note with the results.
-MIN_TRAIN_SIZE = 750
-MAX_TRAIN_SIZE = 1000
-REFIT_INTERVAL = 7
-RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0)
-HUBER_EPSILON = 1.35
+# Set per the `aarambh_full` RECOMMENDED output of the latest suite run
+# (best non-leaked, non-degenerate row per lever; see
+# research/TUNING_COVERAGE.md for the report). Re-tune via
+# research/aarambh_tuning_study.py (+ confirm_max_sweep.py for MAX×MIN).
+MIN_TRAIN_SIZE = 150
+MAX_TRAIN_SIZE = 350
+REFIT_INTERVAL = 63
+RIDGE_ALPHAS = (1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0)
+# Set per the `aarambh_full` HUBER_EPSILON lever recommendation.
+HUBER_EPSILON = 1.1
 HUBER_MAX_ITER = 500
 
 # ── Walk-forward ensemble members ────────────────────────────────────────────
@@ -45,11 +56,12 @@ HUBER_MAX_ITER = 500
 #   • "huber" — robust (down-weights fat-tail/shock days); the dominant cost of
 #               the walk-forward.
 #   • "ridge" / "elasticnet" — regularized alternatives, selectable.
-# Two operational baskets: ("ols","huber") = skill default; ("ridge","ols") = ~8×
-# faster walk-forward — use when latency matters more than skill.
-# VALUE PROVISIONAL — under active re-tuning. Re-decide from the ENSEMBLE_MODELS lever
-# in research/aarambh_tuning_study.py (real baskets), then refactor this note.
-ENSEMBLE_MODELS = ("ols", "huber")
+# ("ols","huber") — the skill default. The latest suite run recommended a
+# single-member "huber" basket on IC alone, but that is deliberately NOT taken:
+# a one-member ensemble collapses the Model Spread indicator (dispersion ACROSS
+# members) to zero, and the IC gap between the two is within noise. ols also
+# powers the feature-impact attribution regardless of this tuple.
+ENSEMBLE_MODELS = ("huber")
 OU_PROJECTION_DAYS = 90
 MIN_DATA_POINTS = 1500
 
@@ -61,15 +73,12 @@ MIN_DATA_POINTS = 1500
 # FORECAST horizon on daily bars, which keeps every day-denominated constant valid
 # and the full ~2250-row sample intact.
 #
-# TWO lenses only — finalized from a universe-wide computational study (33 targets,
-# honest non-overlapping walk-forward of the analog/precedent engine; see
-# research/precedent_universe_sweep.py). The analog rank-IC across the universe is:
-#     +5d 0.089 (33/33 +ve) · +10d 0.127 (30/33) · +20d 0.162 (28/33, PEAK)
-#     +40d 0.058 (1/33 sig) · +60d 0.048 (0/33 sig)  ← collapses past 20d
-# Recent-half IC is positive only at 5d (+0.022) and 10d (+0.034); 20d+ has decayed
-# to ~0/negative. So the precedent edge lives in the 5–20d band and is DEAD beyond.
-# We therefore keep a SHORT (Tactical 10d) and a LONG (Positional 20d) lens — 20d
-# being the longest horizon the analog actually supports — and drop 40/60/90d.
+# TWO lenses only — a SHORT (Tactical 10d) and a LONG (Positional 20d); 40/60/90d
+# were dropped. Study-tuned: `precedent_univ` + `precedent_model`. GUARD — the
+# post-purge picture is that the analog carries no horizon on its own; the short
+# band is held up by the purged MODEL forecast (edge at 1–10d, fading by 15–20d).
+# Tactical 10d sits inside that validated band; Positional 20d is a slow product
+# lens (turnover/positioning), NOT an edge claim — the UI must not suggest one.
 #
 # Each preset maps to:
 #   • horizon  — FWD_HORIZON: the forward log-return the engine forecasts (t→t+h).
@@ -79,37 +88,76 @@ MIN_DATA_POINTS = 1500
 #     analog horizons (5/10/20d): Tactical reads 5d+10d (the current-regime-reliable
 #     pair), Positional reads 10d+20d (10d anchor + the 20d full-sample peak).
 #   • ddm_leak / ddm_drift / ddm_lrv — DDM smoothing; leak scales ~(10/horizon) so a
-#     longer lens turns over slower (Tactical 0.10 → Positional 0.05). drift/lrv held
-#     at the convergence defaults (CONV_DDM_DRIFT_SCALE / CONV_DDM_LONG_RUN_VAR).
-# The engine cache key includes (horizon, momentum), so both lenses coexist in one
-# session — position on the long lens, hedge on the short one.
+#     longer lens turns over slower (Tactical carries the CONV_DDM_LEAK_RATE value,
+#     Positional half of it). drift/lrv held at the convergence defaults
+#     (CONV_DDM_DRIFT_SCALE / CONV_DDM_LONG_RUN_VAR).
+#     INVARIANT — ddm_drift/ddm_leak (the DDM's steady-state GAIN — see
+#     analytics.ddm_filter's state equation) must be held EQUAL across lenses.
+#     Leak controls MEMORY (how fast the filter forgets); drift controls GAIN
+#     (how strongly it responds to new evidence) — they are independent knobs,
+#     and only leak should change between lenses. A previous revision here held
+#     drift fixed at 0.12 while halving leak (0.10 -> 0.05) for Positional,
+#     which silently DOUBLED gain (0.12/0.05 = 2.4x vs 0.12/0.10 = 1.2x) instead
+#     of just slowing turnover — the identical convergence history read twice as
+#     strong through the Positional lens before the tanh bound, so conviction
+#     magnitudes and STRONG/MODERATE tiers were not comparable Tactical vs
+#     Positional, and Positional routinely saturated toward +-100 (audit
+#     finding F3). drift is now co-scaled with leak so gain = 1.2x on both.
+# Tactical ddm values = the `ddm` study's consensus-filter best row
+# (CONV_DDM_LEAK_RATE/DRIFT_SCALE); Positional = half leak at the same 1.2×
+# gain per the invariant above.
 SIGNAL_HORIZONS = {
     "Tactical (10d)":    {"horizon": 10, "momentum": 20,
                           "hold": (5, 10),
-                          "ddm_leak": 0.10, "ddm_drift": 0.12, "ddm_lrv": 50.0,
+                          "ddm_leak": 0.15, "ddm_drift": 0.18, "ddm_lrv": 50.0,
                           "blurb": "≈2 weeks · hedging & short-term trades"},
     "Positional (20d)":  {"horizon": 20, "momentum": 40,
                           "hold": (10, 20),
-                          "ddm_leak": 0.05, "ddm_drift": 0.12, "ddm_lrv": 50.0,
+                          "ddm_leak": 0.075, "ddm_drift": 0.09, "ddm_lrv": 50.0,
                           "blurb": "≈1 month · positioning (analog ceiling)"},
 }
 DEFAULT_SIGNAL_HORIZON = "Tactical (10d)"
 
-# Honorary +1d tile on the Precedent tab — DISPLAY ONLY. The analog has no edge at
-# 1d (research/analog_tuning_study.py: full IC ≈ +0.04, recent ≈ 0 → noise), so it is shown
-# for reference/curiosity with a caveat and is deliberately NOT in any lens `hold`
-# grid (kept out of the Intelligence Val-IC / walk-forward calibration so it can't
-# dilute it). Set to None to hide the tile entirely.
+# Predictors that are RAW YIELD LEVELS (percent, e.g. "US 10-Year Treasury Yield"
+# = ^TNX quoted as 4.25), not prices. Two consequences:
+#   1. Momentum must be an arithmetic level-DIFFERENCE, not a log-return: yields
+#      can print at/near/below zero (2020-21 zero-rate era; ^IRX printed ≤0 on
+#      several sessions), and log() of a non-positive value is undefined. A
+#      basis-point-scale diff is also the economically correct "momentum" for a
+#      rate series (a rate MOVE, not a rate RETURN).
+#   2. Because app.py's predictor-momentum matrix requires EVERY feature's
+#      window to be finite on a given row (a walk-forward training row with any
+#      NaN feature is unusable), a single log(non-positive) NaN from one yield
+#      ticker used to poison that row for the WHOLE feature set — silently
+#      deleting rows for every target, invisible in the prep trace, worst around
+#      the 2020 zero-rate stretch (see audit finding F4). Computing these
+#      columns' momentum as a level-diff instead removes the log(<=0) failure
+#      mode entirely, so they no longer NaN out on a sub-zero/zero print.
+RAW_YIELD_PREDICTORS = frozenset({
+    "US 13-Week T-Bill Yield", "US 5-Year Treasury Yield",
+    "US 10-Year Treasury Yield", "US 30-Year Treasury Yield",
+})
+
+# Honorary +1d tile on the Precedent tab — DISPLAY ONLY. The analog has no edge
+# at 1d (study: `analog` — noise), so it is shown for reference/curiosity with a
+# caveat and is deliberately NOT in any lens `hold` grid (kept out of the
+# Intelligence Val-IC / walk-forward calibration so it can't dilute it). Set to
+# None to hide the tile entirely.
 PRECEDENT_HONORARY_HORIZON = 1
 
-# Signal thresholds (conviction score → signal mapping)
-CONVICTION_STRONG = 60
-CONVICTION_MODERATE = 40
-CONVICTION_WEAK = 20
-
-# Z-score zone boundaries
-Z_EXTREME = 2.0
-Z_THRESHOLD = 1.0
+# Signal thresholds (ENGINE ConvictionBounded → signal mapping). Single source
+# of truth for the engine (engines/aarambh.py) and the UI tabs that display the
+# engine's conviction (ui/tabs/tab_aarambh.py, tab_convergence.py) — a duplicate
+# UI_CONVICTION_* triple previously lived alongside this one (identical values,
+# audit finding F15); consolidated here.
+# Data-anchored to |ConvictionBounded|'s own pooled distribution at the
+# p50/p75/p90 convention (study: `ui_anchors`). GUARD (F1 pairing):
+# convergence/conviction_model.py does NOT use these — its series is the
+# DDM-smoothed COMPOSITE, binned on the composite's own anchors
+# (COMPOSITE_THRESHOLDS × 100; see _TIER_* there).
+CONVICTION_STRONG = 27    # = p90
+CONVICTION_MODERATE = 17  # = p75
+CONVICTION_WEAK = 9       # = p50 ("any lean at all" floor)
 
 # Staleness (in TRADING days behind — weekends ignored).
 STALENESS_DAYS = 3
@@ -124,9 +172,12 @@ SESSION_FRESH_FLOOR = 0.6
 # Timeframe filter mapping (trading days)
 TIMEFRAME_TRADING_DAYS = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504}
 
-# DDM parameters (calibrated for daily conviction series)
-DDM_LEAK_RATE = 0.08
-DDM_DRIFT_SCALE = 0.15
+# DDM parameters (daily conviction series). Set per the `ddm` study's
+# best-mean-IC row for the ENGINE filter (leak swept at constant gain per the
+# F3 invariant — drift is the co-scaled value from that same row).
+# GUARD: sweep leak WITH drift co-scaled, never leak alone.
+DDM_LEAK_RATE = 0.65
+DDM_DRIFT_SCALE = 1.219
 DDM_LONG_RUN_VAR = 100.0
 
 # ─── Nirnay Engine Defaults ──────────────────────────────────────────────────
@@ -134,44 +185,67 @@ DDM_LONG_RUN_VAR = 100.0
 # into engines.nirnay.run_full_analysis. Not in the Optuna search, so hand-set and
 # swept structurally (research/nirnay_tuning_study.py + research/nirnay_index_check.py:
 # breadth-oscillator OOS IC vs forward return).
-# VALUES PROVISIONAL — under active re-tuning; refactor this note once those studies
-# have a clean result.
-NIRNAY_MSF_LENGTH = 20            # MSF oscillator rolling-window length
-NIRNAY_ROC_LEN = 14              # rate-of-change lookback inside MSF
-NIRNAY_REGIME_SENSITIVITY = 1.5  # clarity-weight exponent (must match the value the
-                                 # engine actually runs — was a stale 1.0 here)
-NIRNAY_BASE_WEIGHT = 0.6         # MSF vs MMR base blend (0.4 → 60% MSF)
-NIRNAY_MMR_NUM_VARS = 5          # top-N macro drivers selected per row in MMR
+# Set per the latest suite run's `nirnay` per-knob winners, with MSF_LENGTH
+# resolved CROSS-UNIVERSE from the two result tables (`nirnay` 7 commodity
+# targets + `nirnay_index` 5 equity indices, weighted by universe share
+# 7:27): weighted mean |IC| peaks at MSF=18 — above both the commodity-slice
+# winner (10) and the previous value (20). The other four knobs have no
+# equity-side sweep, so their commodity winners apply as the only result.
+NIRNAY_MSF_LENGTH = 18            # MSF oscillator rolling-window length —
+                                 # universe-weighted result winner
+NIRNAY_ROC_LEN = 2               # rate-of-change lookback inside MSF
+NIRNAY_REGIME_SENSITIVITY = 6.0  # clarity-weight exponent
+NIRNAY_BASE_WEIGHT = 0.0         # MSF share of the FIXED half of the MSF/MMR
+                                 # blend (engines/nirnay: 0.5*bw + 0.5*adaptive)
+                                 # — 0.0 sends the fixed half fully to MMR; MSF
+                                 # still enters via the adaptive clarity half
+NIRNAY_MMR_NUM_VARS = 4          # top-N macro drivers per row in MMR
 
 # Nirnay condition thresholds (unified oscillator scale: -10 to +10). Classify the
 # per-instrument signal into Oversold / Overbought / Neutral and gate buy/sell +
 # divergence flags. (A ±7 "strong" tier was defined here but had NO code path, so
 # it was removed rather than left as dead config.)
+# Data-anchored: ±5 sits inside the p75–p85 occupancy band a per-instrument
+# condition tier should occupy (study: `ui_anchors`).
 NIRNAY_OVERSOLD = -5
 NIRNAY_OVERBOUGHT = 5
 
 # ─── Convergence Layer Defaults ──────────────────────────────────────────────
 
-# Adaptive weighting base allocation
-CONV_WEIGHT_DIRECTION = 0.30
-CONV_WEIGHT_BREADTH = 0.25
-CONV_WEIGHT_MAGNITUDE = 0.25
-CONV_WEIGHT_REGIME = 0.20
+# Optuna TPE trial budget for Intelligence Mode auto-calibration (app.py Phase
+# 4b). Was previously read from a session-state key ("intel_n_trials") that no
+# UI control ever wrote — a phantom knob permanently defaulting to 50 with no
+# way to change it short of a debugger. Promoted to a named constant; raise it
+# if calibration quality (Val IC stability across reruns) warrants the extra
+# walk-forward-validation cost.
+INTEL_N_TRIALS = 50
+
+# Adaptive weighting base allocation. Set per the `conv_weights` study's best
+# vector of the latest suite run ("direction-heavy .5").
+CONV_WEIGHT_DIRECTION = 0.50
+CONV_WEIGHT_BREADTH = 0.20
+CONV_WEIGHT_MAGNITUDE = 0.20
+CONV_WEIGHT_REGIME = 0.10
 
 # Adaptive shift limits (±10% based on clarity ratios)
 CONV_ADAPTIVE_SHIFT_MAX = 0.10
 
-# Convergence zone thresholds
-CONV_STRONG_BULLISH = -60
-CONV_MODERATE_BULLISH = -30
-CONV_WEAK_BULLISH = -10
-CONV_WEAK_BEARISH = 10
-CONV_MODERATE_BEARISH = 30
-CONV_STRONG_BEARISH = 60
+# Convergence-score label tiers (CrossValidator's signal string, ±100 scale).
+# Data-anchored at p75/p90/p97.5 of |convergence_score| — the latest
+# `ui_anchors` run measures the current values sitting on those occupancy
+# targets, so they stand per that study's own output.
+CONV_STRONG_BULLISH = -27
+CONV_MODERATE_BULLISH = -18
+CONV_WEAK_BULLISH = -11
+CONV_WEAK_BEARISH = 11
+CONV_MODERATE_BEARISH = 18
+CONV_STRONG_BEARISH = 27
 
-# DDM for convergence score
-CONV_DDM_LEAK_RATE = 0.10
-CONV_DDM_DRIFT_SCALE = 0.12
+# DDM for convergence score. Set per the `ddm` study's best-mean-IC row for
+# the CONSENSUS filter (drift = the co-scaled value from that row).
+# GUARD: sweep leak WITH drift co-scaled (F3 invariant).
+CONV_DDM_LEAK_RATE = 0.15
+CONV_DDM_DRIFT_SCALE = 0.18
 CONV_DDM_LONG_RUN_VAR = 50.0
 
 # Divergence detection
@@ -199,7 +273,7 @@ GLOBAL_MACRO_MAP = {
     "US Treasury Long (20Y+)":           "TLT",
     "US Treasury Long Vanguard":         "VGLT",
     "US Treasury Total Market":          "GOVT",
-    # ── Direct Yield Indices (Raw %) ───────────────────────────────────────
+    # ── Direct Yield Indices (Raw %) — see RAW_YIELD_PREDICTORS below ───────
     "US 13-Week T-Bill Yield":           "^IRX",
     "US 5-Year Treasury Yield":          "^FVX",
     "US 10-Year Treasury Yield":         "^TNX",
@@ -280,6 +354,9 @@ GLOBAL_MACRO_MAP = {
     # ── Volatility & Risk ──────────────────────────────────────────────────
     "Equity Volatility (VIX)":           "^VIX",
     "Mid-Term VIX Futures":              "VIXM",
+    # Bond volatility — the fixed-income VIX complement (rates-vol regime the
+    # equity VIX misses); coverage-verified on yfinance.
+    "US Bond Volatility (MOVE)":         "^MOVE",
     # ── China / EM / Cyclical Growth ───────────────────────────────────────
     "China Large Cap (FXI)":             "FXI",
     "China Broad (MCHI)":                "MCHI",
@@ -400,6 +477,14 @@ MACRO_SYMBOLS_YF = {
     "USD/IDR": "USDIDR=X",
     "USD/SGD": "USDSGD=X",
     "USD/TRY": "USDTRY=X",
+    # EM FX legs — LatAm/Africa coverage (CEW only carries the basket level)
+    # plus the USD/Asia crosses the USD/INR Nirnay basket already uses.
+    "USD/MXN": "MXN=X",
+    "USD/BRL": "BRL=X",
+    "USD/ZAR": "ZAR=X",
+    "USD/THB": "THB=X",
+    "USD/TWD": "TWD=X",
+    "USD/MYR": "MYR=X",
     # Asia-Pacific EM Equities
     "Vietnam Equity (VNM)":             "VNM",
     "Philippines Equity (EPHE)":        "EPHE",
@@ -416,6 +501,12 @@ MACRO_SYMBOLS_YF = {
     "Crude Oil": "CL=F",
     "Brent Crude": "BZ=F",        # Brent crude (front-month)
     "Natural Gas": "NG=F",
+    # Refined products — the crack/product-demand factor. GUARD: both are
+    # crude-plus-crack, so they are EXCLUDED from the Brent target's predictor
+    # set (TARGET_EXCLUDED_PREDICTORS, same-barrel logic as WTI) while
+    # remaining valid macro predictors everywhere else.
+    "RBOB Gasoline": "RB=F",
+    "Heating Oil": "HO=F",
     # Commodities - Agriculture
     "Corn": "ZC=F",
     "Wheat": "ZW=F",
@@ -423,6 +514,10 @@ MACRO_SYMBOLS_YF = {
     "Cotton": "CT=F",
     "Coffee": "KC=F",
     "Sugar": "SB=F",
+    # Cocoa completes the softs; soybean oil carries the edible-oil import
+    # complex (India inflation/agri).
+    "Cocoa": "CC=F",
+    "Soybean Oil": "ZL=F",
 }
 
 # ─── Commodity Targets & Baskets ─────────────────────────────────────────────
@@ -464,11 +559,17 @@ COMMODITY_BASKETS = {
     "Silver": [
         "PAAS", "HL", "AG", "CDE", "FSM",
         "SVM", "EXK", "ASM",                    # silver producers (MAG removed — unfetchable on yfinance)
+        "AYA.TO", "USAS",                       # correlation-validated adds — pure-play scarcity
+                                                # relief (GATO/SILV delisted via M&A; scarcity is
+                                                # structural)
         "WPM",                                  # streamer
     ],
     "Copper": [
         "FCX", "SCCO", "TECK", "ERO", "HBM",
         "IVN.TO", "CS.TO", "TGB", "NEXA",       # copper-pure miners
+        "FM.TO", "LUN.TO",                      # First Quantum + Lundin — correlation-validated
+                                                # adds (major pure-plays; TSX calendar matches
+                                                # existing IVN.TO/CS.TO members)
     ],
     # Cotton has no pure-play single-name equities (the only cotton-pure
     # instrument, BAL, is a spot proxy that duplicates the Aarambh target).
@@ -480,27 +581,23 @@ COMMODITY_BASKETS = {
         "ADM", "BG", "NTR", "MOS", "CF",        # grain traders / fertilizer
         "CTVA", "FMC", "DE", "AGCO", "ANDE",    # seeds/chem / equipment / grain
         "ZC=F", "ZS=F", "SB=F",                 # corn / soy / sugar (ag complex)
+        "ZW=F",                                 # wheat — completes the corn/soy acreage-
+                                                # competition triangle (correlation in line with
+                                                # the sibling futures)
     ],
     # USD/INR is FX — no producer equities exist. The basket is a CO-DIRECTIONAL
     # dollar-strength complex (rises when the rupee weakens, like USD/INR):
     # volume-bearing long-USD ETFs + a spread of USD/Asia crosses. polarity = +1.
-    #
-    # DATA-BACKED CURATION (11y daily+weekly return-correlation study vs USD/INR;
-    # see CHANGELOG). This co-directional design beats the alternative on every
-    # axis: the equal-weight basket tracks USD/INR at daily r ≈ +0.354 / weekly
-    # +0.404 with LOW intra-basket redundancy (0.21 — genuinely independent
-    # votes). USD/Asia crosses are the strongest members (SGD/KRW/IDR/THB/PHP
-    # daily r +0.20..+0.36); USDU/UUP/DXY are weaker daily but strong weekly
-    # (+0.29..+0.31) AND volume-bearing, so Nirnay's MSF microstructure runs on
+    # Data-backed curation (11y return-correlation study — measurements in the
+    # CHANGELOG): USD/Asia crosses are the strongest co-directional members;
+    # UUP/USDU/DXY are volume-bearing so Nirnay's MSF microstructure runs on
     # real flow (the =X crosses carry no yfinance volume → those components run
-    # ~neutral, unaffecting the price-based momentum/trend). CNY=X adds the
-    # China/EM-Asia anchor INR co-moves with.
-    #
-    # REJECTED ALTERNATIVE — an INVERSE India/EM-equity basket (INDA/EPI/INDY/
-    # IBN/HDB/INFY…, polarity -1): daily signal is broken by US-calendar async
-    # (r ≈ +0.05), members are far more redundant (0.48), and its weekly signal
-    # (-0.42) is mostly just Nifty beta (USD/INR vs Nifty weekly = -0.32), i.e. it
-    # reads the India equity regime, not the currency. Co-directional wins.
+    # ~neutral); CNY=X adds the China/EM-Asia anchor INR co-moves with.
+    # GUARD — REJECTED ALTERNATIVE: an INVERSE India/EM-equity basket
+    # (INDA/IBN/HDB/…, polarity -1) reads the India EQUITY regime, not the
+    # currency — its daily signal is broken by US-calendar async and its weekly
+    # signal is mostly Nifty beta. Co-directional wins; don't revisit without
+    # re-running the correlation study.
     "USD/INR": [
         "UUP", "USDU", "DX-Y.NYB",              # long-USD anchors (UUP/USDU volume-bearing) + Dollar Index
         "SGD=X", "KRW=X", "IDR=X",              # USD/SGD, USD/KRW, USD/IDR (strongest co-directional)
@@ -509,9 +606,14 @@ COMMODITY_BASKETS = {
     ],
     # Brent Crude (BZ=F).  Co-directional producer cross-section: integrated
     # majors + E&P + oilfield services. NO energy-sector ETFs (XLE) or oil-price
-    # proxies (USO) — those double-count or duplicate the target.
+    # proxies (USO) — those double-count or duplicate the target. REFINERS
+    # (VLO/MPC/PSX) are deliberately excluded: they are crack-spread businesses —
+    # a crude rally can COMPRESS refining margins, so they are not cleanly
+    # co-directional.
     "Brent Crude": [
         "XOM", "CVX", "COP", "BP", "SHEL", "TTE", "EQNR",   # integrated majors
+        "SU", "CNQ",                                        # NYSE-listed Canadian majors
+                                                            # (correlation-validated adds)
         "EOG", "OXY", "DVN", "FANG", "CTRA",                # E&P producers (HES removed — delisted, Chevron acquisition)
         "SLB", "HAL", "BKR",                                # oilfield services
     ],
@@ -520,31 +622,18 @@ COMMODITY_BASKETS = {
     # economy (independent bottom-up "votes"), so Nirnay reads the Indian agri-
     # complex regime, not "jeera miners". All names are NSE (.NS), which trade
     # the same Indian calendar as the NCDEX target (clean alignment).
-    #
-    # DATA-BACKED CURATION (11y daily return-correlation study vs NCDEX jeera;
-    # see CHANGELOG). Jeera is an idiosyncratic, domestic, supply-driven (monsoon
-    # /sowing/rabi-harvest) market, so ALL single-name linkages are modest
-    # (max daily r ~0.08) — but the equal-weight basket aggregates to r≈+0.087
-    # daily / +0.082 weekly (vs Nifty's +0.076 daily that DECAYS to +0.010 weekly),
-    # i.e. a genuine agri-regime signal, not market beta. Members are the highest-
-    # linkage names within each fundamentally-aligned subsector, chosen for
-    # cross-sectional dispersion (distinct companies, no double-counting).
-    #
-    # KEY FINDING — NO global ag-soft futures (unlike Cotton's ZC/ZS/SB): CT=F,
-    # ZW=F, ZC=F, CC=F etc. are empirically DECOUPLED from jeera (daily r ≈ 0 to
-    # negative; Cotton CT=F 3y r = -0.10). Jeera trades the domestic Indian
-    # complex, not CBOT/ICE. Domestic "soft commodity" exposure is instead
-    # captured via sugar equities (strongest weekly/3y linkage). True sibling
-    # spices (coriander/turmeric/guar) WOULD fit but are NCDEX-only → would need
-    # their own sheets via data/sheets.py (planned enhancement).
-    #
-    # ALSO TESTED & EXCLUDED — international spice/ingredient majors (McCormick,
-    # Olam/ofi, IFF, Symrise, Givaudan, Sensient, Kerry, ADM, Bunge, Nestle,
-    # Unilever): all flat-to-NEGATIVE vs jeera (Olam weekly r = -0.10, McCormick
-    # 3y r = -0.08). Fundamentally correct — these are cumin BUYERS, so a price
-    # spike is a cost/margin headwind (inverse, not co-directional), and they
-    # trade async non-Indian calendars. Co-directional jeera exposure is almost
-    # entirely a domestic-Indian-agri phenomenon.
+    # Data-backed curation (11y return-correlation study — measurements in the
+    # CHANGELOG): members are the highest-linkage names within each
+    # fundamentally-aligned subsector, chosen for cross-sectional dispersion.
+    # GUARDS from that study:
+    #   • NO global ag-soft futures (unlike Cotton's ZC/ZS/SB) — jeera trades
+    #     the domestic Indian complex, not CBOT/ICE; empirically decoupled.
+    #     Domestic soft-commodity exposure comes via the sugar equities instead.
+    #   • NO international spice/ingredient majors (McCormick, Olam, ADM, …) —
+    #     they are cumin BUYERS (a price spike is a cost headwind → inverse,
+    #     not co-directional) and trade async non-Indian calendars.
+    #   • True sibling spices (coriander/turmeric/guar) WOULD fit but are
+    #     NCDEX-only → need their own sheets via data/sheets.py (planned).
     "Jeera": [
         # agri-inputs / agrochem / fertilizer — jeera's core monsoon & sowing driver
         "COROMANDEL.NS", "UPL.NS", "ZUARIIND.NS", "RALLIS.NS", "DHANUKA.NS",
@@ -614,8 +703,11 @@ TARGET_EXCLUDED_PREDICTORS = {
                 if (n.endswith("/INR") or n == "INR/USD") and n != "USD/INR"],
     # WTI is ~the same barrel as Brent; the broad commodity indices + energy
     # sector ETF are crude-dominated → all would let crude "explain" itself.
+    # RBOB/heating oil are refined FROM that barrel (crude + crack margin) —
+    # same-barrel logic.
     "Brent Crude": ["Crude Oil", "Broad Commodity Index (DBC)",
-              "Commodity Index (GSG)", "US Energy Sector"],
+              "Commodity Index (GSG)", "US Energy Sector",
+              "RBOB Gasoline", "Heating Oil"],
 }
 
 # ─── Index targets (equity indices: India sectoral/broad, US, sector-ETF) ─────
@@ -690,60 +782,100 @@ CHART_GRID = "rgba(255,255,255,0.03)"
 CHART_ZEROLINE = "rgba(255,255,255,0.08)"
 CHART_FONT_COLOR = "#94A3B8"
 
-# Signal colors - Obsidian Quant
-COLOR_GREEN = "#34D399"  # EMERALD
-COLOR_RED = "#FB7185"    # ROSE
-COLOR_GOLD = "#D4A853"   # AMBER GOLD
-COLOR_CYAN = "#22D3EE"   # CYAN
-COLOR_AMBER = "#D4A853"  # AMBER
-COLOR_PURPLE = "#A78BFA"  # VIOLET (matches CSS --violet)
-COLOR_MUTED = "rgba(148,163,184,0.4)"  # SLATE
+# ── Chart palette — SINGLE SOURCE OF TRUTH (Obsidian Quant) ──────────────────
+# Every chart color derives from these RGB triples: the COLOR_* constants below
+# AND the rgba(...) fills/markers used inline across ui/tabs/* (via the rgba()
+# helper). Change a chart hue in exactly ONE place here. Values are UNCHANGED
+# from the historical hard-coded set — this is a centralization, not a recolor.
+#
+# KNOWN DIVERGENCE from the CSS token palette (ui/theme.css :root): the charts
+# use the brighter Tailwind-400 family; the CSS surfaces (cards, chips, tables)
+# use a -500/custom family (--emerald #2DD4A8 · --rose #E8555A · --cyan #06B6D4
+# · --violet #8B5CF6). Only amber-gold #D4A853 is shared. To reconcile the app
+# to one palette, edit the triples here to match :root — a one-line-per-color
+# change, deferred because it visibly shifts rendered chart hues.
+_PALETTE_RGB: dict[str, tuple[int, int, int]] = {
+    "emerald": (52, 211, 153),   # #34D399 — bullish
+    "rose":    (251, 113, 133),  # #FB7185 — bearish
+    "cyan":    (34, 211, 238),   # #22D3EE — system / Nirnay
+    "amber":   (212, 168, 83),   # #D4A853 — primary accent (shared with CSS --amber)
+    "violet":  (167, 139, 250),  # #A78BFA
+    "slate":   (148, 163, 184),  # #94A3B8 — muted line/marker
+}
+
+
+def _palette_hex(name: str) -> str:
+    r, g, b = _PALETTE_RGB[name]
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def rgba(name: str, alpha) -> str:
+    """Semantic chart color → ``rgba()`` string. The ONE way inline Plotly
+    fills/markers should reference the palette (never a raw numeric triple), so
+    the chart palette stays single-sourced in ``_PALETTE_RGB``."""
+    r, g, b = _PALETTE_RGB[name]
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+COLOR_GREEN = _palette_hex("emerald")   # #34D399
+COLOR_RED = _palette_hex("rose")        # #FB7185
+COLOR_GOLD = _palette_hex("amber")      # #D4A853
+COLOR_CYAN = _palette_hex("cyan")       # #22D3EE
+COLOR_AMBER = _palette_hex("amber")     # #D4A853
+COLOR_PURPLE = _palette_hex("violet")   # #A78BFA (NOT the CSS --violet #8B5CF6 — see divergence note)
+COLOR_MUTED = rgba("slate", 0.4)        # rgba(148,163,184,0.4)
 
 # ─── UI Thresholds (centralized magic numbers) ──────────────────────────────
+# NOTE (audit finding F15): UI_CONVICTION_* / UI_Z_* previously duplicated
+# CONVICTION_* (above) / a dead Z_EXTREME-Z_THRESHOLD pair with identical
+# values and no independent tuning need. UI callers now import CONVICTION_*
+# directly; Z_EXTREME/Z_THRESHOLD had zero consumers anywhere and were
+# removed rather than consolidated.
 
-# Conviction score thresholds for signal classification
-UI_CONVICTION_STRONG = 60
-UI_CONVICTION_MODERATE = 40
-UI_CONVICTION_WEAK = 20
+# Breadth percentage thresholds — high-breadth ALERT tier (fires on ~p96 of
+# pooled breadth obs; the distribution is quantized in 20% steps by the 5
+# lookback bands). Study: `ui_anchors`.
+UI_BREADTH_HIGH = 60
 
-# Z-score thresholds for extreme values
-UI_Z_EXTREME = 2.0
-UI_Z_THRESHOLD = 1.0
+# Agreement ratio tiers (hero INTERNALS row + convergence metric card).
+# Data-anchored at p75/p90 of the pooled agreement_ratio distribution
+# (study: `ui_anchors`) — "strong" must mean strong.
+UI_AGREEMENT_STRONG = 0.91    # = p90
+UI_AGREEMENT_MODERATE = 0.82  # = p75
 
-# Breadth percentage thresholds
-UI_BREADTH_HIGH = 60  # % threshold for high breadth alert
-
-# Agreement ratio thresholds
-UI_AGREEMENT_STRONG = 0.7
-UI_AGREEMENT_MODERATE = 0.5
-
-# Nirnay avg signal thresholds
-UI_NIRNAY_BULLISH = -2
-UI_NIRNAY_BEARISH = 2
+# Nirnay avg-signal lean tier (metric-card coloring). Data-anchored at p75 of
+# pooled |Avg_Signal|, matching UI_NIRNAY_AVG_THRESHOLD — one anchor for the
+# same series everywhere (study: `ui_anchors`).
+UI_NIRNAY_BULLISH = -2.9
+UI_NIRNAY_BEARISH = 2.9
 
 # ── Unified-Signal plot marker thresholds (data-anchored) ────────────────────
-# The 3-row Unified Signal plot's reference lines + marker-color tiers. Set to the
-# p90 (strong) / p75 (moderate) quantiles of each signal's own distribution, pooled
-# across targets (research/markers_study.py), so "strong/moderate" means the same
-# extremeness on every row. These are EXTREMENESS markers, not actionable edges.
-# VALUES PROVISIONAL — re-anchor from a clean markers_study run, then refactor.
-UI_CONSENSUS_STRONG = 0.39      # Row 1 · norm_avg (consensus, [-1,1])
-UI_CONSENSUS_MODERATE = 0.26
-UI_CONVRAW_STRONG = 50          # Row 2 · ConvictionRaw (Aarambh, ~[-100,100])
-UI_CONVRAW_MODERATE = 20
-UI_NIRNAY_AVG_THRESHOLD = 2.5   # Row 3 · Avg_Signal (Nirnay, [-10,10]) — single tier
+# The 3-row Unified Signal plot's reference lines + marker-color tiers, set to
+# the p90 (strong) / p75 (moderate) quantiles of each signal's OWN pooled
+# distribution (study: `markers`) so "strong/moderate" means the same
+# extremeness on every row. EXTREMENESS markers, not actionable edges.
+UI_CONSENSUS_STRONG = 0.39      # Row 1 · norm_avg (consensus, [-1,1]) = p90
+UI_CONSENSUS_MODERATE = 0.26    #                                       = p75
+UI_CONVRAW_STRONG = 50          # Row 2 · ConvictionRaw (Aarambh, ~[-100,100]) = p90
+UI_CONVRAW_MODERATE = 20        #                                              = p75
+UI_NIRNAY_AVG_THRESHOLD = 2.9   # Row 3 · Avg_Signal (Nirnay, [-10,10]) —
+                                # single tier at p75, matching the other rows'
+                                # moderate tier
 
-# Model spread thresholds
+# Model spread tiers — BASIS POINTS (tab_aarambh converts the raw
+# log-return-std column ×1e4 before comparing). Data-anchored at ~p75/p90.
+# GUARD: anchor these only from the LIVE ols+huber basket — the fast
+# ridge+ols research basket's spread is ~2× tighter and would mis-anchor.
 UI_MODEL_SPREAD_LOW = 20.0
-UI_MODEL_SPREAD_HIGH = 50.0
+UI_MODEL_SPREAD_HIGH = 35.0
 
 # OOS R² thresholds
 UI_R2_STRONG = 0.7
 UI_R2_ACCEPTABLE = 0.4
 
-# Band width interpretation
-UI_BAND_NARROW = 30
-UI_BAND_WIDE = 60
+# (UI_BAND_NARROW/WIDE were removed: the CI band width is pinned by the DDM's
+# mean-reverting variance — measured degenerate, the tiers could never fire.
+# The band itself is still drawn on the conviction chart.)
 
 # HMM probability threshold
 UI_HMM_CONFIDENT = 0.5

@@ -44,12 +44,22 @@ TARGET = "Jeera"
 TOP_N = 10
 W_MAHA, W_TRAJ, W_RECV = 0.55, 0.35, 0.10
 
-# (label, forecast horizon d, momentum/feature window d)
+# (label, forecast horizon d, momentum/feature window d) — widened 2026-07-13.
 CONFIGS = [
+    ("2d",             2,   5),
+    ("3d",             3,  10),
     ("5d (honorary)",  5,  10),
+    ("7d",             7,  15),
     ("Tactical 10d",  10,  20),
+    ("12d",           12,  24),
+    ("15d",           15,  30),
     ("Swing 20d",     20,  40),
+    ("25d",           25,  45),
+    ("30d",           30,  50),
+    ("40d",           40,  60),
+    ("60d",           60,  90),
     ("Positional 90d", 90, 90),
+    ("120d",         120, 120),
 ]
 
 _DATASET = {}

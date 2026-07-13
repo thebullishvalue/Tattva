@@ -35,12 +35,17 @@ from engines.nirnay import run_full_analysis
 TARGETS = ["Gold", "Silver", "Copper", "Cotton", "USD/INR", "Brent Crude", "Jeera"]
 H = 10                                   # forward horizon (Tactical lens)
 BASE = dict(length=20, roc=14, sens=1.5, bw=0.6, nv=5)
+# Widened + densified 2026-07-13 (the base cfg is computed once and shared
+# across all five sweeps via the _RFA per-constituent cache, so extra grid
+# points are cheap). Ranges span from near-degenerate short windows to
+# multi-quarter lengths so the full response curve is visible.
 SWEEPS = {
-    "MSF_LENGTH":         ("length", [5, 10, 14, 20, 30, 40, 50]),
-    "ROC_LEN":            ("roc",    [3, 7, 10, 14, 21, 28]),
-    "REGIME_SENSITIVITY": ("sens",   [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]),
-    "BASE_WEIGHT":        ("bw",     [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]),
-    "MMR_NUM_VARS":       ("nv",     [1, 2, 3, 5, 8, 12, 15]),
+    "MSF_LENGTH":         ("length", [3, 5, 8, 10, 12, 14, 16, 18, 20, 25, 30, 35, 40, 50, 60, 75, 100]),
+    "ROC_LEN":            ("roc",    [2, 3, 5, 7, 9, 10, 12, 14, 17, 21, 25, 28, 35, 45, 60]),
+    "REGIME_SENSITIVITY": ("sens",   [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0]),
+    "BASE_WEIGHT":        ("bw",     [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5,
+                                      0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]),
+    "MMR_NUM_VARS":       ("nv",     [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30]),
 }
 
 _DATA = {}

@@ -38,8 +38,10 @@ from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch, 
 import engines.aarambh as _aa
 _aa.ENSEMBLE_MODELS = ("ridge", "ols")
 
-HORIZONS = [1, 5, 10, 20, 40, 60]
-MOM = {1: 5, 5: 10, 10: 20, 20: 40, 40: 60, 60: 90}
+# Widened 2026-07-13 to match precedent_universe_sweep's fine 1..25d band.
+HORIZONS = [1, 2, 3, 4, 5, 7, 10, 12, 15, 20, 25, 30, 40, 60, 90]
+MOM = {1: 5, 2: 5, 3: 10, 4: 10, 5: 10, 7: 15, 10: 20, 12: 24, 15: 30, 20: 40,
+       25: 45, 30: 50, 40: 60, 60: 90, 90: 120}
 TOP_N = 10
 W_MAHA, W_TRAJ, W_RECV = 0.55, 0.35, 0.10
 _DF = {}

@@ -47,8 +47,11 @@ from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch, 
 import engines.aarambh as _aa
 _aa.ENSEMBLE_MODELS = ("ridge", "ols")
 
-HORIZONS = [1, 3, 5, 10, 20, 40, 60, 90, 120]
-MOM = {1: 5, 3: 10, 5: 10, 10: 20, 20: 40, 40: 60, 60: 90, 90: 120, 120: 180}
+# Widened 2026-07-13: fine 1..25d (the band where the analog can carry signal)
+# out to 180d (deep positional, where independent-window count gets thin).
+HORIZONS = [1, 2, 3, 4, 5, 7, 10, 12, 15, 20, 25, 30, 40, 60, 90, 120, 180]
+MOM = {1: 5, 2: 5, 3: 10, 4: 10, 5: 10, 7: 15, 10: 20, 12: 24, 15: 30, 20: 40,
+       25: 45, 30: 50, 40: 60, 60: 90, 90: 120, 120: 180, 180: 240}
 FIT_H, FIT_MOM = 20, 40          # single engine fit per target
 TOP_N = 10
 W_MAHA, W_TRAJ, W_RECV = 0.55, 0.35, 0.10

@@ -25,7 +25,9 @@ def main():
           f"(non-overlapping)", flush=True)
     print(f"  {'MSF_LEN':<8} {'mean|IC|':>9} {'mean IC':>9}   per-index IC", flush=True)
     t0 = time.time()
-    for v in [5, 10, 14, 20, 30, 40, 50]:
+    # Same grid as nirnay_tuning_study's MSF_LENGTH sweep so the commodity and
+    # equity-index tables are directly comparable row-for-row.
+    for v in [3, 5, 8, 10, 12, 14, 16, 18, 20, 25, 30, 35, 40, 50, 60, 75, 100]:
         cfg = dict(BASE); cfg["length"] = v
         ics = {t: breadth_ic(cfg, t) for t in INDICES}
         arr = np.array([x for x in ics.values() if np.isfinite(x)])

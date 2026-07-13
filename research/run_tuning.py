@@ -56,21 +56,29 @@ _PREFLIGHT_MIN_TARGET_FRAC = 0.6
 #                     of the above.
 SUITE = [
     # ── T1 · Engines (primitives) ────────────────────────────────────────────
-    ("aarambh_full",   "aarambh_tuning_study.py",      "[T1 engine] Aarambh defaults — REFIT/ENSEMBLE/MAX/MIN/PCA (post-purge, 33)", 140),
-    ("aarambh_maxmin", "confirm_max_sweep.py",          "[T1 engine] Aarambh MAX_TRAIN × MIN=750 interaction confirm",               25),
-    ("nirnay",         "nirnay_tuning_study.py",        "[T1 engine] Nirnay structural knobs (MSF/ROC/sensitivity/base/num_vars)",   14),
-    ("nirnay_index",   "nirnay_index_check.py",         "[T1 engine] Nirnay MSF_LENGTH generalization on equity indices",             6),
+    # aarambh_full's ETA assumes the resumable cache holds the previous run's rows
+    # (grids widened 2026-07-13 to 10..3000; only NEW grid values recompute — ~33
+    # new configs ≈ 2h). A --fresh from-scratch run is ~6h for this study alone.
+    ("aarambh_full",   "aarambh_tuning_study.py",      "[T1 engine] Aarambh defaults — REFIT/ENSEMBLE/MAX/MIN/PCA (post-purge, 33)", 130),
+    ("aarambh_maxmin", "confirm_max_sweep.py",          "[T1 engine] Aarambh MAX_TRAIN × live-MIN interaction confirm",              50),
+    ("nirnay",         "nirnay_tuning_study.py",        "[T1 engine] Nirnay structural knobs (MSF/ROC/sensitivity/base/num_vars)",   85),
+    ("nirnay_index",   "nirnay_index_check.py",         "[T1 engine] Nirnay MSF_LENGTH generalization on equity indices",            22),
+    ("ddm",            "ddm_smoothing_study.py",        "[T1 engine] DDM leak sweep at constant gain (consensus + engine filters)",  16),
     # ── T2 · Horizon scope (frames the analog + the lenses) ──────────────────
-    ("precedent_univ", "precedent_universe_sweep.py",   "[T2 scope] Analog horizon scope across the universe → SIGNAL_HORIZONS",      16),
+    ("precedent_univ", "precedent_universe_sweep.py",   "[T2 scope] Analog horizon scope across the universe → SIGNAL_HORIZONS",      28),
     # ── T3 · Analog engine (within the scope, on Aarambh ts_data) ────────────
     ("analog",         "analog_tuning_study.py",        "[T3 analog] blend/TOP_N/recency/features/aggregation (1/10/20d)",            12),
     ("analog_confirm", "analog_confirm.py",             "[T3 analog] combined config confirm (maha-only + drop-AvgZ)",                6),
     # ── T4 · Cross-engine validation (post-purge model vs tuned analog) ──────
-    ("precedent_model","precedent_vs_model_sweep.py",   "[T4 validate] purged model vs analog by asset class (10/20d)",               16),
-    ("precedent_horiz","precedent_study.py",            "[T4 validate] model vs analog at 5/10/20/90d on one target",                 2),
+    ("precedent_model","precedent_vs_model_sweep.py",   "[T4 validate] purged model vs analog by asset class (10/20d)",               40),
+    ("precedent_horiz","precedent_study.py",            "[T4 validate] model vs analog at 2..120d on one target",                     5),
     # ── T5 · Interpretation (apex layers that consume everything above) ──────
     ("markers",        "markers_study.py",              "[T5 interp] Unified-Signal plot marker thresholds (quantile-anchored)",      6),
+    ("hero_thresholds","hero_threshold_study.py",       "[T5 interp] hero BUY/SELL/STRONG classification cut-points (consensus + composite)", 10),
     ("hero",           "hero_study.py",                 "[T5 interp] hero interpretation — convergence vs +markers vs +precedent",    4),
+    ("calibration_lift","calibration_lift_study.py",    "[T5 interp] hero headline arms — consensus vs raw vs CALIBRATED composite (paired OOS)", 45),
+    ("conv_weights",   "conv_weights_study.py",         "[T5 interp] factory dim weights (CONV_WEIGHT_*) — unfitted vector sweep",   20),
+    ("ui_anchors",     "ui_anchors_study.py",           "[T5 interp] remaining UI/tier constants — distribution anchors + occupancy", 12),
 ]
 _BY_KEY = {k: (s, t, e) for k, s, t, e in SUITE}
 
@@ -81,6 +89,15 @@ CONFIG_REF = [
     ("MAX_TRAIN_SIZE",        "core.config",            ["aarambh_full", "aarambh_maxmin"]),
     ("REFIT_INTERVAL",        "core.config",            ["aarambh_full"]),
     ("ENSEMBLE_MODELS",       "core.config",            ["aarambh_full"]),
+    ("HUBER_EPSILON",         "core.config",            ["aarambh_full"]),
+    ("LOOKBACK_WINDOWS",      "core.config",            ["aarambh_full"]),
+    ("DDM_LEAK_RATE",         "core.config",            ["ddm"]),
+    ("CONV_DDM_LEAK_RATE",    "core.config",            ["ddm"]),
+    ("CONV_WEIGHT_DIRECTION", "core.config",            ["conv_weights"]),
+    ("CONVICTION_STRONG",     "core.config",            ["ui_anchors"]),
+    ("UI_AGREEMENT_STRONG",   "core.config",            ["ui_anchors"]),
+    ("UI_MODEL_SPREAD_HIGH",  "core.config",            ["ui_anchors"]),
+    ("NIRNAY_OVERSOLD",       "core.config",            ["ui_anchors"]),
     ("NIRNAY_MSF_LENGTH",     "core.config",            ["nirnay", "nirnay_index"]),
     ("NIRNAY_ROC_LEN",        "core.config",            ["nirnay"]),
     ("NIRNAY_REGIME_SENSITIVITY", "core.config",        ["nirnay"]),
@@ -92,6 +109,8 @@ CONFIG_REF = [
     ("UI_CONSENSUS_STRONG",   "core.config",            ["markers"]),
     ("UI_CONVRAW_STRONG",     "core.config",            ["markers"]),
     ("UI_NIRNAY_AVG_THRESHOLD", "core.config",          ["markers"]),
+    ("DEFAULT_THRESHOLDS",    "convergence.normalization", ["hero_thresholds"]),
+    ("COMPOSITE_THRESHOLDS",  "convergence.normalization", ["hero_thresholds"]),
 ]
 
 _NOISE = ("Numba", "numba", "UserWarning", "FutureWarning", "HTTP Error",

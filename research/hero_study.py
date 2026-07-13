@@ -19,6 +19,14 @@ Honest notes baked in:
     DIRECTION proxy); the live calibrated conviction reweights the dims but its
     directional content is similar. We avoid re-running Optuna ×N.
   • Non-overlapping (stride=10) → no overlap inflation.
+  • norm_avg uses convergence.normalization's causal_normalize (expanding-
+    window z-score) — a previous revision here used the terminal-point
+    compute_norm_params/zscore_clip pair, a look-ahead: applying the FULL-
+    SAMPLE mean/std to every historical point means earlier bars appear less
+    extreme than they were at the time, since sigma is estimated from data
+    that didn't yet exist then (audit finding F14). The within-target `_z()`
+    re-standardization applied on top does NOT remove this — it operates on
+    the already-look-ahead-biased norm_avg values, not the raw series.
 
 Run: python3 -u hero_study.py
 """
@@ -35,7 +43,7 @@ if hasattr(_sys.stdout, "reconfigure"):
     _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from core.config import MIN_TRAIN_SIZE
-from convergence.normalization import align_aarambh_nirnay, compute_norm_params, zscore_clip
+from convergence.normalization import align_aarambh_nirnay, causal_normalize
 from analytics.analogs import _build_feature_frame, mahalanobis_distance_batch, select_analogs_theiler
 from markers_study import _aarambh_ts, _nirnay_daily, _load, TARGETS
 
@@ -106,8 +114,7 @@ def target_rows(target):
     if len(dates) < 100:
         return None
     raw_a = np.array(raw_a, float); raw_n = np.array(raw_n, float)
-    p = compute_norm_params(list(raw_a), list(raw_n))
-    norm_avg = (zscore_clip(raw_a, p["mu_a"], p["sigma_a"]) + zscore_clip(raw_n, p["mu_n"], p["sigma_n"])) / 2.0
+    norm_avg = (causal_normalize(raw_a) + causal_normalize(raw_n)) / 2.0
     # date → marker values
     mk = {pd.Timestamp(d): (norm_avg[i], raw_a[i], raw_n[i]) for i, d in enumerate(dates)}
     # within-target z of each marker (bullish-oriented = negated)

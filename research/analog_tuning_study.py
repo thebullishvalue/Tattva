@@ -22,7 +22,7 @@ Run: python3 -u analog_tuning_study.py
 from __future__ import annotations
 import warnings, time
 import numpy as np, pandas as pd
-from scipy.stats import spearmanr
+from scipy.stats import spearmanr, trim_mean
 warnings.filterwarnings("ignore")
 
 import os as _os, sys as _sys  # research/: put repo root on path so `from core...` resolves
@@ -32,7 +32,10 @@ if hasattr(_sys.stdout, "reconfigure"):
     _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from core.config import MIN_TRAIN_SIZE
-from analytics.analogs import _rolling_hurst, mahalanobis_distance_batch, select_analogs_theiler
+from analytics.analogs import (
+    _rolling_hurst, mahalanobis_distance_batch, select_analogs_theiler,
+    ANALOG_W_MAHA, ANALOG_W_TRAJ, ANALOG_W_RECV,
+)
 from markers_study import _aarambh_ts, _load
 
 TARGETS = ["Gold", "Silver", "Copper", "Cotton", "Brent Crude", "USD/INR", "Jeera",
@@ -41,7 +44,17 @@ HORIZONS = [1, 10, 20]
 MOM = {1: 10, 10: 20, 20: 40}
 BASE_FEATS = ["Momentum", "RealizedVol", "AvgZ", "NetBreadth", "Hurst"]
 NEW_FEATS = ["ModelSpread", "ExtremeBreadth", "SignalBreadth", "ConvictionRaw", "MomentumLong"]
-DEF = dict(wm=0.55, wt=0.35, wr=0.10, top_n=10, hl=365.0, sim=False, feats=tuple(BASE_FEATS))
+# Baseline blend weights read from LIVE config (analytics.analogs), NOT hardcoded —
+# a hardcoded 0.55/0.35/0.10 here silently mislabelled the ←current row and its sweeps
+# once the shipped weights moved to maha-only (1/0/0). top_n=10 matches the analogs
+# default; hl only bites in the recency sweep (production W_RECV=0 turns recency off).
+# agg ∈ {"median", "mean", "trim", "sim"} — how the top-N analog outcomes are
+# reduced to one prediction ("median" is the shipped behavior; "sim" is the old
+# sim=True similarity-weighted mean; "trim" is a 20% trimmed mean).
+DEF = dict(wm=ANALOG_W_MAHA, wt=ANALOG_W_TRAJ, wr=ANALOG_W_RECV,
+           top_n=10, hl=365.0, agg="median", feats=tuple(BASE_FEATS))
+# Round for a robust float match when marking the ←current blend row.
+_CUR_BLEND = (round(ANALOG_W_MAHA, 3), round(ANALOG_W_TRAJ, 3), round(ANALOG_W_RECV, 3))
 
 _TS = {}
 def _ts(target):
@@ -103,7 +116,8 @@ def _walk_ic(target, h, cfg):
         c = M[:, j]; ok = np.isfinite(c)
         M[~ok, j] = np.median(c[ok]) if ok.any() else 0.0
     n = len(price); tw = MOM[h]
-    wm, wt, wr, top_n, hl, sim = cfg["wm"], cfg["wt"], cfg["wr"], cfg["top_n"], cfg["hl"], cfg["sim"]
+    wm, wt, wr, top_n, hl, agg_mode = (cfg["wm"], cfg["wt"], cfg["wr"],
+                                       cfg["top_n"], cfg["hl"], cfg["agg"])
     preds, reals = [], []
     # Start no earlier than MIN_TRAIN_SIZE: before that the engine's own
     # forecast/breadth features are unfit (NaN) — see the audit's A3 fix.
@@ -131,9 +145,14 @@ def _walk_ic(target, h, cfg):
         if not valid:
             continue
         fr = np.array([(price[p + h] / price[p] - 1) * 100 for p in valid])
-        if sim:
+        if agg_mode == "sim":
             w = np.clip(sc[valid], 0, None)
             pred = float(np.sum(w * fr) / max(np.sum(w), 1e-9))
+        elif agg_mode == "mean":
+            pred = float(np.mean(fr))
+        elif agg_mode == "trim":
+            # 20% trimmed mean; falls back to median when too few analogs to trim.
+            pred = float(trim_mean(fr, 0.2)) if len(fr) >= 5 else float(np.median(fr))
         else:
             pred = float(np.median(fr))
         if price[t] > 0 and t + h < n:
@@ -183,20 +202,28 @@ def main():
     H2 = [10, 20]
     print(f"\n### BLEND  W_MAHA/W_TRAJ/W_RECV  (horizons 10 / 20)", flush=True)
     print(f"  {'config':<22} " + "  ".join(f"{('+'+str(h)+'d'):>14}" for h in H2), flush=True)
+    # Densified 2026-07-12: fine steps around the shipped maha-only blend plus
+    # the traj/recency-heavy corners, so the optimum is bracketed, not guessed.
     for wm, wt, wr in [
         (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
-        (0.8, 0.1, 0.1), (0.7, 0.2, 0.1), (0.55, 0.35, 0.10),
-        (0.4, 0.5, 0.1), (0.33, 0.33, 0.34), (0.5, 0.25, 0.25),
-        (0.45, 0.30, 0.25), (0.2, 0.6, 0.2), (0.2, 0.2, 0.6)]:
+        (0.95, 0.05, 0.0), (0.9, 0.1, 0.0), (0.9, 0.05, 0.05),
+        (0.85, 0.15, 0.0), (0.8, 0.2, 0.0), (0.8, 0.1, 0.1),
+        (0.7, 0.3, 0.0), (0.7, 0.2, 0.1), (0.6, 0.4, 0.0), (0.6, 0.3, 0.1),
+        (0.55, 0.35, 0.10), (0.5, 0.5, 0.0), (0.5, 0.25, 0.25),
+        (0.45, 0.30, 0.25), (0.4, 0.5, 0.1), (0.33, 0.33, 0.34),
+        (0.25, 0.5, 0.25), (0.2, 0.6, 0.2), (0.2, 0.2, 0.6)]:
         line(f"{wm}/{wt}/{wr}", _cfg(wm=wm, wt=wt, wr=wr), H2,
-             "  ←current" if (wm, wt, wr) == (.55, .35, .10) else "")
+             "  ←current" if (round(wm, 3), round(wt, 3), round(wr, 3)) == _CUR_BLEND else "")
 
     print(f"\n### TOP_N  (horizons 10 / 20)", flush=True)
-    for tn in [1, 3, 5, 10, 15, 20, 30, 50]:
+    # 2026-07-13: 1..10 every step (the sensitive region), then out to 150.
+    for tn in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 40, 50, 75, 100, 150]:
         line(f"top_n={tn}", _cfg(top_n=tn), H2, "  ←current" if tn == 10 else "")
 
     print(f"\n### RECENCY half-life days  (horizons 10 / 20)", flush=True)
-    for hl in [30, 60, 90, 120, 180, 250, 365, 500, 730, 1000]:
+    # 2026-07-13: widened 15d (very recent-weighted) → 3000d (near-flat).
+    for hl in [15, 30, 45, 60, 90, 120, 150, 180, 250, 300, 365, 450, 500, 600,
+               730, 1000, 1500, 2000, 3000]:
         line(f"halflife={hl}", _cfg(hl=hl, wr=0.20), H2, "")   # at wr=0.20 so recency bites
     print("    (tested at W_RECV=0.20 so the half-life actually matters)", flush=True)
 
@@ -204,13 +231,22 @@ def main():
     line("base5", _cfg(), H2, "  ←current")
     for f in BASE_FEATS:
         line(f"drop {f}", _cfg(feats=tuple(x for x in BASE_FEATS if x != f)), H2)
+    # Pairwise drops: OFAT single-drops can't see redundancy between two features
+    # (dropping either alone looks costless when they duplicate each other).
+    for i in range(len(BASE_FEATS)):
+        for j in range(i + 1, len(BASE_FEATS)):
+            fi, fj = BASE_FEATS[i], BASE_FEATS[j]
+            line(f"drop {fi[:6]}+{fj[:6]}",
+                 _cfg(feats=tuple(x for x in BASE_FEATS if x not in (fi, fj))), H2)
     for f in NEW_FEATS:
         line(f"+ {f}", _cfg(feats=tuple(BASE_FEATS) + (f,)), H2)
     line("base + all-new", _cfg(feats=tuple(BASE_FEATS) + tuple(NEW_FEATS)), H2)
 
     print(f"\n### AGGREGATION  (horizons 10 / 20)", flush=True)
-    line("median (equal)", _cfg(sim=False), H2, "  ←current")
-    line("similarity-weighted", _cfg(sim=True), H2)
+    line("median (equal)", _cfg(agg="median"), H2, "  ←current")
+    line("mean (equal)", _cfg(agg="mean"), H2)
+    line("trimmed mean 20%", _cfg(agg="trim"), H2)
+    line("similarity-weighted", _cfg(agg="sim"), H2)
 
     print("\n  Read each cell as full_IC / recent_IC. recent_IC is the honest test of"
           "\n  whether the analog still works in the CURRENT regime.", flush=True)

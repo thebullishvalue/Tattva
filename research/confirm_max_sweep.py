@@ -1,8 +1,12 @@
-"""Confirmatory MAX_TRAIN_SIZE sweep at the NEW MIN_TRAIN_SIZE=750.
+"""Confirmatory MAX_TRAIN_SIZE sweep at the LIVE MIN_TRAIN_SIZE.
 
-The main study swept MAX_TRAIN at the old MIN=500; this re-checks it at MIN=750
-(the change just applied) to rule out an interaction. Reuses the same fit/IC
-machinery (fast ridge+ols base, purged, non-overlapping OOS IC).
+The main study sweeps MAX_TRAIN at its fixed OFAT base MIN; this re-checks it at
+the MIN the app actually runs (read from core.config, not hardcoded — a stale
+hardcoded 750 would silently confirm the wrong interaction once config moves) to
+rule out a MAX×MIN interaction. Reuses the same fit/IC machinery (fast ridge+ols
+base, purged, non-overlapping OOS IC). Grid starts at 100 — the sub-100 windows
+are structurally degenerate (see the main study's _MIN_SANE_WINDOW) and add noise,
+not information, to a confirmation sweep.
 """
 from __future__ import annotations
 import warnings, time
@@ -15,24 +19,28 @@ if hasattr(_sys.stdout, "reconfigure"):
     _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-from core.config import ALL_TARGETS
+from core.config import ALL_TARGETS, MIN_TRAIN_SIZE, MAX_TRAIN_SIZE
 from aarambh_tuning_study import _df, fit_ic, _class, BASE, HORIZONS
 
-MAXT = [15, 30, 50, 100, 252, 500, 750, 1000, 1500]
+# Widened 2026-07-13 to span the fittable range through the sample ceiling
+# (≥ ~2346 rows saturates; kept to confirm the plateau). Sub-100 is degenerate
+# and left to the main aarambh_full sweep's ⚠small-win display.
+MAXT = [100, 150, 200, 252, 350, 500, 625, 750, 875, 1000, 1250, 1500, 1750,
+        2000, 2500, 3000]
 
 
 def main():
     df = _df()
     targets = [t for t in ALL_TARGETS if t in df.columns and df[t].notna().mean() >= 0.5]
-    print(f"Confirmatory MAX_TRAIN sweep @ MIN=750 · {len(targets)} targets · lenses {list(HORIZONS)}",
-          flush=True)
+    print(f"Confirmatory MAX_TRAIN sweep @ live MIN={MIN_TRAIN_SIZE} · {len(targets)} targets · "
+          f"lenses {list(HORIZONS)}", flush=True)
     print(f"  {'MAX_TRAIN':<10} {'10d':>8} {'20d':>8} {'combined':>9} "
           f"{'Cmdty/FX':>9} {'India-Eq':>9} {'US-Eq':>7}", flush=True)
     print("  " + "-" * 64, flush=True)
     t0 = time.time()
     rows = []
     for maxt in MAXT:
-        cfg = dict(BASE); cfg["mint"] = 750; cfg["maxt"] = maxt   # ens=ridge+ols (fast base)
+        cfg = dict(BASE); cfg["mint"] = MIN_TRAIN_SIZE; cfg["maxt"] = maxt   # ens=ridge+ols (fast base)
         rec = {"Cmdty/FX": [], "India-Eq": [], "US-Eq": [], 10: [], 20: []}
         for tgt in targets:
             for h, mom in HORIZONS.items():
@@ -43,12 +51,12 @@ def main():
         comb = np.nanmean([ic10, ic20])
         cf, ie, us = (np.mean(rec[c]) if rec[c] else np.nan for c in ("Cmdty/FX", "India-Eq", "US-Eq"))
         rows.append((maxt, comb))
-        mark = "  ←current" if maxt == 750 else ""
+        mark = "  ←current" if maxt == MAX_TRAIN_SIZE else ""
         print(f"  {maxt:<10} {ic10:>+8.3f} {ic20:>+8.3f} {comb:>+9.3f} "
               f"{cf:>+9.3f} {ie:>+9.3f} {us:>+7.3f}{mark}", flush=True)
     best = max(rows, key=lambda x: x[1])
     print("  " + "-" * 64, flush=True)
-    print(f"  best @ MIN=750: MAX_TRAIN={best[0]} (combined IC {best[1]:+.3f})  "
+    print(f"  best @ MIN={MIN_TRAIN_SIZE}: MAX_TRAIN={best[0]} (combined IC {best[1]:+.3f})  "
           f"[{time.time()-t0:.0f}s]", flush=True)
 
 

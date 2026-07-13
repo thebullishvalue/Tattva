@@ -80,20 +80,45 @@ HORIZONS = {10: 20, 20: 40}            # horizon : momentum window
 # ENSEMBLE_MODELS lever overrides `ens` explicitly and DOES test the real baskets
 # (ols+huber, 4-model, elasticnet) — that's the only place the ensemble is the question.
 BASE = dict(refit=5, ens=("ridge", "ols"), maxt=750, mint=500, pca=20,
-            ralpha=(0.01, 0.1, 1.0, 10.0, 100.0))
+            ralpha=(0.01, 0.1, 1.0, 10.0, 100.0),
+            heps=1.35, lookb=(5, 10, 20, 50, 100))
 
-# Each lever → list of (value, full-cfg-override-dict)
+# Each lever → list of (value, full-cfg-override-dict).
+# GRID DEPTH NOTE (2026-07-12): grids densified for a finer optimum search. The
+# results CSV is keyed (lever, value, target, horizon), so previously-computed
+# values are resumed from cache and only the NEW values cost compute. For that
+# resume to stay valid the OFAT BASE above must NOT change — if you ever change
+# BASE, wipe the cache (--fresh), or every old row silently becomes stale while
+# still being skipped as "done".
 def _cfgs():
     levers = {}
-    levers["REFIT_INTERVAL"] = [(v, {"refit": v}) for v in (1, 3, 5, 7, 10, 15, 21)]
+    levers["REFIT_INTERVAL"] = [(v, {"refit": v})
+                                for v in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 18,
+                                          21, 25, 30, 40, 50, 63)]
     levers["ENSEMBLE_MODELS"] = [(("+".join(e)), {"ens": e}) for e in (
-        ("ols",), ("ridge",), ("huber",),
+        ("ols",), ("ridge",), ("huber",), ("elasticnet",),
         ("ols", "huber"), ("ridge", "ols"), ("ridge", "huber"),
+        ("ridge", "elasticnet"), ("ols", "elasticnet"), ("huber", "elasticnet"),
         ("ridge", "ols", "huber"), ("ols", "huber", "elasticnet"),
+        ("ridge", "ols", "elasticnet"), ("ridge", "huber", "elasticnet"),
         ("ridge", "ols", "huber", "elasticnet"))]
-    levers["MAX_TRAIN_SIZE"] = [(v, {"maxt": v}) for v in (15, 30, 50, 100, 252, 500, 750, 1000, 1500)]
-    levers["MIN_TRAIN_SIZE"] = [(v, {"mint": v}) for v in (15, 30, 50, 100, 252, 500, 750, 1000, 1500)]
-    levers["PCA_COMPONENTS"] = [(v, {"pca": v}) for v in (5, 10, 15, 20, 25, 30, 40, 50)]
+    # Window levers (2026-07-13: widened to 10..3000). <100 is the degenerate
+    # region (⚠small-win excludes it from recommendations but it is shown so the
+    # full curve is visible from a 10-row window up). DATA CEILING: the shared
+    # 9-year sample is ~2346 rows, so (a) MAX_TRAIN ≥ ~the sample saturates
+    # (2000/2500/3000 read identically — kept to CONFIRM the plateau), and
+    # (b) MIN_TRAIN above ~2000 starves the out-of-sample window (no scoreable
+    # rows → NaN), so MIN is capped at 2000. Raise both if a longer history is
+    # ever fetched.
+    levers["MAX_TRAIN_SIZE"] = [(v, {"maxt": v}) for v in (
+        10, 15, 20, 30, 50, 75, 100, 150, 200, 252, 350, 500, 625, 750, 875,
+        1000, 1250, 1500, 1750, 2000, 2500, 3000)]
+    levers["MIN_TRAIN_SIZE"] = [(v, {"mint": v}) for v in (
+        10, 15, 20, 30, 50, 75, 100, 150, 200, 252, 350, 500, 625, 750, 875,
+        1000, 1250, 1500, 1750, 2000)]
+    # PCA capped by min(n_samples, n_features)≈219, so 2..150 spans trivial→rich.
+    levers["PCA_COMPONENTS"] = [(v, {"pca": v}) for v in (
+        2, 3, 5, 8, 10, 12, 15, 18, 20, 25, 30, 35, 40, 50, 60, 75, 100, 150)]
     # RIDGE_ALPHAS only bites with a ridge ensemble → evaluate on (ridge, ols).
     levers["RIDGE_ALPHAS"] = [
         ("ultra-narrow(0.1..10)", {"ens": ("ridge", "ols"), "ralpha": (0.1, 1.0, 10.0)}),
@@ -101,6 +126,29 @@ def _cfgs():
         ("default(.01..100)", {"ens": ("ridge", "ols"), "ralpha": (0.01, 0.1, 1.0, 10.0, 100.0)}),
         ("wide(0.01..1k)", {"ens": ("ridge", "ols"), "ralpha": (0.01, 0.1, 1.0, 10.0, 100.0, 1000.0)}),
         ("ultra-wide(0.001..10k)", {"ens": ("ridge", "ols"), "ralpha": (0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0)}),
+        ("low(0.001..1)", {"ens": ("ridge", "ols"), "ralpha": (0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0)}),
+        ("high(1..1k)", {"ens": ("ridge", "ols"), "ralpha": (1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0)}),
+        ("dense(0.01..100·9pt)", {"ens": ("ridge", "ols"), "ralpha": (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0)}),
+        ("extreme(1e-4..1e5)", {"ens": ("ridge", "ols"), "ralpha": (0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0)}),
+        ("dense-low(1e-4..1)", {"ens": ("ridge", "ols"), "ralpha": (0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0)}),
+    ]
+    # HUBER_EPSILON only bites with huber in the basket → evaluate on the real
+    # skill basket (ols+huber). 1.35 is sklearn's default (95% Gaussian efficiency).
+    levers["HUBER_EPSILON"] = [(v, {"ens": ("ols", "huber"), "heps": v})
+                               for v in (1.0, 1.05, 1.1, 1.2, 1.35, 1.5, 1.75,
+                                         2.0, 2.5, 3.0, 4.0)]
+    # LOOKBACK_WINDOWS drives the Z_lb bands → AvgZ/breadth internals (the
+    # engine's state features). Tuple variants probe shorter/longer/denser sets.
+    levers["LOOKBACK_WINDOWS"] = [
+        ("ultra-short(3-10)", {"lookb": (3, 5, 10)}),
+        ("short(5-20)",   {"lookb": (5, 10, 20)}),
+        ("mid(10-50)",    {"lookb": (10, 20, 50)}),
+        ("long(20-100)",  {"lookb": (20, 50, 100)}),
+        ("current(5-100)", {"lookb": (5, 10, 20, 50, 100)}),
+        ("no-short(10-100)", {"lookb": (10, 20, 50, 100)}),
+        ("wide(5-200)",   {"lookb": (5, 10, 20, 50, 100, 200)}),
+        ("dense(5-150)",  {"lookb": (5, 10, 20, 30, 50, 75, 100, 150)}),
+        ("ultra-wide(5-250)", {"lookb": (5, 10, 20, 50, 100, 150, 200, 250)}),
     ]
     return levers
 
@@ -162,7 +210,8 @@ def _matrix(target, h, mom):
 _ICCACHE = {}
 def fit_ic(cfg, target, h, mom):
     # Dedupe identical configs across levers (the shared base appears in 5 levers).
-    sig = (cfg["refit"], cfg["ens"], cfg["maxt"], cfg["mint"], cfg["pca"], cfg["ralpha"], target, h)
+    sig = (cfg["refit"], cfg["ens"], cfg["maxt"], cfg["mint"], cfg["pca"], cfg["ralpha"],
+           cfg.get("heps", 1.35), cfg.get("lookb", (5, 10, 20, 50, 100)), target, h)
     if sig in _ICCACHE:
         return _ICCACHE[sig]
     m = _matrix(target, h, mom)
@@ -172,6 +221,8 @@ def fit_ic(cfg, target, h, mom):
     aa.REFIT_INTERVAL = cfg["refit"]; aa.ENSEMBLE_MODELS = cfg["ens"]
     aa.MAX_TRAIN_SIZE = cfg["maxt"]; aa.MIN_TRAIN_SIZE = cfg["mint"]
     aa.RIDGE_ALPHAS = cfg["ralpha"]
+    aa.HUBER_EPSILON = cfg.get("heps", 1.35)
+    aa.LOOKBACK_WINDOWS = cfg.get("lookb", (5, 10, 20, 50, 100))
     eng = FairValueEngine()
     eng.fit(X, y, feature_names=feats, forward_signal=True,
             n_pca_components=cfg["pca"], purge=h)
@@ -256,9 +307,14 @@ def _live_cur():
         "MAX_TRAIN_SIZE":  str(g("MAX_TRAIN_SIZE", BASE["maxt"])),
         "MIN_TRAIN_SIZE":  str(g("MIN_TRAIN_SIZE", BASE["mint"])),
         # PCA has no config constant — it is a literal at the live engine.fit call site
-        # (app.py: n_pca_components=20). Reference the study's baseline, which mirrors it.
+        # (app.py sets n_pca_components at the engine.fit call site). Reference the study baseline.
         "PCA_COMPONENTS":  str(BASE["pca"]),
+        "HUBER_EPSILON":   str(g("HUBER_EPSILON", BASE["heps"])),
     }
+    live_lb = tuple(g("LOOKBACK_WINDOWS", BASE["lookb"]))
+    cur["LOOKBACK_WINDOWS"] = next(
+        (label for label, ov in _cfgs()["LOOKBACK_WINDOWS"] if tuple(ov["lookb"]) == live_lb),
+        "current(5-100)")
     # RIDGE_ALPHAS is a labelled grid here; match the live tuple to its label.
     live_ra = tuple(g("RIDGE_ALPHAS", BASE["ralpha"]))
     cur["RIDGE_ALPHAS"] = next(

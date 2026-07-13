@@ -10,7 +10,14 @@ convergence threshold). Question: what do the data say these guide-lines should 
 
 The three series are exactly what the plot builds (no CrossValidator needed):
   raw_a = Aarambh ts_data["ConvictionRaw"];  raw_n = Nirnay Avg_Signal;
-  norm_avg = mean( zscore_clip(raw_a), zscore_clip(raw_n) )   (real normalization fns)
+  norm_avg = mean( causal_normalize(raw_a), causal_normalize(raw_n) )   (real
+  normalization fn — causal expanding-window z-score, matches the live app;
+  see convergence.normalization's module docstring. A previous revision here
+  used the terminal-point compute_norm_params/zscore_clip pair, which applies
+  the FULL-SAMPLE mean/std to every historical point — a look-ahead: earlier
+  bars appear less extreme than they were at the time, because sigma is
+  estimated from data that didn't yet exist at that point in history. That
+  inflates this study's apparent marker/IC precision (audit finding F14).)
 
 Method: build the 3 series across a representative target set, pool them, and report
 (a) the empirical distribution — what percentile the current markers sit at — and
@@ -32,12 +39,16 @@ if hasattr(_sys.stdout, "reconfigure"):
     _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-from core.config import MIN_DATA_POINTS, TARGET_EXCLUDED_PREDICTORS
+from core.config import (
+    MIN_DATA_POINTS, TARGET_EXCLUDED_PREDICTORS,
+    UI_CONSENSUS_STRONG, UI_CONSENSUS_MODERATE,
+    UI_CONVRAW_STRONG, UI_CONVRAW_MODERATE, UI_NIRNAY_AVG_THRESHOLD,
+)
 import engines.aarambh as aa
 aa.ENSEMBLE_MODELS = ("ridge", "ols")          # fast base for the conviction series
 from engines.aarambh import FairValueEngine
 from engines.nirnay import run_full_analysis, aggregate_constituent_timeseries
-from convergence.normalization import align_aarambh_nirnay, compute_norm_params, zscore_clip
+from convergence.normalization import align_aarambh_nirnay, causal_normalize
 from nirnay_tuning_study import _load, _basket_ohlcv
 
 # Commodity/FX + small India sectors (skip Nifty 50/US — large baskets).
@@ -112,9 +123,8 @@ def target_series(target):
     if len(dates) < 100:
         return None
     raw_a = np.array(raw_a, float); raw_n = np.array(raw_n, float)
-    params = compute_norm_params(list(raw_a), list(raw_n))
-    norm_a = zscore_clip(raw_a, params["mu_a"], params["sigma_a"])
-    norm_n = zscore_clip(raw_n, params["mu_n"], params["sigma_n"])
+    norm_a = causal_normalize(raw_a)
+    norm_n = causal_normalize(raw_n)
     norm_avg = (norm_a + norm_n) / 2.0
     # forward returns of the target aligned to these dates
     price = ts["Price"].astype(float)
@@ -141,8 +151,9 @@ def _report_signal(name, vals, fwd, cur_strong, cur_mod, scale):
     print(f"    current markers: strong ±{cur_strong}, moderate ±{cur_mod}")
     print(f"    |signal| ≥ {cur_strong}: {_pct_at(a, cur_strong):5.1f}% of days  "
           f"| ≥ {cur_mod}: {_pct_at(a, cur_mod):5.1f}%")
-    qs = {p: np.quantile(a, p / 100) for p in (50, 70, 75, 85, 90, 95)}
-    print("    |signal| percentiles:  " + "  ".join(f"p{p}={qs[p]:.2f}" for p in (50, 70, 85, 90, 95)))
+    qs = {p: np.quantile(a, p / 100) for p in (25, 40, 50, 60, 70, 75, 80, 85, 90, 92.5, 95, 97.5, 99, 99.5)}
+    print("    |signal| percentiles:  " + "  ".join(f"p{p:g}={qs[p]:.2f}"
+                                                    for p in (25, 40, 50, 60, 70, 75, 80, 85, 90, 92.5, 95, 97.5, 99, 99.5)))
     print(f"    → data-anchored:  strong = p90 ≈ {qs[90]:.2f}   moderate = p75 ≈ {qs[75]:.2f}")
     # forward-return by signal quintile (does tier ordering hold?)
     mf = np.isfinite(f)
@@ -178,9 +189,14 @@ def main():
     print("\n" + "=" * 72)
     print("  UNIFIED-SIGNAL MARKERS — what the data says (pooled across targets)")
     print("=" * 72)
-    _report_signal("Row 1 · norm_avg (consensus)", S1, FW, 0.5, 0.25, "[-1,1]")
-    _report_signal("Row 2 · ConvictionRaw (Aarambh)", S2, FW, 40, 20, "~[-100,100]")
-    _report_signal("Row 3 · Avg_Signal (Nirnay)", S3, FW, 2, 2, "[-10,10]")
+    # "current markers" read LIVE config — hardcoded values here silently misreport
+    # once config is re-anchored (they had: 0.5/0.25, 40/20, 2/2 vs live values).
+    _report_signal("Row 1 · norm_avg (consensus)", S1, FW,
+                   UI_CONSENSUS_STRONG, UI_CONSENSUS_MODERATE, "[-1,1]")
+    _report_signal("Row 2 · ConvictionRaw (Aarambh)", S2, FW,
+                   UI_CONVRAW_STRONG, UI_CONVRAW_MODERATE, "~[-100,100]")
+    _report_signal("Row 3 · Avg_Signal (Nirnay)", S3, FW,
+                   UI_NIRNAY_AVG_THRESHOLD, UI_NIRNAY_AVG_THRESHOLD, "[-10,10]")
     print("\n  NOTE: percentiles describe how EXTREME a reading is vs history (robust).")
     print("  Forward-return-by-quintile is the (noisy) edge check — near-zero IC means")
     print("  the markers are interpretive guides, not actionable thresholds.")

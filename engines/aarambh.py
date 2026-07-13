@@ -72,7 +72,7 @@ except ImportError:
     _PCA_SOLVER = "full"
 
 # Math imports from package
-from analytics.ou_process import ornstein_uhlenbeck_estimate, andrews_median_unbiased_ar1
+from analytics.ou_process import ornstein_uhlenbeck_estimate
 from analytics.ddm_filter import drift_diffusion_filter
 from analytics.hurst import hurst_dfa
 from analytics.structural_breaks import detect_structural_breaks, _rolling_mean_breaks

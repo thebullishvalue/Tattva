@@ -12,42 +12,24 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from analytics.regime import (
-    AdaptiveKalmanFilter,
-    AdaptiveHMM,
-    GARCHDetector,
-    CUSUMDetector,
-    run_regime_loop,
-)
-
+from analytics.regime import run_regime_loop
+# NOTE (audit finding F12): analytics.regime also exposes object-oriented
+# reference implementations (AdaptiveKalmanFilter, AdaptiveHMM, GARCHDetector,
+# CUSUMDetector) that mirror run_regime_loop's njit kernel step-for-step. This
+# module only ever called the kernel — the object classes were imported but
+# dead code, and (being a hand-maintained duplicate of the kernel's logic)
+# a maintenance hazard: the HMM label-switching fix had to be applied to BOTH
+# independently. Kept as the readable reference (not deleted) but no longer
+# imported here; research/regime_equivalence_check.py asserts the two stay
+# numerically identical so a future edit to either side fails loudly instead
+# of silently drifting.
 
 # ─── Utility functions ───────────────────────────────────────────────────────
-
-
-def _sigmoid(x: np.ndarray | float, scale: float = 1.0) -> np.ndarray | float:
-    """Sigmoid transformation bounding to [-1, 1].
-
-    Formula: ``2 / (1 + exp(-x/scale)) - 1`` (original Nirnay formula).
-    """
-    return 2.0 / (1.0 + np.exp(-x / scale)) - 1.0
-
-
-def _zscore_clipped(series: pd.Series, window: int, clip: float = 3.0) -> pd.Series:
-    """Rolling causal z-score with outlier clipping. Uses shift(1) to prevent today's outlier from biasing the denominator."""
-    series_filled = series.ffill().fillna(0)
-    roll_mean = series_filled.rolling(window=window, min_periods=1).mean().shift(1).fillna(0)
-    roll_std = series_filled.rolling(window=window, min_periods=1).std().shift(1).fillna(0)
-    z = (series_filled - roll_mean) / roll_std.replace(0, np.nan)
-    return z.clip(-clip, clip).fillna(0)
-
-
-def _calculate_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
-    """Exponential moving average True Range."""
-    high_low = df["High"] - df["Low"]
-    high_close = (df["High"] - df["Close"].shift()).abs()
-    low_close = (df["Low"] - df["Close"].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.ewm(alpha=1 / length, adjust=False).mean()
+# sigmoid / zscore_clipped / calculate_atr moved to analytics.utils (audit
+# finding F11) — this module's private copies were the CANONICAL semantics
+# (analytics.utils previously carried a second, non-equivalent copy that no
+# caller here ever used); import them so there is exactly one implementation.
+from analytics.utils import sigmoid as _sigmoid, zscore_clipped as _zscore_clipped, calculate_atr as _calculate_atr
 
 
 # ─── Market Strength Factor ──────────────────────────────────────────────────

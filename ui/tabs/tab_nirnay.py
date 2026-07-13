@@ -20,8 +20,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ui.theme import chart_layout, style_axes
-from ui.components import render_metric_card, render_section_header, render_control_hint, section_gap
+from ui.components import (render_metric_card, render_section_header, render_control_hint,
+                           section_gap, render_data_table)
 from core.config import (
+    rgba,  # centralized chart palette (single source: config._PALETTE_RGB)
     COLOR_GREEN,
     COLOR_RED,
     COLOR_AMBER,
@@ -78,14 +80,14 @@ def _render_hmm_regime_chart(df_n, dates):
             x=dates, y=df_n["avg_hmm_bull"].values,
             mode="lines", name="P(Bull)",
             line=dict(color=EMERALD, width=1.5),
-            fill="tozeroy", fillcolor="rgba(52,211,153,0.08)",
+            fill="tozeroy", fillcolor=rgba("emerald", 0.08),
         ))
     if "avg_hmm_bear" in df_n.columns:
         fig_hmm.add_trace(go.Scatter(
             x=dates, y=df_n["avg_hmm_bear"].values,
             mode="lines", name="P(Bear)",
             line=dict(color=ROSE, width=1.5),
-            fill="tozeroy", fillcolor="rgba(251,113,133,0.08)",
+            fill="tozeroy", fillcolor=rgba("rose", 0.08),
         ))
     if "avg_hmm_bull" in df_n.columns and "avg_hmm_bear" in df_n.columns:
         neutral_vals = 1.0 - df_n["avg_hmm_bull"].values - df_n["avg_hmm_bear"].values
@@ -107,13 +109,13 @@ def _render_zone_distribution_chart(df_n, dates):
     fig_zones.add_trace(go.Scatter(
         x=dates, y=df_n["Oversold_Pct"].values,
         mode="lines", name="Oversold %",
-        fill="tozeroy", fillcolor="rgba(52, 211, 153, 0.12)",
+        fill="tozeroy", fillcolor=rgba("emerald", 0.12),
         line=dict(color=EMERALD, width=1.5),
     ))
     fig_zones.add_trace(go.Scatter(
         x=dates, y=df_n["Overbought_Pct"].values,
         mode="lines", name="Overbought %",
-        fill="tozeroy", fillcolor="rgba(251, 113, 133, 0.12)",
+        fill="tozeroy", fillcolor=rgba("rose", 0.12),
         line=dict(color=ROSE, width=1.5),
     ))
     ymax = max(df_n["Oversold_Pct"].max(), df_n["Overbought_Pct"].max()) * 1.15
@@ -128,11 +130,11 @@ def _render_raw_zone_counts_chart(df_n, dates):
     fig_counts = go.Figure()
     fig_counts.add_trace(go.Bar(
         x=dates, y=df_n["Oversold"].values, name="Oversold",
-        marker=dict(color="rgba(52,211,153,0.85)"),
+        marker=dict(color=rgba("emerald", 0.85)),
     ))
     fig_counts.add_trace(go.Bar(
         x=dates, y=df_n["Overbought"].values, name="Overbought",
-        marker=dict(color="rgba(251,113,133,0.85)"),
+        marker=dict(color=rgba("rose", 0.85)),
     ))
 
     fig_counts.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM), barmode="group")
@@ -164,17 +166,17 @@ def _render_signal_counts_chart(df_n, dates):
 def _render_avg_unified_signal_chart(df_n, dates):
     """Section: Average Unified Signal — cross-sectional oscillator mean."""
     avg_vals = df_n["Avg_Signal"].values
-    colors = [EMERALD if v < -2 else ROSE if v > 2 else "rgba(148,163,184,0.75)" for v in avg_vals]
+    colors = [EMERALD if v < -2 else ROSE if v > 2 else rgba("slate", 0.75) for v in avg_vals]
 
     fig_n = go.Figure()
     fig_n.add_trace(go.Scatter(
         x=dates, y=np.clip(avg_vals, 0, None),
-        fill="tozeroy", fillcolor="rgba(251,113,133,0.05)",
+        fill="tozeroy", fillcolor=rgba("rose", 0.05),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig_n.add_trace(go.Scatter(
         x=dates, y=np.clip(avg_vals, None, 0),
-        fill="tozeroy", fillcolor="rgba(52,211,153,0.05)",
+        fill="tozeroy", fillcolor=rgba("emerald", 0.05),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig_n.add_trace(go.Scatter(
@@ -183,8 +185,8 @@ def _render_avg_unified_signal_chart(df_n, dates):
         line=dict(color=SLATE, width=1.5),
         marker=dict(size=3, color=colors),
     ))
-    fig_n.add_hline(y=2, line_color="rgba(251,113,133,0.2)", line_width=0.5, line_dash="dot")
-    fig_n.add_hline(y=-2, line_color="rgba(52,211,153,0.2)", line_width=0.5, line_dash="dot")
+    fig_n.add_hline(y=2, line_color=rgba("rose", 0.2), line_width=0.5, line_dash="dot")
+    fig_n.add_hline(y=-2, line_color=rgba("emerald", 0.2), line_width=0.5, line_dash="dot")
     fig_n.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5)
 
     fig_n.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM))
@@ -207,7 +209,13 @@ def _render_individual_constituents(nirnay_constituent_dfs):
                 "Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition",
                 "Regime", "Vol_Regime", "Change_Point", "Confidence",
             ] if c in cdf.columns]
-            st.dataframe(cdf[cols_show] if cols_show else cdf, width='stretch')
+            _shown = cdf[cols_show] if cols_show else cdf
+            # Oscillators are signed [-10,+10] — colour them emerald/rose by sign,
+            # matching Pragyam's per-signal columns.
+            render_data_table(
+                _shown, index_label="Date", max_rows=60, max_height=520,
+                sign_color_cols={"MSF_Osc", "MMR_Osc", "Unified_Osc"},
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════

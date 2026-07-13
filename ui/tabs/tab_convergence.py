@@ -14,9 +14,16 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from ui.theme import chart_layout, style_axes
-from ui.components import render_metric_card, render_section_header, section_gap, render_info_box
-from convergence.normalization import align_aarambh_nirnay
+from ui.components import (render_metric_card, render_section_header, section_gap,
+                           render_info_box, render_data_table)
+from convergence.normalization import (
+    align_aarambh_nirnay,
+    causal_normalize,
+    classify_normalized_signal,
+    DEFAULT_THRESHOLDS,
+)
 from core.config import (
+    rgba,  # centralized chart palette (single source: config._PALETTE_RGB)
     COLOR_GREEN,
     COLOR_RED,
     COLOR_AMBER,
@@ -24,8 +31,8 @@ from core.config import (
     COLOR_MUTED,
     UI_AGREEMENT_STRONG,
     UI_AGREEMENT_MODERATE,
-    UI_CONVICTION_STRONG,
-    UI_CONVICTION_MODERATE,
+    CONVICTION_STRONG,
+    CONVICTION_MODERATE,
     UI_NIRNAY_BULLISH,
     UI_NIRNAY_BEARISH,
     UI_CONSENSUS_STRONG,
@@ -127,20 +134,15 @@ def render_convergence_tab(ts_filtered=None):
             # series.  Applying terminal-point μ/σ to a historical slice is look-ahead
             # bias: earlier bars appear less extreme than they were at the time because
             # σ is estimated from data that didn't yet exist.
+            # causal_normalize is the SAME transform convergence.normalization's
+            # compute_normalized_convergence uses (audit finding F16) — a
+            # hand-duplicated copy here previously had to be kept in sync by
+            # inspection for this plot to match the Convergence-tab cards.
             _full_dates, full_a, full_n = align_aarambh_nirnay(aarambh_ts, nirnay_daily)
             fa = np.array(full_a, dtype=np.float64)
             fn = np.array(full_n, dtype=np.float64)
-            sa, sn = pd.Series(fa), pd.Series(fn)
-            na_full = np.clip(
-                (fa - sa.expanding().mean().to_numpy())
-                / sa.expanding().std().clip(lower=1e-10).fillna(1.0).to_numpy()
-                / 3.0, -1.0, 1.0,
-            )
-            nn_full = np.clip(
-                (fn - sn.expanding().mean().to_numpy())
-                / sn.expanding().std().clip(lower=1e-10).fillna(1.0).to_numpy()
-                / 3.0, -1.0, 1.0,
-            )
+            na_full = causal_normalize(fa)
+            nn_full = causal_normalize(fn)
             def _dk(d):
                 return str(d.date()) if hasattr(d, "date") else str(d)
             _p = {
@@ -206,7 +208,7 @@ def render_convergence_tab(ts_filtered=None):
             a_conv = float(aarambh_ts["ConvictionRaw"].iloc[-1])
         if a_conv is not None:
             render_metric_card("AARAMBH CONVICTION", f"{a_conv:+.2f}", "Market breadth: oversold vs overbought",
-                               "success" if a_conv < -UI_CONVICTION_MODERATE else "danger" if a_conv > UI_CONVICTION_MODERATE else "neutral",
+                               "success" if a_conv < -CONVICTION_MODERATE else "danger" if a_conv > CONVICTION_MODERATE else "neutral",
                                tooltip=TOOLTIPS["aarambh_conviction"])
         else:
             render_metric_card("AARAMBH CONVICTION", "N/A", "", "neutral")
@@ -228,6 +230,121 @@ def render_convergence_tab(ts_filtered=None):
                            tooltip=TOOLTIPS["agreement"])
 
     section_gap()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # HERO SIGNAL — HISTORY: the exact headline object over time.
+    # Trace = the NORMALIZED CONSENSUS ([-1,+1], negative = bullish) — the
+    # same series as Row 1 of the Unified Signal chart below, and the series
+    # whose LAST point is the hero card's score (consensus-headline product
+    # decision). Each point is classified with the hero's factory
+    # DEFAULT_THRESHOLDS, so marker colors are literally "what the hero card would
+    # have said on that day" (Row 1 below shows the same series with
+    # EXTREMENESS markers instead — different lens on one object). Dashed
+    # overlay = the DDM-smoothed trend the TREND evidence row compares
+    # today's print against.
+    # ═══════════════════════════════════════════════════════════════════════
+    _hero_series = st.session_state.get("hero_series")
+    _hero_smoothed = st.session_state.get("hero_smoothed")
+    if _hero_series is not None and len(_hero_series):
+        render_section_header(
+            "Hero Signal — History",
+            "The hero card's headline signal over time (normalized consensus, "
+            "negative = bullish — the same series as Row 1 below). Marker colors = "
+            "the hero's classification on each day; dashed line = the DDM-smoothed "
+            "trend behind the TREND evidence row.",
+            icon="target",
+            accent="amber",
+        )
+        _hs = _hero_series
+        _hm = _hero_smoothed
+        if filtered_dates is not None:
+            _mask = [str(d.date()) in filtered_dates for d in _hs.index]
+            _hs = _hs[_mask]
+            if _hm is not None and len(_hm) == len(_hero_series):
+                _hm = _hm[_mask]
+        # Compact display labels for the plot (hover + band annotations): the
+        # classifier's "STRONG BUY"/"STRONG SELL" are abbreviated to "S. Buy"/
+        # "S. Sell" and the tier casing is normalised (Buy/Hold/Sell) so the
+        # markers and the left-edge band labels read cleanly at small sizes.
+        _HERO_LABEL_DISPLAY = {
+            "STRONG BUY": "S. Buy", "BUY": "Buy", "HOLD": "Hold",
+            "SELL": "Sell", "STRONG SELL": "S. Sell",
+        }
+        if len(_hs):
+            _hero_colors, _hero_sizes = [], []
+            _hero_labels = []
+            for _v in _hs.to_numpy():
+                # Consensus classifier with the consensus's OWN factory
+                # DEFAULT_THRESHOLDS — the exact pairing the hero card's
+                # headline label uses (compute_normalized_convergence).
+                _lbl = classify_normalized_signal(float(_v))
+                _hero_labels.append(_HERO_LABEL_DISPLAY.get(_lbl, _lbl))
+                if _lbl == "STRONG BUY":
+                    _hero_colors.append(EMERALD); _hero_sizes.append(8)
+                elif _lbl == "BUY":
+                    _hero_colors.append(rgba("emerald", 0.85)); _hero_sizes.append(6)
+                elif _lbl == "STRONG SELL":
+                    _hero_colors.append(ROSE); _hero_sizes.append(8)
+                elif _lbl == "SELL":
+                    _hero_colors.append(rgba("rose", 0.85)); _hero_sizes.append(6)
+                else:
+                    _hero_colors.append(rgba("slate", 0.75)); _hero_sizes.append(4)
+
+            _fig_hero = go.Figure()
+            _fig_hero.add_trace(go.Scatter(
+                x=_hs.index, y=np.clip(_hs.to_numpy(), 0, None),
+                fill="tozeroy", fillcolor=rgba("rose", 0.05),
+                line=dict(width=0), showlegend=False, hoverinfo="skip",
+            ))
+            _fig_hero.add_trace(go.Scatter(
+                x=_hs.index, y=np.clip(_hs.to_numpy(), None, 0),
+                fill="tozeroy", fillcolor=rgba("emerald", 0.05),
+                line=dict(width=0), showlegend=False, hoverinfo="skip",
+            ))
+            if _hm is not None and len(_hm):
+                _fig_hero.add_trace(go.Scatter(
+                    x=_hm.index, y=_hm.to_numpy(), mode="lines",
+                    name="Smoothed trend (DDM)",
+                    line=dict(color=AMBER, width=1.3, dash="dash"),
+                ))
+            _fig_hero.add_trace(go.Scatter(
+                x=_hs.index, y=_hs.to_numpy(), mode="lines+markers",
+                name="Hero signal (consensus)",
+                line=dict(color=SLATE, width=1.6),
+                marker=dict(size=_hero_sizes, color=_hero_colors),
+                text=_hero_labels,
+            ))
+            # Factory classification bands — the hero's actual cut-points
+            # (the consensus's own p75/p90-anchored factory set).
+            _t = DEFAULT_THRESHOLDS
+            _fig_hero.add_hline(y=_t["buy_strong"], line_dash="dot",
+                                line_color=rgba("emerald", 0.30), line_width=0.7,
+                                annotation_text="S. Buy", annotation_position="left",
+                                annotation_font_size=9)
+            _fig_hero.add_hline(y=_t["buy_moderate"], line_dash="dot",
+                                line_color=rgba("emerald", 0.18), line_width=0.5,
+                                annotation_text="Buy", annotation_position="left",
+                                annotation_font_size=9)
+            _fig_hero.add_hline(y=_t["sell_moderate"], line_dash="dot",
+                                line_color=rgba("rose", 0.18), line_width=0.5,
+                                annotation_text="Sell", annotation_position="left",
+                                annotation_font_size=9)
+            _fig_hero.add_hline(y=_t["sell_strong"], line_dash="dot",
+                                line_color=rgba("rose", 0.30), line_width=0.7,
+                                annotation_text="S. Sell", annotation_position="left",
+                                annotation_font_size=9)
+            _fig_hero.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5)
+            _fig_hero.update_layout(**chart_layout(height=UI_CHART_HEIGHT_STACKED // 2))
+            # Dynamic y-range (a fixed ±1.05 would waste vertical space on
+            # the consensus's typical scale); include the strong bands so the
+            # cut-points stay visible even in quiet stretches.
+            style_axes(_fig_hero, y_title="Hero signal",
+                       y_range=_dynamic_range(list(_hs.to_numpy())
+                                              + [_t["buy_strong"], _t["sell_strong"]]))
+            st.plotly_chart(_fig_hero, width='stretch', key="hero_signal_history")
+            st.caption("Negative = bullish (system-wide sign convention). The last point is "
+                       "the score on the hero card above.")
+        section_gap()
 
     # ═══════════════════════════════════════════════════════════════════════
     # UNIFIED NORMALIZED SIGNAL — 3-row stacked chart
@@ -302,43 +419,54 @@ def render_convergence_tab(ts_filtered=None):
         if v < -UI_CONSENSUS_STRONG:
             avg_colors.append(EMERALD); avg_sizes.append(8)
         elif v <= -UI_CONSENSUS_MODERATE:
-            avg_colors.append("rgba(52,211,153,1.0)"); avg_sizes.append(6)
+            avg_colors.append(rgba("emerald", 1.0)); avg_sizes.append(6)
         elif v > UI_CONSENSUS_STRONG:
             avg_colors.append(ROSE); avg_sizes.append(8)
         elif v >= UI_CONSENSUS_MODERATE:
-            avg_colors.append("rgba(251,113,133,1.0)"); avg_sizes.append(6)
+            avg_colors.append(rgba("rose", 1.0)); avg_sizes.append(6)
         else:
-            avg_colors.append("rgba(148,163,184,0.95)"); avg_sizes.append(5)
+            avg_colors.append(rgba("slate", 0.95)); avg_sizes.append(5)
 
     # ── Row 1: Unified normalized ─────────────────────────────────────
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=np.clip(norm_avg, 0, None),
-        fill="tozeroy", fillcolor="rgba(251,113,133,0.06)",
+        fill="tozeroy", fillcolor=rgba("rose", 0.06),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=np.clip(norm_avg, None, 0),
-        fill="tozeroy", fillcolor="rgba(52,211,153,0.06)",
+        fill="tozeroy", fillcolor=rgba("emerald", 0.06),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=norm_a, mode="lines", name="Aarambh",
-        line=dict(color="rgba(148,163,184,0.25)", width=1, dash="dot"),
+        line=dict(color=rgba("slate", 0.25), width=1, dash="dot"),
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=norm_n, mode="lines", name="Nirnay",
-        line=dict(color="rgba(34,211,238,0.2)", width=1, dash="dot"),
+        line=dict(color=rgba("cyan", 0.2), width=1, dash="dot"),
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=norm_avg, mode="lines+markers", name="Consensus (50/50)",
         line=dict(color=SLATE, width=2),
         marker=dict(size=avg_sizes, color=avg_colors),
     ), row=1, col=1)
-    # Calibrated-model overlay (amber trace) intentionally omitted here — the
-    # normalized 50/50 consensus (slate) is the plot's own read; the hero card
-    # above already shows the calibrated model value separately.
-    fig.add_hline(y=UI_CONSENSUS_STRONG, line_dash="dot", line_color="rgba(251,113,133,0.15)", line_width=0.5, row=1, col=1)
-    fig.add_hline(y=-UI_CONSENSUS_STRONG, line_dash="dot", line_color="rgba(52,211,153,0.15)", line_width=0.5, row=1, col=1)
+    # Calibrated-model overlay — the DDM-filtered smoothed trend of the SAME
+    # calibrated product signal the hero card headlines (audit findings
+    # F1/F2/F6: calibrated_conv_series was computed every run but never
+    # plotted). Aligned onto aligned_dates (same reindex the consensus/raw
+    # traces use) so it's directly comparable to the diagnostic consensus
+    # line, not a second unrelated read.
+    _calib_series = st.session_state.get("calibrated_conv_series")
+    if _calib_series is not None and len(_calib_series):
+        _calib_aligned = _calib_series.reindex(pd.DatetimeIndex(aligned_dates)).to_numpy()
+        fig.add_trace(go.Scatter(
+            x=aligned_dates, y=_calib_aligned, mode="lines", name="Calibrated Model",
+            line=dict(color=AMBER, width=1.5, dash="dash"),
+            connectgaps=True,
+        ), row=1, col=1)
+    fig.add_hline(y=UI_CONSENSUS_STRONG, line_dash="dot", line_color=rgba("rose", 0.15), line_width=0.5, row=1, col=1)
+    fig.add_hline(y=-UI_CONSENSUS_STRONG, line_dash="dot", line_color=rgba("emerald", 0.15), line_width=0.5, row=1, col=1)
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5, row=1, col=1)
 
     # ── Row 2: Base Conviction ────────────────────────────────────────
@@ -346,25 +474,25 @@ def render_convergence_tab(ts_filtered=None):
     conv_colors, conv_sizes = [], []
     for v in aligned_conv_raw:
         if v is None:
-            conv_colors.append("rgba(148,163,184,0.90)"); conv_sizes.append(5)
+            conv_colors.append(rgba("slate", 0.90)); conv_sizes.append(5)
         elif v > UI_CONVRAW_STRONG:
             conv_colors.append(ROSE); conv_sizes.append(7)
         elif v >= UI_CONVRAW_MODERATE:
-            conv_colors.append("rgba(251,113,133,1.0)"); conv_sizes.append(6)
+            conv_colors.append(rgba("rose", 1.0)); conv_sizes.append(6)
         elif v < -UI_CONVRAW_STRONG:
             conv_colors.append(EMERALD); conv_sizes.append(7)
         elif v <= -UI_CONVRAW_MODERATE:
-            conv_colors.append("rgba(52,211,153,1.0)"); conv_sizes.append(6)
+            conv_colors.append(rgba("emerald", 1.0)); conv_sizes.append(6)
         else:
-            conv_colors.append("rgba(148,163,184,0.95)"); conv_sizes.append(5)
+            conv_colors.append(rgba("slate", 0.95)); conv_sizes.append(5)
 
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=np.clip(conv_vals, 0, None),
-        fill="tozeroy", fillcolor="rgba(251,113,133,0.05)", line=dict(width=0), showlegend=False, hoverinfo="skip",
+        fill="tozeroy", fillcolor=rgba("rose", 0.05), line=dict(width=0), showlegend=False, hoverinfo="skip",
     ), row=2, col=1)
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=np.clip(conv_vals, None, 0),
-        fill="tozeroy", fillcolor="rgba(52,211,153,0.05)", line=dict(width=0), showlegend=False, hoverinfo="skip",
+        fill="tozeroy", fillcolor=rgba("emerald", 0.05), line=dict(width=0), showlegend=False, hoverinfo="skip",
     ), row=2, col=1)
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=conv_vals, mode="lines+markers", name="Base Conviction",
@@ -372,27 +500,27 @@ def render_convergence_tab(ts_filtered=None):
         marker=dict(size=conv_sizes, color=conv_colors),
     ), row=2, col=1)
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5, row=2, col=1)
-    fig.add_hline(y=UI_CONVRAW_STRONG, line_dash="dot", line_color="rgba(251,113,133,0.12)", line_width=0.5, row=2, col=1)
-    fig.add_hline(y=-UI_CONVRAW_STRONG, line_dash="dot", line_color="rgba(52,211,153,0.12)", line_width=0.5, row=2, col=1)
+    fig.add_hline(y=UI_CONVRAW_STRONG, line_dash="dot", line_color=rgba("rose", 0.12), line_width=0.5, row=2, col=1)
+    fig.add_hline(y=-UI_CONVRAW_STRONG, line_dash="dot", line_color=rgba("emerald", 0.12), line_width=0.5, row=2, col=1)
 
     # ── Row 3: Nirnay Avg Signal ──────────────────────────────────────
-    nirnay_colors = [EMERALD if v < -UI_NIRNAY_AVG_THRESHOLD else ROSE if v > UI_NIRNAY_AVG_THRESHOLD else "rgba(148,163,184,0.95)" for v in aligned_nirnay_raw]
+    nirnay_colors = [EMERALD if v < -UI_NIRNAY_AVG_THRESHOLD else ROSE if v > UI_NIRNAY_AVG_THRESHOLD else rgba("slate", 0.95) for v in aligned_nirnay_raw]
 
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=np.clip(aligned_nirnay_raw, 0, None),
-        fill="tozeroy", fillcolor="rgba(251,113,133,0.05)", line=dict(width=0), showlegend=False, hoverinfo="skip",
+        fill="tozeroy", fillcolor=rgba("rose", 0.05), line=dict(width=0), showlegend=False, hoverinfo="skip",
     ), row=3, col=1)
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=np.clip(aligned_nirnay_raw, None, 0),
-        fill="tozeroy", fillcolor="rgba(52,211,153,0.05)", line=dict(width=0), showlegend=False, hoverinfo="skip",
+        fill="tozeroy", fillcolor=rgba("emerald", 0.05), line=dict(width=0), showlegend=False, hoverinfo="skip",
     ), row=3, col=1)
     fig.add_trace(go.Scatter(
         x=aligned_dates, y=aligned_nirnay_raw, mode="lines+markers", name="Avg Signal",
         line=dict(color=SLATE, width=1.2),
         marker=dict(size=5, color=nirnay_colors),
     ), row=3, col=1)
-    fig.add_hline(y=UI_NIRNAY_AVG_THRESHOLD, line_dash="dot", line_color="rgba(251,113,133,0.15)", line_width=0.5, row=3, col=1)
-    fig.add_hline(y=-UI_NIRNAY_AVG_THRESHOLD, line_dash="dot", line_color="rgba(52,211,153,0.15)", line_width=0.5, row=3, col=1)
+    fig.add_hline(y=UI_NIRNAY_AVG_THRESHOLD, line_dash="dot", line_color=rgba("rose", 0.15), line_width=0.5, row=3, col=1)
+    fig.add_hline(y=-UI_NIRNAY_AVG_THRESHOLD, line_dash="dot", line_color=rgba("emerald", 0.15), line_width=0.5, row=3, col=1)
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5, row=3, col=1)
 
     # ── Layout ────────────────────────────────────────────────────────
@@ -403,3 +531,29 @@ def render_convergence_tab(ts_filtered=None):
 
     st.plotly_chart(fig, width='stretch', key="convergence_overlay")
     st.caption(f"{len(aligned_dates)} overlapping trading days")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RECENT DIVERGENCES — the section the hero card's RISK row points at.
+    # The hero previously said "see the Convergence tab" while NO tab actually
+    # rendered the divergence events (a pointer to nowhere — hero-rigor pass).
+    # Shows the most recent events with dates so the reader can judge whether
+    # the flagged disagreement is current or already resolved; the hero's own
+    # count is windowed to ~DIV_LOOKBACK trading days (audit finding F7).
+    # ═══════════════════════════════════════════════════════════════════════
+    div_events = st.session_state.get("divergence_events")
+    if div_events is not None and hasattr(div_events, "empty") and not div_events.empty:
+        section_gap()
+        render_section_header(
+            "Recent Divergences",
+            "Latest cross-system disagreement events (Aarambh vs Nirnay), most recent first. "
+            "The hero card's RISK row counts only the last ~20 trading days of these.",
+            icon="zap",
+            accent="rose",
+        )
+        _recent = div_events.tail(10).iloc[::-1].copy()
+        _cols = [c for c in ("divergence_type", "aarambh_signal", "nirnay_signal",
+                             "severity", "description") if c in _recent.columns]
+        render_data_table(_recent[_cols] if _cols else _recent,
+                          index_label="Date", max_height=360)
+        st.caption(f"{len(div_events)} divergence events across the full history — "
+                   f"showing the {len(_recent)} most recent.")

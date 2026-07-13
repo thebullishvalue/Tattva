@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime
 
-from ui.components import render_section_header
+from ui.components import render_section_header, render_data_table
 
 
 def render_data_tab(ts_filtered, ts, active_target):
@@ -71,7 +71,14 @@ def render_data_tab(ts_filtered, ts, active_target):
         ).any(axis=1)
         filtered_df = filtered_df[mask]
 
-    st.dataframe(filtered_df, width='stretch', height=520)
+    # HTML table renders every row into the DOM (unlike st.dataframe's
+    # virtualized scroll), so cap the on-screen rows to the most recent 300 —
+    # the full set is still exportable via the CSV button below.
+    _CAP = 300
+    render_data_table(filtered_df, max_rows=_CAP, max_height=560)
+    if len(filtered_df) > _CAP:
+        st.caption(f"Showing the most recent {_CAP} of {len(filtered_df):,} rows — "
+                   f"export below for the full set.")
 
     # ── Export section ──────────────────────────────────────────────────
     st.markdown(

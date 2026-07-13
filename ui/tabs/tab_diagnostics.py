@@ -12,8 +12,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ui.theme import chart_layout, style_axes
-from ui.components import render_metric_card, render_section_header, section_gap
+from ui.components import (render_metric_card, render_section_header, section_gap,
+                           render_data_table)
 from core.config import (
+    rgba,  # centralized chart palette (single source: config._PALETTE_RGB)
     COLOR_GREEN,
     COLOR_RED,
     COLOR_AMBER,
@@ -90,8 +92,19 @@ def render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_s
     # foundation the mean-reversion stack depends on.
     c1, c2, c3 = st.columns(3)
     with c1:
-        render_metric_card("OU HALF-LIFE", f"{signal['ou_half_life']:.0f}d", "Days to close half the pricing gap", "info",
-                           tooltip=TOOLTIPS["ou_half_life"])
+        # "Pricing gap" is relative-value language (a mean-reverting spread);
+        # in predictive mode this half-life describes the FORECAST series'
+        # persistence, not a gap to fair value (audit finding F20 — the tab's
+        # own section header above already carries this caveat, but the card
+        # subtext previously didn't, so it kept relative-value copy even in
+        # the app's only live mode).
+        render_metric_card(
+            "OU HALF-LIFE", f"{signal['ou_half_life']:.0f}d",
+            ("Forecast-persistence half-life (diagnostic only in predictive mode)"
+             if _is_forward else "Days to close half the pricing gap"),
+            "info",
+            tooltip=None if _is_forward else TOOLTIPS["ou_half_life"],
+        )
     with c2:
         adf_class = "neutral" if _is_forward else ("success" if signal["adf_pvalue"] < 0.05 else "danger")
         render_metric_card("ADF P-VALUE", f"{signal['adf_pvalue']:.3f}", "Rejects drift if p < 0.05", adf_class,
@@ -174,7 +187,7 @@ def render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_s
                 'text-transform:uppercase;letter-spacing:0.08em;margin:var(--sp-4) 0 var(--sp-2) 0;">Current Impact Snapshot</div>',
                 unsafe_allow_html=True,
             )
-            st.dataframe(feature_history.tail(10), width='stretch', height=200)
+            render_data_table(feature_history, max_rows=10, max_height=240)
     else:
         st.info("Feature impact data not available.")
 
@@ -207,7 +220,7 @@ def render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_s
             "Sell t": f"{p['sell_t_stat']:.2f} {sell_sig}" if p["sell_count"] > 0 else "\u2014",
             "Sell N": p["sell_count"],
         })
-    st.dataframe(pd.DataFrame(perf_rows), width='stretch', height=160)
+    render_data_table(pd.DataFrame(perf_rows), label_col="Period", max_height=220)
 
     section_gap()
 
@@ -243,12 +256,12 @@ def render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_s
         fig_hmm.add_trace(go.Scatter(
             x=nirnay_df.index, y=nirnay_df["avg_hmm_bull"],
             name="P(Bull)", line=dict(color=EMERALD, width=1.5),
-            fill="tozeroy", fillcolor="rgba(52,211,153,0.08)",
+            fill="tozeroy", fillcolor=rgba("emerald", 0.08),
         ))
         fig_hmm.add_trace(go.Scatter(
             x=nirnay_df.index, y=nirnay_df["avg_hmm_bear"],
             name="P(Bear)", line=dict(color=ROSE, width=1.5),
-            fill="tozeroy", fillcolor="rgba(251,113,133,0.08)",
+            fill="tozeroy", fillcolor=rgba("rose", 0.08),
         ))
         fig_hmm.add_hline(y=0.5, line_dash="dot", line_color="rgba(255,255,255,0.08)", line_width=0.5)
 
@@ -370,8 +383,10 @@ def _render_intelligence_center() -> None:
             'background:rgba(148,163,184,0.05); border:1px solid var(--border);'
             'border-radius:6px; padding:0.7rem 0.9rem; margin-bottom:1rem;">'
             '<b>Intelligence Mode is OFF.</b> Toggle it ON in the sidebar Passport to enable '
-            'automatic calibration on the next Run Analysis. The engine is currently using '
-            'factory weights (0.30 / 0.25 / 0.25 / 0.20) and symmetric ±0.3 / ±0.5 thresholds.'
+            'automatic calibration on the next Run Analysis. The engine is currently using the '
+            'factory 0.30 / 0.25 / 0.25 / 0.20 base weights (adaptively shifted ±10% per day by '
+            'signal clarity — not applied verbatim) and the composite\'s data-anchored factory '
+            'thresholds (±0.11 moderate / ±0.18 strong).'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -468,7 +483,7 @@ def _render_intelligence_center() -> None:
                         "WORST / BEST", f"{min(_ics):+.2f} / {max(_ics):+.2f}", "IC range", "neutral",
                     )
                 _xs = [str(r["test_start"])[:10] for r in _res if not pd.isna(r["ic"])]
-                _colors = ["rgba(52,211,153,0.85)" if v > 0 else "rgba(251,113,133,0.85)" for v in _ics]
+                _colors = [rgba("emerald", 0.85) if v > 0 else rgba("rose", 0.85) for v in _ics]
                 _fig = go.Figure(go.Bar(x=_xs, y=_ics, marker_color=_colors))
                 _fig.add_hline(y=0, line_color="rgba(255,255,255,0.1)", line_width=0.6)
                 _fig.update_layout(**chart_layout(height=280))
@@ -534,7 +549,7 @@ def _render_intelligence_center() -> None:
             fig_w = go.Figure()
             fig_w.add_trace(go.Bar(
                 x=wlabels, y=def_vals, name="Default",
-                marker=dict(color="rgba(148,163,184,0.35)"),
+                marker=dict(color=rgba("slate", 0.35)),
             ))
             fig_w.add_trace(go.Bar(
                 x=wlabels, y=cal_vals, name="Calibrated",
@@ -555,13 +570,20 @@ def _render_intelligence_center() -> None:
                 icon="crosshair",
                 accent="amber",
             )
+            # Factory baselines = the composite's data-anchored cut-points
+            # (convergence.intelligence.DEFAULT_THRESHOLDS mirrors
+            # normalization.COMPOSITE_THRESHOLDS) — previously hardcoded
+            # ±0.3/±0.5, the CONSENSUS scale, which sits at ~p97+ of the
+            # composite's distribution these thresholds actually bin.
+            from convergence.intelligence import DEFAULT_THRESHOLDS as _FACTORY_T
             tcols = st.columns(4)
-            for col, (k, label, base) in zip(tcols, [
-                ("buy_strong",    "STRONG BUY ≤", -0.5),
-                ("buy_moderate",  "BUY ≤",         -0.3),
-                ("sell_moderate", "SELL ≥",        +0.3),
-                ("sell_strong",   "STRONG SELL ≥", +0.5),
+            for col, (k, label) in zip(tcols, [
+                ("buy_strong",    "STRONG BUY ≤"),
+                ("buy_moderate",  "BUY ≤"),
+                ("sell_moderate", "SELL ≥"),
+                ("sell_strong",   "STRONG SELL ≥"),
             ]):
+                base = float(_FACTORY_T[k])
                 val = float(thresholds.get(k, base))
                 with col:
                     render_metric_card(
@@ -611,7 +633,7 @@ def _render_intelligence_center() -> None:
                 "Trials": p.n_trials,
                 "Updated": p.timestamp,
             })
-        st.dataframe(pd.DataFrame(rows), width='stretch', height=min(200, 60 + 35 * len(rows)))
+        render_data_table(pd.DataFrame(rows), label_col="Universe", max_height=240)
     else:
         render_section_header(
             "Saved Profiles",

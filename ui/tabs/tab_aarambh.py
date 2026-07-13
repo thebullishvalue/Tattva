@@ -30,6 +30,7 @@ from ui.components import (
     section_gap,
 )
 from core.config import (
+    rgba,  # centralized chart palette (single source: config._PALETTE_RGB)
     OU_PROJECTION_DAYS,
     COLOR_GREEN,
     COLOR_RED,
@@ -37,15 +38,13 @@ from core.config import (
     COLOR_CYAN,
     COLOR_PURPLE,
     COLOR_MUTED,
-    UI_CONVICTION_STRONG,
-    UI_CONVICTION_MODERATE,
+    CONVICTION_STRONG,
+    CONVICTION_MODERATE,
     UI_BREADTH_HIGH,
     UI_R2_STRONG,
     UI_R2_ACCEPTABLE,
     UI_MODEL_SPREAD_LOW,
     UI_MODEL_SPREAD_HIGH,
-    UI_BAND_NARROW,
-    UI_BAND_WIDE,
     UI_CHART_HEIGHT_MEDIUM,
     UI_CHART_HEIGHT_XLARGE,
     UI_CHART_HEIGHT_SMALL,
@@ -124,13 +123,13 @@ def _conviction_colors(values):
         if c > 40:
             colors.append(ROSE); sizes.append(7)
         elif c >= 20:
-            colors.append("rgba(251,113,133,0.85)"); sizes.append(5)
+            colors.append(rgba("rose", 0.85)); sizes.append(5)
         elif c < -40:
             colors.append(EMERALD); sizes.append(7)
         elif c <= -20:
-            colors.append("rgba(52,211,153,0.85)"); sizes.append(5)
+            colors.append(rgba("emerald", 0.85)); sizes.append(5)
         else:
-            colors.append("rgba(148,163,184,0.75)"); sizes.append(4)
+            colors.append(rgba("slate", 0.75)); sizes.append(4)
     return colors, sizes
 
 
@@ -148,12 +147,12 @@ def _render_raw_conviction_chart(ts_filtered, x_axis):
     fig_raw = go.Figure()
     fig_raw.add_trace(go.Scatter(
         x=x_axis, y=raw.clip(lower=0),
-        fill="tozeroy", fillcolor="rgba(251,113,133,0.06)",
+        fill="tozeroy", fillcolor=rgba("rose", 0.06),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig_raw.add_trace(go.Scatter(
         x=x_axis, y=raw.clip(upper=0),
-        fill="tozeroy", fillcolor="rgba(52,211,153,0.06)",
+        fill="tozeroy", fillcolor=rgba("emerald", 0.06),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig_raw.add_trace(go.Scatter(
@@ -162,8 +161,8 @@ def _render_raw_conviction_chart(ts_filtered, x_axis):
         marker=dict(size=marker_sizes, color=conv_colors),
     ))
     fig_raw.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5)
-    fig_raw.add_hline(y=40, line_dash="dot", line_color="rgba(251,113,133,0.18)", line_width=0.5, annotation_text="OB", annotation_position="right")
-    fig_raw.add_hline(y=-40, line_dash="dot", line_color="rgba(52,211,153,0.18)", line_width=0.5, annotation_text="OS", annotation_position="right")
+    fig_raw.add_hline(y=40, line_dash="dot", line_color=rgba("rose", 0.18), line_width=0.5, annotation_text="OB", annotation_position="right")
+    fig_raw.add_hline(y=-40, line_dash="dot", line_color=rgba("emerald", 0.18), line_width=0.5, annotation_text="OS", annotation_position="right")
 
     fig_raw.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM, show_legend=False))
     style_axes(fig_raw, y_title="Conviction", y_range=[-100, 100])
@@ -187,17 +186,17 @@ def _render_ddm_conviction_chart(ts_filtered, x_axis, signal, is_forward=False):
         fig_conv.add_trace(go.Scatter(
             x=x_axis, y=ts_filtered["ConvictionLower"],
             mode="lines", line=dict(width=0),
-            fill="tonexty", fillcolor="rgba(148,163,184,0.06)",
+            fill="tonexty", fillcolor=rgba("slate", 0.06),
             showlegend=False, hoverinfo="skip",
         ))
     fig_conv.add_trace(go.Scatter(
         x=x_axis, y=ts_filtered["ConvictionBounded"].clip(lower=0),
-        fill="tozeroy", fillcolor="rgba(251,113,133,0.06)",
+        fill="tozeroy", fillcolor=rgba("rose", 0.06),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig_conv.add_trace(go.Scatter(
         x=x_axis, y=ts_filtered["ConvictionBounded"].clip(upper=0),
-        fill="tozeroy", fillcolor="rgba(52,211,153,0.06)",
+        fill="tozeroy", fillcolor=rgba("emerald", 0.06),
         line=dict(width=0), showlegend=False, hoverinfo="skip",
     ))
     fig_conv.add_trace(go.Scatter(
@@ -212,32 +211,30 @@ def _render_ddm_conviction_chart(ts_filtered, x_axis, signal, is_forward=False):
 
     # Interpretation card
     cv = signal["conviction_score"]
-    cu, cl = signal["conviction_upper"], signal["conviction_lower"]
-    bw = cu - cl
 
     if is_forward:
-        if cv > UI_CONVICTION_STRONG:
+        if cv > CONVICTION_STRONG:
             regime_title = "STRONG OVERBOUGHT"
             regime_color = "danger"
             regime_body = (
                 f"Conviction {cv:+.0f} — top decile. Most lookback windows agree on a strongly "
                 f"negative expected forward return (bearish forecast). "
             )
-        elif cv > UI_CONVICTION_MODERATE:
+        elif cv > CONVICTION_MODERATE:
             regime_title = "MODERATE OVERBOUGHT"
             regime_color = "warning"
             regime_body = (
                 f"Conviction {cv:+.0f} — tilts bearish. Not at extremes, but the ensemble leans "
                 f"toward a negative expected forward return. "
             )
-        elif cv > -UI_CONVICTION_MODERATE:
+        elif cv > -CONVICTION_MODERATE:
             regime_title = "NEUTRAL"
             regime_color = "neutral"
             regime_body = (
                 f"Conviction {cv:+.0f} — noise band. Windows are split — no reliable directional forecast. "
                 f"Stand aside or maintain current allocation. "
             )
-        elif cv > -UI_CONVICTION_STRONG:
+        elif cv > -CONVICTION_STRONG:
             regime_title = "MODERATE OVERSOLD"
             regime_color = "success"
             regime_body = (
@@ -251,28 +248,28 @@ def _render_ddm_conviction_chart(ts_filtered, x_axis, signal, is_forward=False):
                 f"Conviction {cv:+.0f} — bottom decile. Most lookback windows agree on a strongly "
                 f"positive expected forward return (bullish forecast). "
             )
-    elif cv > UI_CONVICTION_STRONG:
+    elif cv > CONVICTION_STRONG:
         regime_title = "STRONG OVERBOUGHT"
         regime_color = "danger"
         regime_body = (
             f"Conviction {cv:+.0f} — top decile. Most windows price the market above fair value. "
             f"Elevated drawdown risk from this zone. "
         )
-    elif cv > UI_CONVICTION_MODERATE:
+    elif cv > CONVICTION_MODERATE:
         regime_title = "MODERATE OVERBOUGHT"
         regime_color = "warning"
         regime_body = (
             f"Conviction {cv:+.0f} — tilts overbought. Not at extremes, but evidence suggests "
             f"fair value sits below current price. "
         )
-    elif cv > -UI_CONVICTION_MODERATE:
+    elif cv > -CONVICTION_MODERATE:
         regime_title = "NEUTRAL"
         regime_color = "neutral"
         regime_body = (
             f"Conviction {cv:+.0f} — noise band. Windows are split — no reliable directional signal. "
             f"Stand aside or maintain current allocation. "
         )
-    elif cv > -UI_CONVICTION_STRONG:
+    elif cv > -CONVICTION_STRONG:
         regime_title = "MODERATE OVERSOLD"
         regime_color = "success"
         regime_body = (
@@ -287,13 +284,12 @@ def _render_ddm_conviction_chart(ts_filtered, x_axis, signal, is_forward=False):
             f"Historically the most favorable return regime. "
         )
 
-    if bw < UI_BAND_NARROW:
-        regime_body += f"Band narrow ({bw:.0f} pts) — model is confident."
-    elif bw > UI_BAND_WIDE:
-        regime_body += f"Band wide ({bw:.0f} pts) — models disagree, treat with caution."
-    else:
-        regime_body += f"Band moderate ({bw:.0f} pts) — some uncertainty."
-
+    # (The CI band-width tier sentence was REMOVED 2026-07-12: the DDM's
+    # mean-reverting variance pins band width to a ~2-point range (p1–p99 =
+    # 40.2–42.5, research/ui_anchors_study.py), so the NARROW/WIDE tiers could
+    # never fire and the sentence permanently read "Band moderate — some
+    # uncertainty" — a dead indicator, not information. The band itself is
+    # still drawn on the conviction chart, where its shape is visible.)
     render_interpretation_card(title=regime_title, body=regime_body, color=regime_color)
 
 
@@ -302,15 +298,15 @@ def _render_market_breadth_chart(ts_filtered, x_axis):
     fig_zones = go.Figure()
     fig_zones.add_trace(go.Scatter(
         x=x_axis, y=ts_filtered["OversoldBreadth"],
-        fill="tozeroy", fillcolor="rgba(52,211,153,0.1)",
+        fill="tozeroy", fillcolor=rgba("emerald", 0.1),
         line=dict(color=EMERALD, width=1.5), name="Oversold",
     ))
     fig_zones.add_trace(go.Scatter(
         x=x_axis, y=ts_filtered["OverboughtBreadth"],
-        fill="tozeroy", fillcolor="rgba(251,113,133,0.1)",
+        fill="tozeroy", fillcolor=rgba("rose", 0.1),
         line=dict(color=ROSE, width=1.5), name="Overbought",
     ))
-    fig_zones.add_hline(y=UI_BREADTH_HIGH, line_dash="dot", line_color="rgba(212,168,83,0.18)", line_width=0.5)
+    fig_zones.add_hline(y=UI_BREADTH_HIGH, line_dash="dot", line_color=rgba("amber", 0.18), line_width=0.5)
 
     fig_zones.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM))
     style_axes(fig_zones, y_title="Breadth %", y_range=[0, 100])
@@ -502,7 +498,8 @@ def _render_model_quality_cards(model_stats, signal, is_forward=False):
         sp = signal["model_spread"] * 10000  # Convert log return spread to basis points
         render_metric_card(
             "Model Spread", f"{sp:.1f} bps",
-                "Disagreement among ensemble models. Above 50 bps = models conflict — distrust signal.",
+                f"Disagreement among ensemble models. Above {UI_MODEL_SPREAD_HIGH:.0f} bps "
+                f"(p90 of history) = models conflict — distrust signal.",
             "success" if sp < UI_MODEL_SPREAD_LOW else "warning" if sp < UI_MODEL_SPREAD_HIGH else "danger",
             tooltip=TOOLTIPS["model_spread"],
         )
@@ -562,7 +559,7 @@ def _render_fair_value_chart(engine, ts_filtered, x_axis, ts, active_target):
             _p_dn = _p_last * np.exp(_r_path - _band)
             _bull = _R >= 0
             _proj_color = EMERALD if _bull else ROSE
-            _cone = "rgba(52,211,153,0.10)" if _bull else "rgba(251,113,133,0.10)"
+            _cone = rgba("emerald", 0.10) if _bull else rgba("rose", 0.10)
             fig.add_trace(go.Scatter(x=_proj_dates, y=_p_up, mode="lines", line=dict(width=0),
                                      showlegend=False, hoverinfo="skip"), row=1, col=1)
             fig.add_trace(go.Scatter(x=_proj_dates, y=_p_dn, mode="lines", line=dict(width=0),
@@ -574,7 +571,10 @@ def _render_fair_value_chart(engine, ts_filtered, x_axis, ts, active_target):
             fig.add_trace(go.Scatter(x=[_proj_dates[-1]], y=[float(_p_path[-1])], mode="markers",
                                      marker=dict(color=_proj_color, size=7, line=dict(color="#0A0E17", width=1)),
                                      showlegend=False,
-                                     hovertemplate=f"Implied target +{_h}d: %{{y:.2f}} ({_R * 100:+.1f}%)<extra></extra>"),
+                                     # customdata (not %{y:.2f}) so the price clips to 2 decimals
+                                     # even under x-unified — see ui.theme.apply_default_hover.
+                                     customdata=[[f"{float(_p_path[-1]):.2f}"]],
+                                     hovertemplate=f"Implied target +{_h}d: %{{customdata[0]}} ({_R * 100:+.1f}%)<extra></extra>"),
                           row=1, col=1)
 
     # ── Bottom panel ──
@@ -583,7 +583,7 @@ def _render_fair_value_chart(engine, ts_filtered, x_axis, ts, active_target):
         # bullish (green above zero), negative = bearish (red below zero).
         series = ts_filtered["FairValue"]
         bottom_name, bottom_title = "Expected Forward Return", "E[fwd return]"
-        pos_fill, neg_fill = "rgba(52,211,153,0.12)", "rgba(251,113,133,0.12)"
+        pos_fill, neg_fill = rgba("emerald", 0.12), rgba("rose", 0.12)
     else:
         # RELATIVE-VALUE: idiosyncratic spread. Already cumulative in
         # cumulative_residual mode; else accumulate the per-period residual.
@@ -591,7 +591,7 @@ def _render_fair_value_chart(engine, ts_filtered, x_axis, ts, active_target):
         series = resid if cumulative else resid.cumsum()
         bottom_name, bottom_title = "Idiosyncratic Spread", "Idiosyncratic Spread"
         # Stretched-low spread = underperformed macro = bullish (green below 0).
-        pos_fill, neg_fill = "rgba(251,113,133,0.12)", "rgba(52,211,153,0.12)"
+        pos_fill, neg_fill = rgba("rose", 0.12), rgba("emerald", 0.12)
 
     fig.add_trace(go.Scatter(
         x=x_axis, y=series.clip(lower=0), fill="tozeroy",
@@ -620,7 +620,7 @@ def _render_fair_value_chart(engine, ts_filtered, x_axis, ts, active_target):
         ), row=2, col=1)
         if len(engine.ou_projection_upper) > 0:
             fig.add_trace(go.Scatter(x=proj_dates, y=engine.ou_projection_upper, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"), row=2, col=1)
-            fig.add_trace(go.Scatter(x=proj_dates, y=engine.ou_projection_lower, mode="lines", line=dict(width=0), fill="tonexty", fillcolor="rgba(148,163,184,0.08)", showlegend=False, hoverinfo="skip"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=proj_dates, y=engine.ou_projection_lower, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=rgba("slate", 0.08), showlegend=False, hoverinfo="skip"), row=2, col=1)
 
     fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_XLARGE))
     style_axes(fig, y_title=f"{active_target} Price", row=1, col=1)
@@ -649,11 +649,11 @@ def _render_signal_frequency_chart(ts_filtered, x_axis):
 def _render_avg_zscore_chart(ts_filtered, x_axis):
     """Section: Average Z-Score — statistical extremes across windows."""
     fig_z = go.Figure()
-    bar_colors = [EMERALD if z < -1 else ROSE if z > 1 else "rgba(148,163,184,0.75)" for z in ts_filtered["AvgZ"]]
+    bar_colors = [EMERALD if z < -1 else ROSE if z > 1 else rgba("slate", 0.75) for z in ts_filtered["AvgZ"]]
     fig_z.add_trace(go.Bar(x=x_axis, y=ts_filtered["AvgZ"], marker_color=bar_colors, opacity=0.85, showlegend=False))
     fig_z.add_hline(y=0, line_color="rgba(255,255,255,0.06)", line_width=0.5)
-    fig_z.add_hline(y=2, line_dash="dot", line_color="rgba(251,113,133,0.18)", line_width=0.5)
-    fig_z.add_hline(y=-2, line_dash="dot", line_color="rgba(52,211,153,0.18)", line_width=0.5)
+    fig_z.add_hline(y=2, line_dash="dot", line_color=rgba("rose", 0.18), line_width=0.5)
+    fig_z.add_hline(y=-2, line_dash="dot", line_color=rgba("emerald", 0.18), line_width=0.5)
 
     fig_z.update_layout(**chart_layout(height=UI_CHART_HEIGHT_SMALL, show_legend=False))
     style_axes(fig_z, y_title="Z-Score")

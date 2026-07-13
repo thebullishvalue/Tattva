@@ -16,7 +16,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from analytics.analogs import find_similar_periods, summarize_forward
+from analytics.analogs import find_similar_periods, summarize_forward, analog_prediction_series
 from core.config import (
     PRECEDENT_HONORARY_HORIZON,
     COLOR_GREEN, COLOR_RED, COLOR_GOLD, COLOR_CYAN, COLOR_MUTED,
@@ -128,8 +128,21 @@ def render_precedent_tab(
     hold_horizons: tuple[int, ...],
     mom_window: int,
     fwd_horizon: int,
+    precomputed_periods: list[dict] | None = None,
 ) -> None:
-    """Render the Precedent view — analog cards + base-rate summary + backtest."""
+    """Render the Precedent view — analog cards + base-rate summary + backtest.
+
+    ``precomputed_periods``: an already-computed analog list (from
+    ``analytics.analogs.find_similar_periods``, called with the SAME
+    ``display_hold`` this function would derive below) that the caller may
+    pass in to skip recomputation. app.py computes this once for the hero
+    card's precedent read and passes it here too — the tab used to call
+    ``find_similar_periods`` a second time for the identical
+    (ts, target, mom_window), redoing the expensive feature-frame build
+    (incl. rolling Hurst) and Mahalanobis distance/Theiler selection work
+    (audit finding F18). ``None`` (e.g. a cache-key mismatch) falls back to
+    computing it here exactly as before.
+    """
 
     # Display horizons = the lens hold grid + an honorary +1d reference tile (the
     # analog has no edge at 1d; shown with a caveat, NOT part of calibration).
@@ -150,7 +163,7 @@ def render_precedent_tab(
         st.warning("No engine time-series available — run an analysis first.")
         return
 
-    periods = find_similar_periods(
+    periods = precomputed_periods if precomputed_periods is not None else find_similar_periods(
         ts, active_target, hold_horizons=display_hold, mom_window=mom_window,
     )
     if not periods:
@@ -187,6 +200,83 @@ def render_precedent_tab(
     )
 
     section_gap()
+
+    # ── Analog prediction history: predicted vs realized over time ──────────
+    # What the matcher would have predicted at each PAST as-of date, using
+    # only information available then (candidate outcomes completed by the
+    # as-of date, warm-up excluded, pool-only median cleaning — see
+    # analytics.analogs.analog_prediction_series). Strided every
+    # `fwd_horizon` rows so consecutive points are non-overlapping (the
+    # honest sampling for smooth multi-day returns). Cached per config —
+    # Streamlit renders every tab each rerun, and this is an O(n·grid)
+    # computation worth doing once.
+    _apk = (f"analog_pred::{active_target}|{fwd_horizon}|{mom_window}|{len(ts)}|"
+            f"{float(pd.to_numeric(ts['Price'], errors='coerce').iloc[-1]):.6g}")
+    _apc = st.session_state.get("_analog_pred_cache")
+    if _apc is None or _apc.get("key") != _apk:
+        try:
+            _pred_df = analog_prediction_series(
+                ts, active_target, fwd_horizon, mom_window=mom_window,
+            )
+        except Exception:
+            _pred_df = pd.DataFrame(columns=["Date", "Predicted", "Realized"])
+        _apc = {"key": _apk, "df": _pred_df}
+        st.session_state["_analog_pred_cache"] = _apc
+    _pred_df = _apc["df"]
+
+    if len(_pred_df) >= 5:
+        render_section_header(
+            title=f"Analog Predictions Over Time · +{fwd_horizon}d",
+            description=(f"What the matcher predicted at each past as-of date (using only "
+                         f"data available then) vs what {active_target} actually did — "
+                         f"non-overlapping every {fwd_horizon} sessions"),
+            icon="activity",
+            accent="cyan",
+        )
+        _pd_pred = _pred_df["Predicted"].to_numpy(dtype=float)
+        _pd_real = _pred_df["Realized"].to_numpy(dtype=float)
+        _pd_dates = _pred_df["Date"]
+        # Hit coloring: prediction direction vs realized direction; amber =
+        # window not yet complete (the live predictions at the right edge).
+        _mk_colors = []
+        for p, r in zip(_pd_pred, _pd_real):
+            if not np.isfinite(r):
+                _mk_colors.append(COLOR_GOLD)
+            elif (p > 0) == (r > 0):
+                _mk_colors.append(COLOR_GREEN)
+            else:
+                _mk_colors.append(COLOR_RED)
+
+        _fig_ap = go.Figure()
+        _fig_ap.add_trace(go.Scatter(
+            x=_pd_dates, y=_pd_real, mode="lines", name="Realized",
+            line=dict(color=COLOR_MUTED, width=1.3),
+            connectgaps=False,
+        ))
+        _fig_ap.add_trace(go.Scatter(
+            x=_pd_dates, y=_pd_pred, mode="lines+markers", name="Analog prediction",
+            line=dict(color=COLOR_CYAN, width=1.6),
+            marker=dict(size=6, color=_mk_colors,
+                        line=dict(color="rgba(10,14,23,0.8)", width=1)),
+        ))
+        _fig_ap.add_hline(y=0, line_color="rgba(148,163,184,0.25)", line_width=0.8,
+                          line_dash="dot")
+        _layout_ap = chart_layout(height=340, show_legend=True)
+        _fig_ap.update_layout(**_layout_ap)
+        style_axes(_fig_ap, y_title=f"+{fwd_horizon}d return (%)")
+        st.plotly_chart(_fig_ap, width='stretch', key="analog_pred_history")
+
+        _done = np.isfinite(_pd_real)
+        _cap = (f"{len(_pred_df)} as-of dates · marker green = predicted direction was "
+                f"right, red = wrong, gold = window still open (live prediction).")
+        if _done.sum() >= 10:
+            from scipy.stats import spearmanr as _sp
+            _ic, _pv = _sp(_pd_pred[_done], _pd_real[_done])
+            _hit = float(np.mean(np.sign(_pd_pred[_done]) == np.sign(_pd_real[_done]))) * 100
+            _cap += (f" Completed windows: IC {_ic:+.2f} (p={_pv:.3f}), directional hit "
+                     f"{_hit:.0f}% over {int(_done.sum())} non-overlapping windows.")
+        st.caption(_cap)
+        section_gap()
 
     # ── Analog period cards (2-column grid) ─────────────────────────────────
     render_section_header(
@@ -301,7 +391,7 @@ def render_precedent_tab(
     fig.update_layout(**layout)
     style_axes(fig, y_title=f"{active_target} Return T+{horizon}d (%)", x_title="Extension Z at T")
 
-    st.plotly_chart(fig, use_container_width=True,
+    st.plotly_chart(fig, width='stretch',
                     config={"displayModeBar": False, "displaylogo": False})
 
     # Gate the verdict on the test-split Spearman p-value, not a bare |rho|

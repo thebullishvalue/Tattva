@@ -16,7 +16,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from analytics.analogs import find_similar_periods, summarize_forward, analog_prediction_series
+from analytics.analogs import (
+    find_similar_periods, summarize_forward, analog_prediction_series,
+    analog_skill_by_horizon,
+)
 from core.config import (
     PRECEDENT_HONORARY_HORIZON,
     COLOR_GREEN, COLOR_RED, COLOR_GOLD, COLOR_CYAN, COLOR_MUTED,
@@ -201,28 +204,103 @@ def render_precedent_tab(
 
     section_gap()
 
-    # ── Analog prediction history: predicted vs realized over time ──────────
-    # What the matcher would have predicted at each PAST as-of date, using
-    # only information available then (candidate outcomes completed by the
-    # as-of date, warm-up excluded, pool-only median cleaning — see
-    # analytics.analogs.analog_prediction_series). Strided every
-    # `fwd_horizon` rows so consecutive points are non-overlapping (the
-    # honest sampling for smooth multi-day returns). Cached per config —
-    # Streamlit renders every tab each rerun, and this is an O(n·grid)
-    # computation worth doing once.
-    _apk = (f"analog_pred::{active_target}|{fwd_horizon}|{mom_window}|{len(ts)}|"
-            f"{float(pd.to_numeric(ts['Price'], errors='coerce').iloc[-1]):.6g}")
-    _apc = st.session_state.get("_analog_pred_cache")
-    if _apc is None or _apc.get("key") != _apk:
+    # ── Analog SKILL — term structure across ALL lens horizons ──────────────
+    # The base-rate cards above are a *snapshot* (today's analog pool). This
+    # asks the harder, walk-forward question at EVERY horizon at once: across
+    # history, how well did the analog matcher's prediction track what actually
+    # happened +Hd later? Reading the whole term structure (not just the lens
+    # horizon) shows WHERE the analog has edge — often it is stronger at one
+    # horizon and absent at another. Cached per config (O(n·grid·|H|)).
+    _askk = (f"analog_skill::{active_target}|{'/'.join(map(str, hold_horizons))}|"
+             f"{mom_window}|{len(ts)}|"
+             f"{float(pd.to_numeric(ts['Price'], errors='coerce').iloc[-1]):.6g}")
+    _askc = st.session_state.get("_analog_skill_cache")
+    if _askc is None or _askc.get("key") != _askk:
         try:
-            _pred_df = analog_prediction_series(
-                ts, active_target, fwd_horizon, mom_window=mom_window,
+            _skill = analog_skill_by_horizon(
+                ts, active_target, tuple(hold_horizons), mom_window=mom_window,
             )
         except Exception:
-            _pred_df = pd.DataFrame(columns=["Date", "Predicted", "Realized"])
-        _apc = {"key": _apk, "df": _pred_df}
-        st.session_state["_analog_pred_cache"] = _apc
-    _pred_df = _apc["df"]
+            _skill = {}
+        _askc = {"key": _askk, "skill": _skill}
+        st.session_state["_analog_skill_cache"] = _askc
+    _skill = _askc["skill"]
+
+    _scored = {h: s for h, s in _skill.items() if np.isfinite(s.get("ic", np.nan))}
+    if _scored:
+        render_section_header(
+            title="Analog Skill — Term Structure",
+            description=("Walk-forward IC (predicted vs realized) at each lens horizon — "
+                         "the analog matcher's forward skill is NOT one number; it varies "
+                         "by holding period. Bars = rank IC; hover for hit-rate and n."),
+            icon="bar-chart",
+            accent="cyan",
+        )
+        _hs_sorted = sorted(_scored.keys())
+        _ic_vals = [_scored[h]["ic"] for h in _hs_sorted]
+        _bar_colors = [COLOR_GREEN if v > 0 else COLOR_RED for v in _ic_vals]
+        _cust = [[_scored[h]["hit"], _scored[h]["n"], _scored[h]["pval"]] for h in _hs_sorted]
+        _fig_ts = go.Figure()
+        _fig_ts.add_trace(go.Bar(
+            x=[f"+{h}d" for h in _hs_sorted], y=_ic_vals,
+            marker=dict(color=_bar_colors, opacity=0.85),
+            customdata=_cust,
+            hovertemplate=("Horizon %{x}<br>IC %{y:+.2f}<br>Hit-rate %{customdata[0]:.0f}%"
+                           "<br>n=%{customdata[1]} · p=%{customdata[2]:.3f}<extra></extra>"),
+        ))
+        _fig_ts.add_hline(y=0, line_color="rgba(148,163,184,0.35)", line_width=1)
+        _layout_ts = chart_layout(height=300, show_legend=False)
+        _fig_ts.update_layout(**_layout_ts)
+        style_axes(_fig_ts, y_title="Walk-forward IC (Spearman)", x_title="Holding horizon")
+        st.plotly_chart(_fig_ts, width='stretch', key="analog_skill_term_structure")
+
+        # Plain-language read: best horizon + whether the lens horizon is where
+        # the edge actually lives.
+        _best_h = max(_scored, key=lambda h: _scored[h]["ic"])
+        _best = _scored[_best_h]
+        _lens_note = ""
+        if fwd_horizon in _scored and _best_h != fwd_horizon:
+            _lens_note = (f" The active lens ({fwd_horizon}d, IC "
+                          f"{_scored[fwd_horizon]['ic']:+.2f}) is NOT the strongest — "
+                          f"the analog edge concentrates at {_best_h}d.")
+        elif fwd_horizon in _scored:
+            _lens_note = f" The active lens ({fwd_horizon}d) is also the strongest horizon."
+        st.caption(
+            f"Strongest at +{_best_h}d: IC {_best['ic']:+.2f} (p={_best['pval']:.3f}), "
+            f"hit-rate {_best['hit']:.0f}% over {_best['n']} non-overlapping windows.{_lens_note} "
+            "Positive IC = the matcher's directional call held out of sample."
+        )
+        section_gap()
+
+    # ── Analog prediction history: predicted vs realized over time ──────────
+    # The term structure above is the SUMMARY; this is the DETAIL for the active
+    # lens horizon — what the matcher would have predicted at each PAST as-of
+    # date, using only information available then (candidate outcomes completed
+    # by the as-of date, warm-up excluded, pool-only median cleaning — see
+    # analytics.analogs.analog_prediction_series). Strided every `fwd_horizon`
+    # rows so consecutive points are non-overlapping (the honest sampling for
+    # smooth multi-day returns). Cached per config — Streamlit renders every tab
+    # each rerun, and this is an O(n·grid) computation worth doing once.
+    # Reuse the walk-forward the term structure already ran for this horizon
+    # (identical parameters) instead of recomputing it; only fall back to a
+    # standalone compute if the lens horizon wasn't in the skill grid.
+    _pred_df = None
+    if fwd_horizon in _skill:
+        _pred_df = _skill[fwd_horizon].get("df")
+    if _pred_df is None:
+        _apk = (f"analog_pred::{active_target}|{fwd_horizon}|{mom_window}|{len(ts)}|"
+                f"{float(pd.to_numeric(ts['Price'], errors='coerce').iloc[-1]):.6g}")
+        _apc = st.session_state.get("_analog_pred_cache")
+        if _apc is None or _apc.get("key") != _apk:
+            try:
+                _pred_df = analog_prediction_series(
+                    ts, active_target, fwd_horizon, mom_window=mom_window,
+                )
+            except Exception:
+                _pred_df = pd.DataFrame(columns=["Date", "Predicted", "Realized"])
+            _apc = {"key": _apk, "df": _pred_df}
+            st.session_state["_analog_pred_cache"] = _apc
+        _pred_df = _apc["df"]
 
     if len(_pred_df) >= 5:
         render_section_header(

@@ -505,3 +505,54 @@ def analog_prediction_series(
         })
 
     return pd.DataFrame(rows, columns=["Date", "Predicted", "Realized"])
+
+
+def analog_skill_by_horizon(
+    ts: pd.DataFrame,
+    target_col: str,
+    hold_horizons: tuple[int, ...],
+    *,
+    mom_window: int = 20,
+    top_n: int = 10,
+    min_windows: int = 10,
+) -> dict[int, dict]:
+    """Walk-forward analog SKILL at every hold horizon — the term structure the
+    Precedent tab plots so the read isn't pinned to a single lens horizon.
+
+    For each ``H`` in ``hold_horizons`` runs :func:`analog_prediction_series`
+    (the same causal, non-overlapping, pool-only-cleaned walk-forward the
+    single-horizon plot uses) and scores its COMPLETED windows:
+
+      ``ic``   — Spearman rank IC of analog-predicted vs realized +H returns,
+      ``hit``  — directional hit-rate (% of windows where sign matched), in [0,100],
+      ``n``    — number of completed (realized) non-overlapping windows,
+      ``pval`` — two-sided Spearman p-value (``nan`` when ``n < min_windows``),
+      ``df``   — the full predicted/realized frame (for the detail timeseries).
+
+    ``ic``/``hit``/``pval`` are ``nan`` until at least ``min_windows`` completed
+    windows exist, so a horizon with too little realized history reads as "no
+    estimate" rather than a noise number. Keyed by horizon; horizons that yield
+    an empty walk-forward are omitted.
+    """
+    from scipy.stats import spearmanr as _spearmanr
+
+    out: dict[int, dict] = {}
+    for h in hold_horizons:
+        H = int(h)
+        df = analog_prediction_series(
+            ts, target_col, H, mom_window=mom_window, top_n=top_n,
+        )
+        if df.empty:
+            continue
+        pred = df["Predicted"].to_numpy(dtype=np.float64)
+        real = df["Realized"].to_numpy(dtype=np.float64)
+        done = np.isfinite(real) & np.isfinite(pred)
+        n_done = int(done.sum())
+        ic = hit = pval = float("nan")
+        if n_done >= int(min_windows):
+            _ic, _pv = _spearmanr(pred[done], real[done])
+            ic = float(_ic) if np.isfinite(_ic) else float("nan")
+            pval = float(_pv) if np.isfinite(_pv) else float("nan")
+            hit = float(np.mean(np.sign(pred[done]) == np.sign(real[done])) * 100.0)
+        out[H] = {"ic": ic, "hit": hit, "n": n_done, "pval": pval, "df": df}
+    return out

@@ -37,7 +37,6 @@ os.environ.setdefault(
 )
 
 import json
-import logging
 import sys
 import time
 import warnings
@@ -84,7 +83,6 @@ from ui.components import (
     build_hero_verdict,
     render_hero_card,
     render_warning_box,
-    render_metric_card,
     render_control_hint,
     section_gap,
 )
@@ -95,9 +93,10 @@ from ui.tabs.tab_data import render_data_tab
 from ui.tabs.tab_precedent import render_precedent_tab
 
 # ── Data ─────────────────────────────────────────────────────────────────────
-from data.fetcher import fetch_constituent_ohlcv, fetch_macro_live, fetch_commodity_dataset
-from data.constituents import get_commodity_basket
+from data.fetcher import fetch_constituent_ohlcv, fetch_macro_live, fetch_commodity_dataset, fetch_stock_target_series
+from data.constituents import get_commodity_basket, get_nirnay_mode
 from data.calendars import trading_days_behind, is_session, session_mask, resolve_exchange
+from data.universe import resolve_stock_symbol
 
 # ── Engines ──────────────────────────────────────────────────────────────────
 from engines.aarambh import FairValueEngine
@@ -110,7 +109,8 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, COLOR_RED, COMMODITY_TARGETS, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, SIGNAL_HORIZONS, DEFAULT_SIGNAL_HORIZON, NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY, NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS, NIRNAY_OVERSOLD, NIRNAY_OVERBOUGHT, UI_AGREEMENT_STRONG, UI_AGREEMENT_MODERATE, INTEL_N_TRIALS, RAW_YIELD_PREDICTORS, DIV_LOOKBACK, TIMEFRAME_TRADING_DAYS, PRECEDENT_HONORARY_HORIZON
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, TARGET_EXCLUDED_PREDICTORS, TARGET_POLARITY, ALL_TARGETS, TARGET_CATEGORIES, TARGET_ARCHETYPE, FORECAST_HORIZON, UI_AGREEMENT_STRONG, UI_AGREEMENT_MODERATE, INTEL_N_TRIALS, RAW_YIELD_PREDICTORS, DIV_LOOKBACK, TIMEFRAME_TRADING_DAYS, swayam_macro_columns, FREEFORM_STOCK_CATEGORIES, register_stock_target, get_instrument_config
+from engines.nirnay_self import build_swayam_frames, effective_member_count, default_swayam_members
 from core.config import GLOBAL_MACRO_MAP, MACRO_SYMBOLS_YF, INDEX_TARGETS_MAP
 
 # Friendly column name → ticker, for resolving each predictor/target column to its
@@ -145,7 +145,7 @@ _BUNDLE_KEYS = (
     # "basket source: snapshot" hint for a target resolved live, or the
     # Convergence tab's "breadth carried forward" notice firing/missing
     # based on the WRONG target's basket-freshness timestamp).
-    "nirnay_basket_source", "nirnay_native_last",
+    "nirnay_basket_source", "nirnay_native_last", "nirnay_mode", "nirnay_swayam_n_eff",
 )
 # Keep the last N configs. The comment here previously said "the 3
 # commodities" — stale since the universe grew to 30+ targets (commodities,
@@ -188,6 +188,37 @@ def _bundle_nirnay_constituent_dfs(dfs: dict) -> dict:
         cols = [c for c in _NIRNAY_DRILLDOWN_COLS if c in df.columns]
         trimmed[sym] = df[cols] if cols else df.iloc[:, :0]
     return trimmed
+
+
+def _ensure_stock_target_column(df: pd.DataFrame, active_target: str) -> pd.DataFrame:
+    """Inject a self-archetype target's Close into the model matrix.
+
+    Individual-stock targets (TARGET_ARCHETYPE == 'self') are deliberately
+    NOT part of the macro batch universe fetch_commodity_dataset pulls (cache
+    coherence — see fetch_stock_target_series's docstring); their price
+    column is injected per-target here, the same pattern
+    data.fetcher._fetch_exogenous_targets uses for sheet targets: aligned to
+    the matrix's DATE spine, ffilled, leading NaNs left for the per-target
+    dropna downstream. No-op when the column already exists or the target
+    isn't a stock. Mutates st.session_state['data'] too, so a target switch
+    or a cached rerun sees the column without re-fetching.
+    """
+    if active_target in df.columns or TARGET_ARCHETYPE.get(active_target) != "self":
+        return df
+    ticker = ALL_TARGETS.get(active_target)
+    if not ticker:
+        return df
+    end = pd.Timestamp.today()
+    s = fetch_stock_target_series(ticker, end - pd.Timedelta(days=365 * 9), end)
+    if s is None:
+        return df                      # the guard right after this call fires cleanly
+    spine = pd.to_datetime(df["DATE"], errors="coerce").dt.normalize()
+    s.index = pd.DatetimeIndex(s.index).normalize()
+    s = s[~s.index.duplicated(keep="last")]
+    df = df.copy()
+    df[active_target] = s.reindex(spine).ffill().to_numpy()
+    st.session_state["data"] = df
+    return df
 
 
 # ─── UI Rendering helpers ────────────────────────────────────────────────────
@@ -299,11 +330,11 @@ def _render_primary_signal(nishkarsh_norm, agreement, aarambh_signal) -> None:
         hero_smoothed = None
         calib_score, calib_signal = None, None
 
-    # Forecast horizon of the active Signal Horizon lens - for interpretation copy.
-    FWD_HORIZON = SIGNAL_HORIZONS.get(
-        st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
-        SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
-    )["horizon"]
+    # Active instrument's forecast horizon - for interpretation copy only.
+    try:
+        FWD_HORIZON = get_instrument_config(st.session_state.get("active_target", "")).forecast_horizon
+    except KeyError:
+        FWD_HORIZON = FORECAST_HORIZON
 
     val_ic = None
     if profile and profile.get("val_ic") is not None:
@@ -556,11 +587,21 @@ def _render_footer() -> None:
 
 def main():
     st.set_page_config(
-        page_title=f"TATTVA | Unified Convergence",
+        page_title="TATTVA | Unified Convergence",
         page_icon="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0Q0QTg1MyIgc3Ryb2tlLXdpZHRoPSIyIi8+PHBhdGggZD0iTTggMTRsMy01IDIgMyAzLTQiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0Q0QTg1MyIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4=",
         layout="wide", initial_sidebar_state="collapsed",
     )
     inject_css()
+
+    # Replay dynamic stock-target registration on every rerun. register_stock_target
+    # mutates module-level core.config dicts (ALL_TARGETS etc.) which survive
+    # Streamlit reruns WITHIN a process but are never persisted — only
+    # st.session_state survives a rerun as the durable record, so a freeform
+    # symbol resolved earlier this session (e.g. "RELIANCE (NSE)") must be
+    # re-registered before anything below resolves active_target against
+    # ALL_TARGETS/TARGET_ARCHETYPE. Idempotent — safe every rerun.
+    for _dname, _dmeta in st.session_state.get("dynamic_stock_targets", {}).items():
+        register_stock_target(_dname, _dmeta["ticker"], _dmeta["market"])
 
     # Single main-area progress slot, created up front (outside the sidebar) so the
     # SAME themed progress bar drives everything from the moment "Run Analysis" is
@@ -591,10 +632,23 @@ def main():
             prev_commodity = all_names[0]
 
         _categories = list(TARGET_CATEGORIES.keys())
-        prev_cat = next(
-            (c for c, names in TARGET_CATEGORIES.items() if prev_commodity in names),
-            _categories[0],
-        )
+        # Freeform categories (India/US Stocks) stay EMPTY in TARGET_CATEGORIES
+        # (a dynamic name renders a text input, not a list entry — see
+        # core.config.register_stock_target), so plain membership can never
+        # find a previously-resolved stock target there. Check
+        # dynamic_stock_targets first so re-selecting a stock category across
+        # reruns doesn't silently snap back to the first category.
+        _dyn_meta = st.session_state.get("dynamic_stock_targets", {}).get(prev_commodity)
+        if _dyn_meta is not None:
+            prev_cat = next(
+                (cat for cat, mkt in FREEFORM_STOCK_CATEGORIES.items() if mkt == _dyn_meta["market"]),
+                _categories[0],
+            )
+        else:
+            prev_cat = next(
+                (c for c, names in TARGET_CATEGORIES.items() if prev_commodity in names),
+                _categories[0],
+            )
         # Seed widget state BEFORE instantiation so the (options-changing) target
         # selectbox never holds a value outside its current category — the classic
         # Streamlit "key + dynamic options" pitfall. We drive both via session_state
@@ -609,55 +663,83 @@ def main():
             label_visibility="collapsed", key="target_category",
             help="Choose an asset class, then a target within it.",
         )
-        cat_targets = TARGET_CATEGORIES.get(sel_cat, all_names)
 
-        # Keep the target selection valid for the chosen category.
-        if st.session_state.get("target_select") not in cat_targets:
-            st.session_state["target_select"] = (
-                prev_commodity if prev_commodity in cat_targets else cat_targets[0]
+        if sel_cat in FREEFORM_STOCK_CATEGORIES:
+            # India Stocks / US Stocks: no constituent basket to browse — enter
+            # a symbol directly. The asset class supplies the suffix policy
+            # (data.universe.resolve_stock_symbol): India tries SYMBOL.NS
+            # first, then SYMBOL.BO; US uses the bare symbol.
+            _market = FREEFORM_STOCK_CATEGORIES[sel_cat]
+            st.markdown('<div class="sidebar-title" style="margin-top:0.5rem;">Symbol</div>', unsafe_allow_html=True)
+            _raw_symbol = st.text_input(
+                "Symbol", key=f"stock_symbol_{_market}",
+                label_visibility="collapsed",
+                placeholder="e.g. RELIANCE, TATASTEEL" if _market == "india" else "e.g. AAPL, BRK.B",
+                help="Nirnay runs in Swayam self-mode on this instrument's own OHLCV "
+                     "(no constituent basket exists for a single stock).",
             )
-        st.markdown('<div class="sidebar-title" style="margin-top:0.5rem;">Target</div>', unsafe_allow_html=True)
-        selected_commodity = st.selectbox(
-            "Target", cat_targets,
-            label_visibility="collapsed", key="target_select",
-            help="Aarambh forecasts this target's forward return; Nirnay reads "
-                 "cross-sectional breadth across its basket (producers / "
-                 "constituents / sector ETFs).",
-        )
-        # Show the basket archetype as a subtle hint.
-        _arch = TARGET_ARCHETYPE.get(selected_commodity, "")
-        if _arch:
-            _arch_label = {"producer": "producer cross-section",
-                           "hybrid": "agribusiness + futures", "proxy": "cross-asset proxy",
-                           "index": "index constituents"}.get(_arch, _arch)
-            render_control_hint(f"Nirnay basket · {_arch_label}")
+            selected_commodity = None
+            if _raw_symbol and _raw_symbol.strip():
+                with st.spinner("Resolving symbol…"):
+                    _ticker, _exch_or_err = resolve_stock_symbol(_raw_symbol, _market)
+                if _ticker is None:
+                    st.error(_exch_or_err)
+                else:
+                    _base = _ticker.rsplit(".", 1)[0] if _market == "india" else _raw_symbol.strip().upper()
+                    selected_commodity = f"{_base} ({_exch_or_err})"
+                    register_stock_target(selected_commodity, _ticker, _market)
+                    _dyn = st.session_state.setdefault("dynamic_stock_targets", {})
+                    _dyn[selected_commodity] = {"ticker": _ticker, "market": _market}
+                    render_control_hint(f"{_raw_symbol.strip().upper()} → {_ticker} · {_exch_or_err}")
+            else:
+                render_control_hint(
+                    "NSE (.NS) checked first, then BSE (.BO)" if _market == "india"
+                    else "US listing · symbol as typed"
+                )
+        else:
+            cat_targets = TARGET_CATEGORIES.get(sel_cat, all_names)
 
-        # ── Signal Horizon (forecast lens) ──────────────────────────────────
-        # Pick how far ahead the engine reads. Daily bars throughout — this only
-        # lengthens the forward-return forecast horizon (and matching predictor-
-        # momentum window), so the long lens is for POSITIONING (where to be
-        # long/short) and the short lens for tactical hedging / quick trades. Both
-        # are cached per-config, so switching back and forth is instant after the
-        # first compute and the two reads coexist.
-        _horizon_names = list(SIGNAL_HORIZONS.keys())
-        st.session_state.setdefault("signal_horizon", DEFAULT_SIGNAL_HORIZON)
-        if st.session_state["signal_horizon"] not in _horizon_names:
-            st.session_state["signal_horizon"] = DEFAULT_SIGNAL_HORIZON
-        st.markdown('<div class="sidebar-title" style="margin-top:0.5rem;">Signal Horizon</div>', unsafe_allow_html=True)
-        _sel_horizon = st.selectbox(
-            "Signal Horizon", _horizon_names,
-            label_visibility="collapsed", key="signal_horizon",
-            help="How far ahead Aarambh forecasts. Daily data throughout — the long "
-                 "lens reads positioning (buy/sell interest), the short lens reads "
-                 "tactical hedging / short-term trades. Switching re-runs the engine "
-                 "(cached per lens, so flipping back is instant).",
-        )
-        render_control_hint(SIGNAL_HORIZONS[_sel_horizon]["blurb"])
+            # Keep the target selection valid for the chosen category.
+            if st.session_state.get("target_select") not in cat_targets:
+                st.session_state["target_select"] = (
+                    prev_commodity if prev_commodity in cat_targets else cat_targets[0]
+                )
+            st.markdown('<div class="sidebar-title" style="margin-top:0.5rem;">Target</div>', unsafe_allow_html=True)
+            selected_commodity = st.selectbox(
+                "Target", cat_targets,
+                label_visibility="collapsed", key="target_select",
+                help="Aarambh forecasts this target's forward return; Nirnay reads "
+                     "bottom-up breadth — across its constituent basket (index members, "
+                     "producers, sector ETFs), or as a Swayam self-ensemble on the "
+                     "instrument's own price (commodities & stocks).",
+            )
+        # Show the Nirnay mode as a subtle hint. For a FREEFORM stock the
+        # resolution hint just above already states the ticker/exchange and the
+        # Symbol help text explains Swayam, so a 'self' line here would repeat —
+        # suppress it there only. For a dropdown 'self' target (the commodity
+        # futures) show a Swayam label; for basket targets show the archetype.
+        _arch = TARGET_ARCHETYPE.get(selected_commodity, "") if selected_commodity else ""
+        _is_freeform = sel_cat in FREEFORM_STOCK_CATEGORIES
+        if _arch and not (_arch == "self" and _is_freeform):
+            if _arch == "self":
+                render_control_hint("Nirnay · Swayam self-ensemble (own OHLCV)")
+            else:
+                _arch_label = {"producer": "producer cross-section",
+                               "hybrid": "agribusiness + futures", "proxy": "cross-asset proxy",
+                               "index": "index constituents"}.get(_arch, _arch)
+                render_control_hint(f"Nirnay basket · {_arch_label}")
 
         df = None
         has_data = "data" in st.session_state and "run_analysis" in st.session_state
 
-        if not has_data:
+        if selected_commodity is None:
+            # Freeform stock category with no symbol resolved yet (empty input
+            # or a resolution error already shown above) — nothing to run/switch
+            # to, so don't render either button.
+            render_control_hint("Enter a symbol above to continue.")
+            if has_data:
+                df = st.session_state["data"]
+        elif not has_data:
             # Initial load. The fetch pulls the entire macro universe once and
             # is target-agnostic — the chosen commodity only selects Aarambh's
             # target column and Nirnay's basket.
@@ -710,6 +792,14 @@ def main():
         _render_footer()
         return
 
+    # A stock target's price column is injected here — BEFORE numeric_cols/
+    # commodity_options are computed below — so target_col never falls back
+    # to some other target for a stock on its first render (Model
+    # Configuration's "Apply Configuration" button, further down, writes
+    # that fallback straight into st.session_state["active_target"] if it's
+    # ever wrong). Cheap no-op once the column already exists (cached fetch).
+    df = _ensure_stock_target_column(df, st.session_state.get("active_target", ""))
+
     # ─── Sidebar: Model Configuration ──────────────────────────────────────
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     all_cols = df.columns.tolist()
@@ -726,12 +816,10 @@ def main():
         target_col = st.session_state.get("active_target", commodity_options[0])
         if target_col not in numeric_cols:
             target_col = commodity_options[0]
-        active_target_state = target_col
 
         # Date column is always the dataset's DATE column — auto-detected.
         date_candidates = [c for c in all_cols if "date" in c.lower()]
         date_col = date_candidates[0] if date_candidates else "None"
-        active_date_state = date_col
 
         # Read-only target chip (set via the Target Commodity selector above).
         st.markdown(
@@ -830,7 +918,7 @@ def main():
                 for _k in ("engine", "engine_cache", "aarambh_engine", "aarambh_fit_key",
                            "wf_results", "results_cache", "nishkarsh_result",
                            "precedent_summary", "_prec_key", "_precedent_analogs_cache", "conv_norm_params",
-                           # Lens-independent Nirnay cache (audit finding F17) —
+                           # Horizon-independent Nirnay cache (audit finding F17) —
                            # must be dropped on a live re-fetch too, else Refresh
                            # Data re-pulls Aarambh's macro universe live but
                            # silently keeps serving the PRE-refresh Nirnay
@@ -850,12 +938,11 @@ def main():
             render_control_hint("Force-fetch live data · recompute · slower than Reset")
 
         # ── Model Passport (Sanket-style) ──────────────────────────────
-        # Surfaces the active calibrated profile (Intelligence Mode). Each
-        # (target, forecast lens) pair keys its own profile — the lens tag must
-        # match the one used at calibration time (see _intel_index below).
+        # Surfaces the active calibrated profile (Intelligence Mode). Each target
+        # keys its own profile (must match the key used at calibration time — see
+        # _intel_index below).
         _current_universe = st.session_state.get("active_target") or st.session_state.get("selected_commodity", "Gold")
-        _current_index = (f"{st.session_state.get('nishkarsh_index', _current_universe)}"
-                          f" · {st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}")
+        _current_index = st.session_state.get("nishkarsh_index", _current_universe)
         _render_model_passport_sidebar(_current_universe, _current_index)
 
         st.markdown('<hr style="margin: 1rem 0 0.75rem 0; opacity: 0.05;">', unsafe_allow_html=True)
@@ -870,6 +957,17 @@ def main():
 
     # ─── Resolve active configuration ──────────────────────────────────────
     active_target = st.session_state.get("active_target", target_col)
+    # Per-instrument config — every engine knob (Nirnay/Swayam, Aarambh forecast,
+    # DDM, convergence weights, precedent) is read from THIS target's own config
+    # (core.config.INSTRUMENT_CONFIGS), so an instrument can be retuned in
+    # isolation. Falls back to the base defaults for any target that somehow
+    # isn't registered (shouldn't happen — catalogue targets register at import,
+    # stocks via register_stock_target before analysis).
+    try:
+        _icfg = get_instrument_config(active_target)
+    except KeyError:
+        from core.config import InstrumentConfig as _IC
+        _icfg = _IC()
     active_features = list(st.session_state.get("active_features", [c for c in numeric_cols if c != active_target]))
     # Never let the target — or a self-replicating predictor (e.g. GLTR for a
     # precious metal) — leak into its own predictor set.
@@ -973,7 +1071,7 @@ def main():
                                 title="Partial latest session",
                                 content=(f"Only {fresh_frac:.0%} of the markets open on {ds} have posted — the "
                                          f"rest are forward-filled from the prior session, so the macro predictors "
-                                         f"and constituent breadth behind the latest signal are stale. Treat it as "
+                                         f"and bottom-up breadth behind the latest signal are stale. Treat it as "
                                          f"provisional; use Refresh Data in the sidebar once those markets post."),
                             )
 
@@ -1031,10 +1129,20 @@ def main():
     # Guard: a selected target whose column failed to fetch (e.g. a sheet/source
     # outage on a later run, while it stays selected) is silently dropped by the
     # column filter below and would KeyError at the per-column coercion. Fail clean.
+    # Stock targets (archetype 'self') are never IN the macro batch fetch to begin
+    # with — inject their price column here (single-ticker fetch, cached) before
+    # the guard checks for it.
+    df = _ensure_stock_target_column(df, active_target)
     if active_target not in df.columns:
-        console.failure("Target column missing", f"'{active_target}' not in fetched dataset — its source fetch failed.")
-        st.error(f"'{active_target}' data is currently unavailable (its source fetch failed). "
-                 f"Pick another target, or re-run once the source is back online.")
+        _tgt_ticker_guard = ALL_TARGETS.get(active_target, "?")
+        if TARGET_ARCHETYPE.get(active_target) == "self":
+            console.failure("Stock target fetch failed", f"'{active_target}' (ticker {_tgt_ticker_guard}) — yfinance returned no usable data.")
+            st.error(f"'{active_target}' price fetch failed (ticker {_tgt_ticker_guard}) — yfinance returned no data. "
+                     f"Check the symbol, or try again once yfinance recovers.")
+        else:
+            console.failure("Target column missing", f"'{active_target}' not in fetched dataset — its source fetch failed.")
+            st.error(f"'{active_target}' data is currently unavailable (its source fetch failed). "
+                     f"Pick another target, or re-run once the source is back online.")
         return
     # Data-preparation diagnostics — collected at each stage so the terminal can
     # show exactly how the row count evolves (no "dark spots"), and so a failure
@@ -1162,15 +1270,10 @@ def main():
     # The engine runs in forward_signal mode: conviction is driven by the
     # prediction (expected forward return), and R²/R²-vs-RW measure real
     # out-of-sample forecast skill.
-    # Forecast lens chosen in the sidebar (Signal Horizon). Daily bars throughout;
-    # this only sets how far ahead we forecast and the matching predictor-momentum
-    # window. Default preset reproduces the historical 10d/20d behaviour exactly.
-    _horizon_cfg = SIGNAL_HORIZONS.get(
-        st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
-        SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
-    )
-    FWD_HORIZON = _horizon_cfg["horizon"]   # forecast horizon (trading days)
-    FWD_MOM_K = _horizon_cfg["momentum"]    # trailing momentum window for predictors
+    # Per-instrument forecast horizon + predictor-momentum window (this target's
+    # own InstrumentConfig). Daily bars throughout.
+    FWD_HORIZON = _icfg.forecast_horizon   # forecast horizon (trading days)
+    FWD_MOM_K = _icfg.forecast_momentum    # trailing momentum window for predictors
     _prep["fwd_h"], _prep["fwd_k"] = FWD_HORIZON, FWD_MOM_K
     _lvl = data[[active_target] + active_features].astype(float)
     # Log-return for prices/levels (the target is always one of these — every
@@ -1259,11 +1362,22 @@ def main():
         # so the bar continues from where the fetch left it (~15%) with no gap.
 
         # ── Phase 1: Data Loading ─────────────────────────────────────────
-        # LENS-INDEPENDENT: basket resolution, macro fetch, and constituent
-        # OHLCV depend only on active_target, never on FWD_HORIZON/FWD_MOM_K
-        # (the lens). Cached separately (audit finding F17) so switching
-        # Signal Horizon doesn't re-pull/re-fetch this data — the walk-forward
-        # engine cache_key includes the lens, this one deliberately doesn't.
+        # HORIZON-INDEPENDENT: basket resolution, macro fetch, and constituent
+        # OHLCV depend only on active_target, never on the forecast horizon
+        # (FWD_HORIZON/FWD_MOM_K). Cached separately (audit finding F17) so a
+        # re-run for the same target reuses this expensive fetch — the
+        # walk-forward engine cache_key includes the horizon, this one
+        # deliberately doesn't. (The former user-switchable Signal-Horizon lens
+        # was removed; the horizon is now a single fixed per-instrument value,
+        # but the fetch/compute split it motivated is retained and still saves
+        # the re-fetch on every rerun.)
+        # Mode resolution — 'self' (Nirnay-Swayam) for individual-stock targets
+        # (TARGET_ARCHETYPE == 'self'), 'basket' for everything else. Single
+        # source of truth in data.constituents.get_nirnay_mode; see
+        # NIRNAY_SWAYAM_PLAN.md §6.1.
+        nirnay_mode = get_nirnay_mode(active_target)
+        st.session_state["nirnay_mode"] = nirnay_mode
+
         _nirnay_fetch_key = f"nirnay_fetch::{active_target}"
         _nf_cache = st.session_state.get("_nirnay_fetch_cache")
         if _nf_cache is not None and _nf_cache.get("key") == _nirnay_fetch_key:
@@ -1274,15 +1388,26 @@ def main():
             nirnay_macro_df = _nf_cache["nirnay_macro_df"]
             macro_cols_list = _nf_cache["macro_cols_list"]
             st.session_state["nirnay_basket_source"] = src_msg
-            console.item("Basket/Macro/OHLCV", "reused cached fetch (lens-independent)")
+            console.item("Basket/Macro/OHLCV", "reused cached fetch (horizon-independent)")
             progress_bar(progress_container, 20, "Data Acquisition Reused", f"{len(constituent_ohlcv)} Constituents · {len(macro_cols_list)} Macros (cached)")
             console.end_phase("DATA ACQUISITION")
         else:
             console.start_phase("DATA ACQUISITION", 1, 5)
-            progress_bar(progress_container, 16, "Resolving Basket", f"{active_target} · related producers / constituents / sector ETFs")
+            _resolve_sub = (f"{active_target} · own OHLCV (Swayam self-ensemble)" if nirnay_mode == "self"
+                            else f"{active_target} · related producers / constituents / sector ETFs")
+            progress_bar(progress_container, 16, "Resolving Nirnay Source", _resolve_sub)
 
             console.section("Basket Resolution")
-            constituents, src_msg = get_commodity_basket(active_target)
+            if nirnay_mode == "self":
+                # No constituent basket — Nirnay-Swayam formulates breadth on
+                # the target's OWN OHLCV. "constituents" is the target's own
+                # ticker (a 1-symbol fetch list); Phase 3 branches on
+                # nirnay_mode to build the self-ensemble instead of iterating
+                # constituents as separate instruments.
+                constituents = [ALL_TARGETS[active_target]]
+                src_msg = "swayam · self-referential ensemble"
+            else:
+                constituents, src_msg = get_commodity_basket(active_target)
             # Surfaced in the Nirnay tab (not just the console — audit finding B4):
             # a "snapshot (N)" source means live scrape + cache both failed, and
             # for an uncapped large index (S&P 500 / Nasdaq 100) N is a small
@@ -1345,10 +1470,10 @@ def main():
         console.start_phase("AARAMBH ENGINE", 2, 5)
         progress_bar(progress_container, 20, "Running Aarambh Engine", f"Walk-Forward · {len(active_features)} Predictors · {len(data)} Rows")
 
-        # PCA component count per the aarambh_full PCA lever recommendation of the
-        # latest suite run (research/TUNING_COVERAGE.md). Single local so the
+        # PCA component count — this target's own config (default 2, per the
+        # aarambh_full PCA lever, research/TUNING_COVERAGE.md). Single local so the
         # console line below and the engine.fit call can never disagree.
-        _N_PCA = 2
+        _N_PCA = _icfg.pca_components
 
         console.section("Engine Configuration")
         console.item("Mode", f"Predictive · forecast {FWD_HORIZON}d forward return")
@@ -1378,7 +1503,11 @@ def main():
             # h-day FORWARD-return target y (which would sum each daily return
             # up to h times — see FairValueEngine.fit's `price` docstring).
             _price_level = data[active_target].to_numpy(dtype=np.float64)
-            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=_N_PCA, purge=FWD_HORIZON, label_mask=_label_valid, price=_price_level, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
+            # `config=_icfg` threads this instrument's per-instrument Aarambh
+            # training knobs (refit / min-max train / ensemble / ridge / huber /
+            # lookback) into the walk-forward, so Aarambh is tuned per instrument
+            # / asset class exactly like Nirnay and Swayam.
+            engine.fit(X, y, feature_names=active_features, forward_signal=True, n_pca_components=_N_PCA, purge=FWD_HORIZON, label_mask=_label_valid, price=_price_level, config=_icfg, progress_callback=lambda pct, msg: progress_bar(progress_container, int(20 + pct * 20), "Running Aarambh Engine", msg))
             # Carry the raw price LEVEL on the engine output too (returns-space
             # modeling otherwise leaves only return-scale columns). Used by the
             # Aarambh tab for price display and by the Intelligence tuner.
@@ -1402,37 +1531,84 @@ def main():
         progress_bar(progress_container, 40, "Aarambh Engine Complete", f"Signal: {sig['signal']} ({sig['strength']}) · Conviction: {sig['conviction_score']:+.0f}")
 
         # ── Phase 3: Nirnay Constituent Analysis ──────────────────────────
-        # LENS-INDEPENDENT (audit finding F17): per-constituent MSF/MMR/regime
+        # HORIZON-INDEPENDENT (audit finding F17): per-constituent MSF/MMR/regime
         # analysis and aggregation depend only on active_target's basket +
-        # macro window, never on the Signal Horizon lens. This is the ~30s
-        # (Nifty 50) to ~5min (uncapped S&P 500) cost the lens switch used to
+        # macro window, never on the forecast horizon. This is the ~30s
+        # (Nifty 50) to ~5min (uncapped S&P 500) cost a re-run would otherwise
         # re-pay for byte-identical output. Cached under the SAME
         # _nirnay_fetch_key as Phase 1; only the target-calendar reindex below
-        # (cheap — no yfinance calls) re-runs per lens, since a different
-        # lens's warm-up trim can shift the target's date spine slightly.
+        # (cheap — no yfinance calls) re-runs, since the horizon's warm-up trim
+        # can shift the target's date spine slightly. (Former Signal-Horizon
+        # lens removed; horizon is now a single fixed per-instrument value.)
         console.start_phase("NIRNAY ENGINE", 3, 5)
-        progress_bar(progress_container, 42, "Running Nirnay Engine", f"MSF+MMR+Regime · {len(constituent_ohlcv)} Constituents")
+        _nirnay_sub = ("MSF+MMR+Regime · Swayam self-ensemble (own OHLCV)" if nirnay_mode == "self"
+                       else f"MSF+MMR+Regime · {len(constituent_ohlcv)} Constituents")
+        progress_bar(progress_container, 42, "Running Nirnay Engine", _nirnay_sub)
 
         _na_cache = st.session_state.get("_nirnay_analysis_cache")
         if _na_cache is not None and _na_cache.get("key") == _nirnay_fetch_key:
             nirnay_constituent_dfs = _na_cache["nirnay_constituent_dfs"]
             nirnay_daily_pre_reindex = _na_cache["nirnay_daily_pre_reindex"]
-            console.item("Per-Stock Analysis", "reused cached fit (lens-independent)")
+            if nirnay_mode == "self" and "n_eff" in _na_cache:
+                st.session_state["nirnay_swayam_n_eff"] = _na_cache["n_eff"]
+            console.item("Per-Stock Analysis", "reused cached fit (horizon-independent)")
             progress_bar(progress_container, 74, "Nirnay Engine Reused", f"{len(nirnay_constituent_dfs)} Stocks (cached)")
         else:
             nirnay_daily_pre_reindex = pd.DataFrame()
             nirnay_constituent_dfs = {}
 
-            if constituent_ohlcv:
+            if constituent_ohlcv and nirnay_mode == "self":
+                console.section("Swayam Self-Ensemble")
+                target_tkr = constituents[0]
+                target_ohlcv = constituent_ohlcv.get(target_tkr)
+                if target_ohlcv is not None and not target_ohlcv.empty:
+                    # Leakage guard (NIRNAY_SWAYAM_PLAN.md §4.4): drop the
+                    # target's own macro column + its excluded-predictor
+                    # near-replicas from the MMR driver pool — a member's
+                    # Close correlates ~1.0 with the target's own macro
+                    # column, which would let MMR "explain" the target with
+                    # itself and silently zero the deviation oscillator.
+                    swayam_cols = swayam_macro_columns(active_target, macro_cols_list)
+                    # This target's own Swayam grid (from its InstrumentConfig).
+                    _swayam_members = default_swayam_members(_icfg.swayam_lengths, _icfg.swayam_roc_frac)
+                    console.item("Views (grid)", f"{len(_swayam_members)} · timescale × information-set × mechanism")
+                    console.item("MSF Length Grid", str(_icfg.swayam_lengths))
+                    console.item("Regime Sensitivity", _icfg.nirnay_regime_sensitivity)
+                    console.item("Base Weight", _icfg.nirnay_base_weight)
+                    console.item("Macro Columns (post-leakage-guard)", len(swayam_cols))
+
+                    def _swayam_progress(done, total, name):
+                        pct_val = int(45 + done / max(total, 1) * 30)
+                        progress_bar(progress_container, pct_val, f"View {name}", f"{done}/{total} views")
+
+                    nirnay_constituent_dfs = build_swayam_frames(
+                        target_ohlcv, nirnay_macro_df, swayam_cols,
+                        members=_swayam_members,
+                        regime_sensitivity=_icfg.nirnay_regime_sensitivity, base_weight=_icfg.nirnay_base_weight,
+                        num_vars=_icfg.nirnay_mmr_num_vars,
+                        oversold=_icfg.nirnay_oversold, overbought=_icfg.nirnay_overbought,
+                        progress_cb=_swayam_progress,
+                    )
+                    n_eff = effective_member_count(nirnay_constituent_dfs)
+                    st.session_state["nirnay_swayam_n_eff"] = n_eff
+                    console.success(f"Swayam ensemble: {len(nirnay_constituent_dfs)} views · ~{n_eff:.1f} effective")
+
+                if nirnay_constituent_dfs:
+                    console.section("Aggregation")
+                    nirnay_daily_pre_reindex = aggregate_constituent_timeseries(nirnay_constituent_dfs)
+                    # Self mode is definitionally co-directional (the target
+                    # vs itself) — apply_polarity is never invoked here
+                    # (INV: self-mode polarity is always a no-op).
+            elif constituent_ohlcv:
                 total = len(constituent_ohlcv)
                 console.section("Per-Stock Analysis")
                 console.item("Constituents", total)
-                console.item("MSF Length", NIRNAY_MSF_LENGTH)
-                console.item("ROC Length", NIRNAY_ROC_LEN)
-                console.item("Regime Sensitivity", NIRNAY_REGIME_SENSITIVITY)
-                console.item("Base Weight", NIRNAY_BASE_WEIGHT)
-                console.item("MMR Top-N Drivers", NIRNAY_MMR_NUM_VARS)
-                console.item("Oversold / Overbought", f"{NIRNAY_OVERSOLD} / {NIRNAY_OVERBOUGHT}")
+                console.item("MSF Length", _icfg.nirnay_msf_length)
+                console.item("ROC Length", _icfg.nirnay_roc_len)
+                console.item("Regime Sensitivity", _icfg.nirnay_regime_sensitivity)
+                console.item("Base Weight", _icfg.nirnay_base_weight)
+                console.item("MMR Top-N Drivers", _icfg.nirnay_mmr_num_vars)
+                console.item("Oversold / Overbought", f"{_icfg.nirnay_oversold} / {_icfg.nirnay_overbought}")
                 console.item("Macro Columns", len(macro_cols_list))
 
                 for i, (sym, ohlcv_df) in enumerate(constituent_ohlcv.items()):
@@ -1446,10 +1622,10 @@ def main():
                         has_macro = len([c for c in macro_cols_list if c in merged.columns])
 
                         result_df, _ = run_full_analysis(
-                            merged, length=NIRNAY_MSF_LENGTH, roc_len=NIRNAY_ROC_LEN,
-                            regime_sensitivity=NIRNAY_REGIME_SENSITIVITY, base_weight=NIRNAY_BASE_WEIGHT,
-                            num_vars=NIRNAY_MMR_NUM_VARS,
-                            oversold=NIRNAY_OVERSOLD, overbought=NIRNAY_OVERBOUGHT,
+                            merged, length=_icfg.nirnay_msf_length, roc_len=_icfg.nirnay_roc_len,
+                            regime_sensitivity=_icfg.nirnay_regime_sensitivity, base_weight=_icfg.nirnay_base_weight,
+                            num_vars=_icfg.nirnay_mmr_num_vars,
+                            oversold=_icfg.nirnay_oversold, overbought=_icfg.nirnay_overbought,
                             macro_columns=macro_cols_list,
                         )
                         nirnay_constituent_dfs[sym] = result_df
@@ -1480,11 +1656,12 @@ def main():
                 "key": _nirnay_fetch_key,
                 "nirnay_constituent_dfs": nirnay_constituent_dfs,
                 "nirnay_daily_pre_reindex": nirnay_daily_pre_reindex,
+                "n_eff": st.session_state.get("nirnay_swayam_n_eff") if nirnay_mode == "self" else None,
             }
 
-        # ── LENS-DEPENDENT tail: reindex onto the target's calendar ─────────
-        # Cheap (pure pandas, no yfinance) — re-runs every lens since a
-        # different lens's warm-up trim can shift the target's date spine.
+        # ── HORIZON-DEPENDENT tail: reindex onto the target's calendar ──────
+        # Cheap (pure pandas, no yfinance) — re-runs since the horizon's
+        # warm-up trim can shift the target's date spine.
         nirnay_daily = nirnay_daily_pre_reindex
         if not nirnay_daily.empty:
             # Carry the basket forward onto the TARGET's trading calendar. The
@@ -1540,18 +1717,17 @@ def main():
         # factory defaults — no calibration runs.
         from convergence import intelligence as _intel_mod
         _intel_universe = active_target
-        # Fold the active forecast lens into the profile key so each Signal Horizon
-        # keeps its OWN calibrated weights on disk — a Tactical and a Positional
-        # profile for the same target must not clobber each other.
-        _intel_index = (f"{st.session_state.get('nishkarsh_index', _intel_universe)}"
-                        f" · {st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}")
+        # One calibrated profile per target (the forecast-lens tag was dropped
+        # from the key when the Signal-Horizon selector was removed — there is a
+        # single horizon now, so no Tactical/Positional profiles to disambiguate).
+        _intel_index = st.session_state.get("nishkarsh_index", _intel_universe)
         _intel_enabled = bool(st.session_state.get("intelligence_mode", True))
         if _intel_enabled:
             _prior_w, _prior_t, _prior_profile = _intel_mod.resolve_active(_intel_universe, _intel_index)
         else:
             _prior_w, _prior_t, _prior_profile = (
-                _intel_mod.DEFAULT_WEIGHTS.copy(),
-                _intel_mod.DEFAULT_THRESHOLDS.copy(),
+                _icfg.weights_seed(),          # this instrument's convergence-weight seed
+                _icfg.composite_thresholds(),  # …and its classification threshold seed
                 None,
             )
         if _prior_profile is not None:
@@ -1567,11 +1743,19 @@ def main():
             "ON (auto-calibrate after convergence)" if _intel_enabled else "OFF (defaults locked)",
         )
 
-        # First-pass validator uses prior weights when available.
-        _validator_weights = _prior_w if _prior_profile is not None else None
+        # First-pass validator uses the learned profile's weights when available,
+        # else this instrument's own convergence-weight seed (from its config).
+        _validator_weights = _prior_w if _prior_profile is not None else _icfg.weights_seed()
+        # In self mode "constituents" is a 1-item list (the target's own
+        # ticker) — the actual vote count is the Swayam ensemble's member
+        # count (all views always report, so coverage reads 1.0), not 1.
+        _expected_constituents = (
+            (len(nirnay_constituent_dfs) or None) if nirnay_mode == "self"
+            else (len(constituents) or None)
+        )
         validator = CrossValidator(
             active_weights=_validator_weights,
-            expected_constituents=len(constituents) or None,
+            expected_constituents=_expected_constituents,
         )
         divergence_detector = CrossSystemDivergenceDetector()
 
@@ -1648,7 +1832,7 @@ def main():
         console.item("Skipped (warm-up, no genuine forecast)", skipped_warmup)
         console.item("Overlap Dates", f"{overlap_count} ({native_overlap_count} native, "
                      f"{overlap_count - native_overlap_count} carried-forward)")
-        console.success(f"Convergence scoring complete")
+        console.success("Convergence scoring complete")
 
         # ── Intelligence Mode overlap gate ───────────────────────────────
         # Decided HERE (overlap_count is final) rather than just before the
@@ -1700,12 +1884,11 @@ def main():
             "DDM Filter · Prior Weights" if (_intel_enabled and _prior_profile is not None) else "DDM Filter · Default Weights",
         )
         convergence_df = validator.get_convergence_series()
-        # DDM smoothing tuned to the active lens — longer horizons turn over
-        # slower, so they get longer DDM memory (lower leak_rate).
+        # DDM smoothing = the shared consensus-filter tuning (CONV_DDM_*).
         conviction_model = UnifiedConvictionModel(
-            leak_rate=_horizon_cfg["ddm_leak"],
-            drift_scale=_horizon_cfg["ddm_drift"],
-            long_run_var=_horizon_cfg["ddm_lrv"],
+            leak_rate=_icfg.ddm_leak,
+            drift_scale=_icfg.ddm_drift,
+            long_run_var=_icfg.ddm_lrv,
         )
         results = conviction_model.fit(
             convergence_df["convergence_score"].tolist(),
@@ -1742,7 +1925,7 @@ def main():
                     convergence_df, aarambh_ts,
                     universe=_intel_universe, selected_index=_intel_index,
                     target_col="Price",
-                    horizons=tuple(_horizon_cfg["hold"]),  # validate at the traded lens
+                    horizons=_icfg.hold_horizons,  # validate at this instrument's forecast horizons
                 )
                 console.item("TPE Trials", _n_trials)
                 console.item("Objective", f"{tuner.n_cv_folds}-fold CV (purged) · L2 {tuner.l2_alpha}")
@@ -1805,11 +1988,11 @@ def main():
                 "Post-Calibration DDM Pass",
             )
             # Re-fit the conviction model with the new convergence_score
-            # (same lens-tuned DDM as the initial pass).
+            # (same consensus-filter DDM as the initial pass).
             conviction_model = UnifiedConvictionModel(
-                leak_rate=_horizon_cfg["ddm_leak"],
-                drift_scale=_horizon_cfg["ddm_drift"],
-                long_run_var=_horizon_cfg["ddm_lrv"],
+                leak_rate=_icfg.ddm_leak,
+                drift_scale=_icfg.ddm_drift,
+                long_run_var=_icfg.ddm_lrv,
             )
             results = conviction_model.fit(
                 convergence_df["convergence_score"].tolist(),
@@ -1821,7 +2004,7 @@ def main():
                 console.item("DDM Conviction", f"{latest.nishkarsh_conviction:+.0f}")
                 console.item("DDM Signal", latest.nishkarsh_signal)
                 console.item("DDM Band", f"[{latest.confidence_lower:.0f}, {latest.confidence_upper:.0f}]")
-            console.success(f"Re-fit complete with calibrated profile")
+            console.success("Re-fit complete with calibrated profile")
             _active_w = _final_profile.weights
             _active_t = _final_profile.thresholds
         elif _prior_profile is not None:
@@ -1837,9 +2020,10 @@ def main():
             _active_w = _prior_w
             _active_t = _prior_t
         else:
-            # Genuinely no profile involved — record the true default state.
-            _active_w = _intel_mod.DEFAULT_WEIGHTS.copy()
-            _active_t = _intel_mod.DEFAULT_THRESHOLDS.copy()
+            # Genuinely no profile involved — record this instrument's own
+            # config seed as the active weights + thresholds (per-instrument).
+            _active_w = _icfg.weights_seed()
+            _active_t = _icfg.composite_thresholds()
 
         # Publish to session state so the Passport sidebar + Convergence cards
         # see the calibrated state immediately on the next rerun.
@@ -1899,7 +2083,7 @@ def main():
             event_types = events['divergence_type'].value_counts()
             for etype, count in event_types.items():
                 console.item(f"  {etype}", count)
-        console.success(f"Divergence analysis complete")
+        console.success("Divergence analysis complete")
 
         # ── Walk-Forward Validation (durability check, runs every analysis) ──
         # Re-calibrates on each expanding window and scores IC on the next
@@ -1908,7 +2092,7 @@ def main():
         console.section("Walk-Forward Validation")
         progress_bar(progress_container, 94, "Walk-Forward Validation", "Rolling OOS IC · Re-Calibration")
         try:
-            _hold_grid = tuple(_horizon_cfg["hold"])  # IC durability at the traded lens
+            _hold_grid = _icfg.hold_horizons  # IC durability at this instrument's forecast horizons
             _wf_frame = _intel_mod._build_calibration_frame(
                 convergence_df, aarambh_ts, target_col="Price", horizons=_hold_grid,
             )
@@ -1960,7 +2144,7 @@ def main():
         #   • hero_series   — the HEADLINE object's full history: the
         #     normalized consensus ([-1,+1], from consensus_series — the
         #     single source shared with the Unified Signal plot's top row)
-        #   • hero_smoothed — DDM of the SAME consensus (lens-tuned params,
+        #   • hero_smoothed — DDM of the SAME consensus (config DDM params,
         #     tanh-bounded like every other DDM consumer) — the trend the
         #     hero's TREND row compares today's print against
         #   • calibrated_conv_series — DDM of the CALIBRATED composite (the
@@ -1974,9 +2158,9 @@ def main():
             from analytics.utils import _apply_conviction_bounds as _bound
             _cons_filt, _, _ = _ddm(
                 _consensus_full["Consensus"].to_numpy() * 100.0,
-                leak_rate=_horizon_cfg["ddm_leak"],
-                drift_scale=_horizon_cfg["ddm_drift"],
-                long_run_var=_horizon_cfg["ddm_lrv"],
+                leak_rate=_icfg.ddm_leak,
+                drift_scale=_icfg.ddm_drift,
+                long_run_var=_icfg.ddm_lrv,
             )
             st.session_state["hero_smoothed"] = pd.Series(
                 _bound(_cons_filt) / 100.0, index=_consensus_full.index,
@@ -2084,40 +2268,40 @@ def main():
     # Content-aware key (not just row count): include the latest Price so an intraday
     # refresh that updates the last bar without adding a row still recomputes.
     #
-    # Computed ONCE here with the SUPERSET hold grid (lens hold + the Precedent
-    # tab's honorary +1d tile) and cached as the raw analog list — the tab
-    # (ui/tabs/tab_precedent.py) previously called find_similar_periods AGAIN
-    # with its own (slightly wider) hold_horizons on every render, re-running
-    # the expensive part (feature-frame build incl. rolling Hurst, Mahalanobis
-    # distance, Theiler selection) a second time for the same ts/target/
-    # mom_window (audit finding F18). summarize_forward is cheap (pure
-    # aggregation), so both the hero's single-horizon read and the tab's
+    # Computed ONCE here over the FIXED precedent term structure
+    # (core.config.PRECEDENT_HORIZONS = 1/3/5/10/20/60d) and cached as the raw
+    # analog list — the tab (ui/tabs/tab_precedent.py) previously called
+    # find_similar_periods AGAIN with its own hold_horizons on every render,
+    # re-running the expensive part (feature-frame build incl. rolling Hurst,
+    # Mahalanobis distance, Theiler selection) a second time for the same
+    # ts/target/mom_window (audit finding F18). summarize_forward is cheap
+    # (pure aggregation), so both the hero's single-horizon read and the tab's
     # per-horizon cards derive from this one cached analog list.
+    #
+    # The analog STATE features use this instrument's forecast-momentum window;
+    # the term structure is this instrument's precedent_horizons span.
     _plast = float(ts["Price"].iloc[-1]) if "Price" in ts.columns and len(ts) else 0.0
-    _pkey = f"{active_target}|{st.session_state.get('signal_horizon', DEFAULT_SIGNAL_HORIZON)}|{len(ts)}|{_plast:.6g}"
+    _pkey = f"{active_target}|{len(ts)}|{_plast:.6g}"
     if st.session_state.get("_prec_key") != _pkey:   # recompute only when inputs change
         _prec_summary = None
         _cached_analogs: list = []
         _cached_display_hold: tuple = ()
         try:
             from analytics.analogs import find_similar_periods as _fsp, summarize_forward as _sf
-            _hlens = SIGNAL_HORIZONS.get(
-                st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
-                SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
-            )
-            _hold = tuple(_hlens["hold"])
-            # Superset = lens hold grid + honorary +1d (mirrors
-            # ui/tabs/tab_precedent.py's display_hold construction exactly, so
-            # the cached analogs cover every horizon either consumer needs).
-            if PRECEDENT_HONORARY_HORIZON is not None and PRECEDENT_HONORARY_HORIZON not in _hold:
-                _display_hold = tuple(sorted(set((PRECEDENT_HONORARY_HORIZON,) + _hold)))
-            else:
-                _display_hold = _hold
-            _analogs = _fsp(ts, active_target, hold_horizons=_display_hold, mom_window=_hlens["momentum"])
+            _display_hold = _icfg.precedent_horizons
+            _analogs = _fsp(ts, active_target, hold_horizons=_display_hold, mom_window=_icfg.forecast_momentum,
+                            maha_weight=_icfg.analog_w_maha, trajectory_weight=_icfg.analog_w_traj,
+                            recency_weight=_icfg.analog_w_recv)
             _cached_analogs = _analogs
             _cached_display_hold = _display_hold
-            _ps = _sf(_analogs, _hold) if _analogs else {}
-            _hp = max(_hold)                         # lens primary horizon
+            _ps = _sf(_analogs, _display_hold) if _analogs else {}
+            # Hero precedent second-opinion reads at this instrument's forecast
+            # horizon (a member of its precedent_horizons); fall back to the
+            # nearest available shorter horizon if it is ever absent.
+            _hp = int(_icfg.forecast_horizon)
+            if _hp not in _ps:
+                _cands = [h for h in _display_hold if h <= _hp]
+                _hp = max(_cands) if _cands else min(_display_hold)
             _row = _ps.get(int(_hp))
             if _row:
                 _med = _row["median"]
@@ -2211,13 +2395,6 @@ def main():
                 unsafe_allow_html=True,
             )
 
-    # Active Signal-Horizon lens → the Precedent analog horizons/momentum window
-    # follow the same lens chosen in the sidebar (full-history `ts`, not filtered).
-    _lens = SIGNAL_HORIZONS.get(
-        st.session_state.get("signal_horizon", DEFAULT_SIGNAL_HORIZON),
-        SIGNAL_HORIZONS[DEFAULT_SIGNAL_HORIZON],
-    )
-
     with tab1:
         _safe_render("Convergence", lambda: render_convergence_tab(ts_filtered))
     with tab2:
@@ -2227,7 +2404,7 @@ def main():
     # Reuse the analog list already computed above (Precedent base-rate for the
     # hero) instead of having the tab call find_similar_periods a second time
     # for the same (ts, target, mom_window) — audit finding F18. Guarded on
-    # the pkey matching THIS render's ts/target/lens; a mismatch (shouldn't
+    # the pkey matching THIS render's ts/target/horizon; a mismatch (shouldn't
     # happen since the precompute above always runs first) falls back to None,
     # and the tab recomputes itself exactly as before.
     _prec_cache = st.session_state.get("_precedent_analogs_cache")
@@ -2235,8 +2412,10 @@ def main():
         _prec_cache["periods"] if _prec_cache and _prec_cache.get("pkey") == _pkey else None
     )
     with tab4:
+        # Precedent term structure + momentum/horizon come from this instrument's
+        # own config (precedent_horizons / forecast_momentum / forecast_horizon).
         _safe_render("Precedent", lambda: render_precedent_tab(
-            ts, active_target, tuple(_lens["hold"]), _lens["momentum"], _lens["horizon"],
+            ts, active_target, _icfg.precedent_horizons, _icfg.forecast_momentum, _icfg.forecast_horizon,
             precomputed_periods=_cached_periods))
     with tab5:
         _safe_render("Diagnostics", lambda: render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_stats))

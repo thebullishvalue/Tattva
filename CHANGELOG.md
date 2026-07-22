@@ -11,6 +11,326 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ## [Unreleased]
 
+## [2.7.0] — 2026-07-20 — *Nirnay-Swayam self mode · individual stocks · full per-instrument configuration · research-suite overhaul*
+
+### Added
+- **Interpretation layer is now per-instrument too** — markers, UI display tiers,
+  classification thresholds, and analog blend weights, matching the engines.
+  25 data-anchored interpretation constants (Unified-Signal markers, agreement /
+  breadth / model-spread tiers, conviction + convergence display tiers,
+  consensus/composite thresholds, `analog_w_*`) became `InstrumentConfig` fields
+  (defaults mirror the module globals — pinned by a new sync check in
+  `test_instrument_configs`). Read sites now resolve the active instrument's
+  values: the convergence-classification threshold SEED is `_icfg.composite_thresholds()`
+  (weights seed / nirnay oversold-overbought were already per-instrument); the
+  Convergence / Aarambh / Nirnay tabs shadow their marker & tier globals with the
+  active instrument's config; the analog matcher's maha/trajectory weights are
+  parameters fed from `_icfg`. Structural constants (R²/ADF/KPSS/HMM cut-points,
+  chart dims) stay global — statistical definitions, not distribution anchors.
+  Behaviour-preserving until an override is wired via `_PER_INSTRUMENT_OVERRIDES`.
+  The interpretation STUDIES (`markers`, `hero_thresholds`, `ui_anchors`,
+  `conv_weights`, `analog`) now emit gated per-instrument recommendations too —
+  percentile-anchor studies adopt a target-specific anchor only when its own
+  distribution diverges from the pooled default by ≥25% with ≥250 obs; the IC
+  studies use the engine gate — so every study is at full per-instrument parity.
+- **Aarambh forecast engine is now tunable PER INSTRUMENT / asset class**, like
+  Nirnay (`nirnay_*`) and Swayam (`swayam_*`). Seven training knobs moved onto
+  `InstrumentConfig` — `aarambh_refit_interval`, `aarambh_min_train_size`,
+  `aarambh_max_train_size`, `aarambh_ensemble_models`, `aarambh_ridge_alphas`,
+  `aarambh_huber_epsilon`, `aarambh_lookback_windows` (defaulting to the global
+  constants, so behaviour-preserving). `FairValueEngine.fit(..., config=<cfg>)`
+  reads them off the instrument's config into per-run instance attributes
+  (replacing the former module-global references throughout the walk-forward; the
+  `@staticmethod` ensemble path takes them as parameters). `app.py` threads
+  `get_instrument_config(target)` into the fit call, so any instrument or asset
+  class can retune the forecast in isolation via `_PER_INSTRUMENT_OVERRIDES` /
+  `STOCK_CONFIGS`. `aarambh_tuning_study` now emits a gated per-target
+  `_PER_INSTRUMENT_OVERRIDES` snippet (via `research/_per_instrument.py`) alongside
+  its class-level block, and a new `test_aarambh_config` (suite key `t_aarambh`)
+  pins the threading contract.
+- **Orchestrator "from scratch" run option** (`research/run_tuning.py`). A new
+  interactive action `f) Run EVERYTHING end-to-end FROM SCRATCH` and a `--fresh`
+  CLI flag wipe the persistent study-result cache (`research/.tune_cache/` — the
+  aarambh resume CSV) and pass `--fresh` through, so a full re-run carries nothing
+  from a previous report and recomputes every result. Segment / specific-study
+  selections that include a cache-bearing study prompt for it too. Deliberately
+  does NOT clear the raw market-data cache (`~/.cache/tattva`) — that is shared and
+  expensive to refetch, and the preflight re-warms it. `--fresh` no-ops (with a
+  note) when the selection has no persistent cache, and for the tests-only run.
+- **Per-instrument configuration for the five catalogue classes.** Commodities,
+  the currency, every India index, every US index and the ETF target now each
+  carry their OWN tuned InstrumentConfig knobs, layered on their class default via
+  a new explicit `PER_INSTRUMENT_TUNING` map in `core/config.py` (auto-seeded with
+  a slot for every per-instrument-class target, so it can't drift from the
+  catalogue). Hand-wired values live in `_PER_INSTRUMENT_OVERRIDES` and are
+  validated at import (tunable fields only, real targets only). The India/US STOCK
+  classes deliberately stay ASSET-LEVEL (one config per market via `STOCK_CONFIGS`),
+  since free-form symbols can't be pre-tuned. `PER_INSTRUMENT_CLASSES` /
+  `ASSET_LEVEL_CLASSES` name the split, and the derived-view invariant (each
+  config == class default ⊕ per-instrument override) is pinned by
+  `test_instrument_configs`. Behaviour-preserving until values are wired.
+- **Studies now emit PER-INSTRUMENT recommendations.** `swayam` (per-commodity
+  Swayam grid), `nirnay_index` (per-index MSF, expanded to all 24 India indices),
+  `nirnay` (per-target basket knobs for USD/INR + Jeera) and `per_asset` (per-index
+  MSF for S&P 500 / Nasdaq 100 / Dow Jones + the ETF target) each print a gated,
+  copy-paste-ready `_PER_INSTRUMENT_OVERRIDES` snippet via a shared helper
+  (`research/_per_instrument.py`). The gate adopts a per-instrument value ONLY when
+  that target's own best |IC| clears an absolute floor AND beats its class-default
+  |IC| by a margin — otherwise the instrument keeps its class default (no
+  overfitting per-target grid noise). `per_asset`'s stock classes stay pooled
+  (asset-level), matching the config split.
+
+### Changed
+- **Per-instrument values wired from the 2026-07-20 from-scratch suite run**
+  (`reports/tuning_20260720_025604.txt`; full 19-study run, `--fresh`, on the
+  fixed aarambh baseline). The per-instrument layer fired as designed — the
+  studies gate-passed a systematic set of overrides now in
+  `core.config._PER_INSTRUMENT_OVERRIDES` (24 instruments):
+  - **19 India indices → long MSF** (`nirnay_index`). India equity indices
+    systematically prefer MSF 25–60 over the commodity-tuned class default of 5,
+    with |IC| up 3–7× (Nifty Energy 0.164 vs 0.061; Nifty Services 0.148 vs
+    0.022; Nifty Metal 0.145 vs 0.045). Nifty PSU Bank is the lone short-window
+    winner (MSF 3). FMCG/IT/MNC/Media wanted short windows but within noise →
+    kept at default; Smallcap 100 had no basket.
+  - **Copper → swayam_lengths (8,14,22,34,52)** (`swayam`; |IC| 0.075 vs 0.044).
+    The other commodities' grid stayed at the class default (within noise).
+  - **US indices + ETF** (`per_asset`): S&P 500 MSF 40, Nasdaq 100 MSF 18, Dow
+    Jones MSF 8, India Sector ETFs MSF 12 (each |IC| 0.11–0.16 on its basket).
+- **Class-level / global constants applied LITERALLY from the same 2026-07-20
+  report, per explicit user directive** (track the report's recommendation outputs
+  rather than the "adopt only beyond noise" default). Applied:
+  - **Aarambh** (`aarambh_full` RECOMMENDED block): `REFIT_INTERVAL` 63→**40**,
+    `ENSEMBLE_MODELS` →**("ols",)**, `MAX_TRAIN_SIZE` 350→**150**, `MIN_TRAIN_SIZE`
+    150→**1000**, `RIDGE_ALPHAS` →**(0.1,1,10)**, `HUBER_EPSILON` 1.1→**4.0**,
+    `InstrumentConfig.pca_components` 2→**20**. ⚠ MIN>MAX is an OFAT interaction —
+    the engine uses `max(MAX,MIN)` so the window is 1000 and MAX=150 is INERT;
+    flagged at the constants and worth a joint MIN×MAX grid. A single-member "ols"
+    ensemble also zeroes the Model Spread indicator. (These ICs are small and some
+    non-monotonic — applied as directed, not as an endorsement of separation.)
+  - **Nirnay class-level** (`nirnay` best-per-knob): `NIRNAY_MSF_LENGTH` 5→**20**,
+    `NIRNAY_ROC_LEN` 2→**60**, `NIRNAY_REGIME_SENSITIVITY` 6.0→**8.0**,
+    `NIRNAY_MMR_NUM_VARS` 4→**15** (base_weight 0.0 unchanged). The per-instrument
+    India/US-index overrides above still supersede the MSF default for those targets.
+  - **DDM** (`ddm` best-mean-IC leak, gain held): consensus `CONV_DDM_LEAK_RATE`
+    0.15→**0.01** (drift 0.012); engine `DDM_LEAK_RATE` 0.65→**0.03** (drift 0.056).
+    Much lighter smoothing of the hero trend / conviction display (a product-character
+    change; lag stays within the 10d horizon).
+  - **Interp markers/thresholds** (`markers` / `hero_thresholds` anchors):
+    `UI_CONSENSUS_STRONG/MODERATE` →**0.41/0.27**, `UI_CONVRAW_STRONG/MODERATE`
+    →**66.67/33.33**, consensus `DEFAULT_THRESHOLDS` →**±0.284/±0.428** (p75/p90).
+    COMPOSITE_THRESHOLDS already on-anchor (±0.19/±0.33 ≈ p75/p90) → unchanged.
+  - **stock_us** (asset-level, `per_asset`): `swayam_roc_frac` 0.7→**0.55**
+    (stock_india unchanged; both stay pooled at market level).
+  - **Not changed — the report recommended KEEPING current:** `conv_weights`
+    (factory vector stands; best alt scored negative), `calibration_lift`
+    (consensus-primary stands), `analog`/`analog_confirm` (current 1/0/0 wins),
+    `LOOKBACK_WINDOWS` (already at the recommended ultra-short(3-10)), the analog
+    horizon/precedent structure (validated).
+- **Re-tune from the 2026-07-18 full suite run** (post per-instrument / self-mode
+  refactor; `research/reports/tuning_20260718_173837.txt`). Each result was read
+  against its study's own "adopt only beyond noise" rule — most knobs stood; two
+  changed:
+  - `NIRNAY_MSF_LENGTH` **18 → 5**. Short MSF windows won CROSS-UNIVERSE at the
+    corrected baseline — `nirnay` (commodity/FX baskets: |IC| 0.083 @5 vs 0.039
+    @18) and `nirnay_index` (India indices: 0.103 @5 vs 0.050 @18) both peak at
+    the short end, with 18 in the worst part of each curve. Basket-mode only
+    (self-mode Swayam members carry their own `swayam_lengths`).
+  - `COMPOSITE_THRESHOLDS` **±0.11/±0.16 → ±0.19/±0.33** (p75/p90). The composite
+    distribution shifted once commodities moved to Swayam self mode, and the old
+    pair had drifted to ~p58/p69 (moderate firing 42% of days); re-anchored to the
+    house occupancy convention. Cascades to the intelligence seed thresholds and
+    the conviction-model display tiers (both derived), which auto-tracked.
+  - **Stood, per each study's rule:** Nirnay ROC/sensitivity (inert), base_weight /
+    MMR_num_vars (gains concentrated in self-mode or single targets), the Swayam
+    grid (within noise), both DDM filters (the lower-leak IC "gain" is just less
+    smoothing + more lag — a product choice), convergence dim-weights (inert), and
+    the UI/marker anchors (within convention, or an unexplained ConvictionBounded
+    shift not worth chasing on one run).
+- **Research: fixed the stale `aarambh_tuning_study` baseline.** Its `BASE` held
+  `refit=5/maxt=750/mint=500/pca=20` while live config is `63/350/150/2`, so the
+  2026-07-18 aarambh sweeps measured interactions off-baseline (their numbers are
+  not authoritative). `BASE` now pulls from live config (as `nirnay`'s already
+  did), and the stale hardcoded "base: len20/…" header renders from `BASE`.
+- **Research: hardened `per_asset` stock-universe fetching against rate-limiting.**
+  The self stock classes fetched one ticker at a time (~200 individual yfinance
+  round-trips across Nifty 100 + Nasdaq 100), which tripped the rate-limiter and
+  opened the circuit breaker on the 2026-07-18 run — Nasdaq 100 collapsed to a
+  ~40-name snapshot, so nothing from those two classes was adoptable. Each
+  universe is now batch-fetched in ONE call up front (`_prefetch_ohlcv`); a
+  prefetch below `MIN_UNIVERSE_COVERAGE` (75%) is flagged `[UNRELIABLE: thin
+  universe]` in the recommendations instead of silently trusted, and
+  `STOCK_UNIVERSE_CAP` is now env-overridable for a fast smoke pass. No config
+  values change from this — it makes the *next* `per_asset` re-run trustworthy.
+
+### Fixed
+- **Nirnay-Swayam self-mode copy propagated to the rest of the UI.** When self
+  mode was added the Nirnay tab was made mode-aware, but the Convergence tab, the
+  cross-system divergence messages, and the hero fallback still assumed a
+  constituent basket — so a commodity/stock target (which runs Swayam self mode)
+  read "Nirnay constituents haven't turned", "Bottom-up constituent momentum",
+  "The constituent basket's data ends…", and "Aarambh only (no basket
+  convergence)". These now read mode-aware/neutral wording ("views" vs
+  "constituents", "bottom-up breadth", "the instrument's own price data"). All
+  the underlying LOGIC was already in sync — the numbers were correct (identical
+  breadth schema, `expected_constituents`/coverage handled, polarity a no-op in
+  self mode); only the descriptive copy lagged.
+
+### Changed
+- **Every instrument now carries its own full config (`InstrumentConfig`).** The
+  system moved from global engine constants + a few sparse per-target maps to an
+  explicit per-instrument config registry (`INSTRUMENT_CONFIGS` in
+  `core/config.py`): each instrument's config holds BOTH its routing (Nirnay mode /
+  basket / polarity / excluded predictors) AND every tunable engine knob — Nirnay
+  (MSF length, ROC, regime sensitivity, base weight, MMR vars, oversold/overbought),
+  the Swayam grid (lengths + ROC fraction), Aarambh forecast horizon/momentum/PCA,
+  convergence DDM (leak/drift/lrv) and dimension weights, and the precedent term
+  structure. `app.py` reads `get_instrument_config(active_target)` once and drives
+  the whole pipeline from that instrument's fields, so any instrument can be retuned
+  in isolation without touching the others. **"Defining them is a must":** every
+  named catalogue target (6 commodities, USD/INR, all 24 India indices incl. Nifty 50
+  & Nifty 50 - PE, 3 US indices, the ETF universe) has an EXPLICIT registry entry —
+  the 22 non-Nifty-50 India indices copy the Nifty 50 baseline tuning by design but
+  are each present as their own entry; `get_instrument_config` raises for an
+  unregistered target rather than falling back silently. India/US **stocks** are
+  configured per asset class (`STOCK_CONFIGS`), and each free-form symbol gets its own
+  registry entry (cloned from its market's class config) at resolution time via
+  `register_stock_target`. Per-class default configs (`CLASS_CONFIG_DEFAULTS`) let a
+  whole asset class be retuned in one place. **Behaviour is byte-identical on
+  introduction** — every field defaults to the exact former global constant, so the
+  signal only changes once a specific instrument's (or class's) config is edited to
+  diverge. The legacy per-target maps (`TARGET_ARCHETYPE`, `TARGET_POLARITY`,
+  `TARGET_EXCLUDED_PREDICTORS`, `COMMODITY_BASKETS`, `NIRNAY_BASKET_ALIAS`) are
+  retained as the routing source the configs are built from, so downstream consumers
+  are untouched. New test suite `research/test_instrument_configs.py` (completeness,
+  defaults-equal-former-globals, routing parity, the India-index copy rule, stock
+  asset-class registration, and per-instrument tuning isolation).
+
+### Removed
+- **The Signal-Horizon selector (Tactical 10d / Positional 20d) is gone —
+  Tattva reads one fixed horizon.** By the system's own walk-forward evidence
+  (`precedent_univ` + `precedent_model`) the leakage-free directional edge lives
+  at 1–10d and fades by 15–20d, so the 20d "Positional" option was a
+  slower-turnover re-expression, not an independent edge; it doubled the
+  Intelligence calibration surface (a second profile per target) and asked the
+  user a question the evidence already answered. `SIGNAL_HORIZONS` /
+  `DEFAULT_SIGNAL_HORIZON` are replaced by flat constants — `FORECAST_HORIZON`
+  (10), `FORECAST_MOMENTUM` (20), `HOLD_HORIZONS` (5/10) — and the convergence
+  DDM now reads the shared `CONV_DDM_*` consensus-filter tuning directly (the
+  per-lens DDM override only ever differed for the removed Positional lens).
+  Behaviour is byte-identical to the previous **default** (Tactical) run: same
+  forecast horizon, momentum window, DDM parameters, calibration grid, and
+  precedent hero read (10d). The Intelligence profile key drops its lens tag
+  (now one profile per target); existing on-disk profiles keyed `"<target> ·
+  Tactical (10d)"` won't match `"<target>"` and recalibrate once on next run.
+  The Precedent tab is unaffected — it already shows the fixed 1/3/5/10/20/60d
+  term structure independent of any lens.
+
+### Changed
+- **Liquid commodity futures now run Nirnay in Swayam self-mode.** Gold, Silver,
+  Copper, Cotton, and Brent Crude are re-classified `TARGET_ARCHETYPE = "self"`,
+  so Nirnay is formulated on each commodity's OWN front-month futures OHLCV (the
+  self-referential timescale × information-set × mechanism ensemble,
+  `engines/nirnay_self.py`) instead of a curated basket of related miners /
+  agribusiness names. The futures carry real yfinance volume, so the MSF
+  microstructure/flow components stay genuine. Nothing downstream changes — the
+  ensemble emits the identical breadth schema the basket did, and the leakage
+  guard (`swayam_macro_columns`) already drops the commodity's own macro column
+  from the self-MMR driver pool. **Two commodity-group targets stay on baskets
+  by data necessity, not preference:** *Jeera* (NCDEX cumin has no yfinance
+  OHLCV — sheet-sourced Close only — so a Swayam ensemble can't be built; keeps
+  its hybrid Indian-agribusiness basket) and *USD/INR* (FX, its own sidebar
+  category and volume-less on yfinance; keeps its dollar-strength proxy basket).
+  The retained `COMMODITY_BASKETS` for the now-self targets are still resolved
+  by `research/nirnay_swayam_study.py` for its self-vs-basket A/B IC comparison.
+  The sidebar shows a "Nirnay · Swayam self-ensemble" hint for these targets.
+- **Precedent analog term structure expanded to a fixed 1/3/5/10/20/60d span,
+  1d promoted to a normal horizon.** The Precedent tab previously showed the
+  active lens's hold grid plus an "honorary" +1d reference tile (so Tactical
+  read 1/5/10d, Positional 1/10/20d), with 1d caveated as "no edge, reference
+  only." It now shows a **fixed, lens-independent** term structure —
+  `PRECEDENT_HORIZONS = (1, 3, 5, 10, 20, 60)` in `core/config.py` — across the
+  base-rate cards, the analog-card forward-return tiles, and the walk-forward
+  **Analog Skill — Term Structure** chart. **1d is now a first-class horizon**
+  (no honorary caveat); where the analog edge is genuinely weak (the 1d and
+  60d ends), the per-horizon walk-forward IC + p-value on the skill chart
+  disclose it honestly rather than a blanket note. The `PRECEDENT_HONORARY_HORIZON`
+  constant is removed. The hero card's precedent second-opinion is unchanged —
+  it still reads the base rate at the active lens's forecast horizon (10d
+  Tactical / 20d Positional, both members of the new set). Because the analog
+  cards now display a 60d column, `find_similar_periods`' Theiler exclusion gap
+  and tail purge widen to 60d for that card set (analogs are drawn ≥60 trading
+  days apart so the 60d outcome column is non-overlapping) — fewer but more
+  genuinely-independent analogs; the per-horizon walk-forward chart is
+  unaffected (it already uses each horizon's own gap).
+
+### Fixed
+- **Individual-stock targets failed with "data is currently unavailable".**
+  `STOCK_TARGETS` tickers were registered into the sidebar (`ALL_TARGETS`)
+  but never added to the macro batch `fetch_commodity_dataset` pulls, so the
+  target's own price column never reached the Aarambh model matrix and the
+  target-column guard in `app.py` failed clean with a misleading "pick
+  another target" message. Fixed with a single-ticker injection path
+  (`data.fetcher.fetch_stock_target_series`, called from
+  `app._ensure_stock_target_column` before the guard) — deliberately NOT a
+  macro-batch addition, since that batch's cache is keyed on `(start, end)`
+  only and a per-target ticker set would break cache coherence. The guard's
+  error copy now distinguishes a genuine stock-fetch failure (names the
+  ticker) from a dead sheet/macro source (unchanged copy).
+
+### Added
+- **Free-form individual-stock symbol entry.** Selecting **India Stocks** /
+  **US Stocks** as the sidebar Asset Class now shows a symbol text box
+  instead of a fixed drop-down. India symbols probe `SYMBOL.NS` (NSE) first,
+  then `SYMBOL.BO` (BSE) — an explicit suffix skips the probe; US symbols are
+  used as typed (`.`→`-`). A resolved symbol registers as a first-class
+  target at runtime (`core.config.register_stock_target`, idempotent —
+  replayed from `st.session_state["dynamic_stock_targets"]` on every rerun)
+  with the same Aarambh predictor-exclusion policy, Nirnay-Swayam self mode,
+  and per-`(target, lens)` calibration as every other target. New
+  `data.universe.resolve_stock_symbol` (7-day disk cache for successful
+  resolutions only — a not-found symbol is session-memoized but never
+  disk-cached, so a transient yfinance outage can't brand it invalid for a
+  week). The `STOCK_TARGETS` static seed registry is now empty (kept for any
+  future pinned defaults); the 7 hard-coded names it used to list are
+  superseded by free-form entry. New test suite
+  `research/test_stock_targets.py` (4 groups: fetch extraction, column
+  injection/alignment, symbol resolution probe order + caching, runtime
+  registration idempotency).
+- **Nirnay-Swayam (स्वयम् — "self")** — a self-referential Nirnay mode for
+  targets with no constituent basket (individual stocks). Instead of
+  cross-sectional breadth over a basket of related instruments, breadth is
+  formulated on the **target's own OHLCV**: a deterministic 15-member
+  ensemble of causal views spanning three diversity axes — timescale (MSF
+  length 10/14/20/28/40), information set (macro-anchored MSF+MMR vs
+  pure-price-action MSF-only), and mechanism (MSF's momentum/structure/flow
+  components promoted to standalone voters). Each member runs through the
+  UNCHANGED per-instrument pipeline (`engines.nirnay.run_full_analysis`) and
+  the UNCHANGED aggregator (`aggregate_constituent_timeseries`), so nothing
+  downstream (polarity, calendar reindex, cross-validator, calibration,
+  precedent, UI) needed to change — only a new instrument-selection mode.
+  New module `engines/nirnay_self.py`; mode resolution via
+  `TARGET_ARCHETYPE == "self"` (`data.constituents.get_nirnay_mode`) —
+  individual stocks register into this archetype via free-form symbol entry
+  (see "Free-form individual-stock symbol entry" above). A leakage
+  guard (`swayam_macro_columns`) drops the target's own macro column from the
+  MMR driver pool — without it, MMR would silently "explain" the target with
+  itself and zero its own deviation oscillator. An eigenvalue-based
+  effective-member-count diagnostic is surfaced in the Nirnay tab to disclose
+  that self-ensemble views are correlated by construction (unlike an
+  independent-name basket). Purpose-preservation invariants (documented in
+  `NIRNAY_SWAYAM_PLAN.md`): no forward-return forecasting inside Nirnay (so
+  Convergence stays a genuine state-read-vs-forecast agreement), strict
+  causality/no-repainting, and byte-identical output for every existing
+  basket-mode target (the only `engines/nirnay.py` change — an optional MSF
+  component mask — reduces to the pre-existing combine formula when unset).
+  Gated on a new A/B efficacy study (`research/nirnay_swayam_study.py`,
+  registered in `run_tuning.py` as `nirnay_swayam`) comparing self-ensemble
+  vs basket-mode breadth IC on targets where both are runnable; the
+  basket-empty → Swayam fallback (`NIRNAY_SWAYAM_FALLBACK`) ships `False`
+  until that study's acceptance gates pass. New integrity tests:
+  `research/test_nirnay_swayam.py` (schema parity, byte-identity, causality/
+  no-repainting, leakage guard, volume degeneracy, determinism).
+
 ---
 
 ## [2.6.0] — 2026-07-13 — *Signal tables · hero decision synthesis · full system re-tune · universe expansion*

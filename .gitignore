@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.DS_Store
+research/.tune_cache/
+research/reports/
+.cache/
+*.log

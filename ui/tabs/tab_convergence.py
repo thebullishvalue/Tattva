@@ -24,22 +24,14 @@ from convergence.normalization import (
 )
 from core.config import (
     rgba,  # centralized chart palette (single source: config._PALETTE_RGB)
+    get_instrument_config, InstrumentConfig,  # per-instrument marker/tier anchors
+    # Marker/tier constants are NOT imported here — they are resolved per-instrument
+    # off get_instrument_config(active_target) at render time (see below).
     COLOR_GREEN,
     COLOR_RED,
     COLOR_AMBER,
     COLOR_CYAN,
     COLOR_MUTED,
-    UI_AGREEMENT_STRONG,
-    UI_AGREEMENT_MODERATE,
-    CONVICTION_STRONG,
-    CONVICTION_MODERATE,
-    UI_NIRNAY_BULLISH,
-    UI_NIRNAY_BEARISH,
-    UI_CONSENSUS_STRONG,
-    UI_CONSENSUS_MODERATE,
-    UI_CONVRAW_STRONG,
-    UI_CONVRAW_MODERATE,
-    UI_NIRNAY_AVG_THRESHOLD,
     UI_CHART_HEIGHT_STACKED,
 )
 
@@ -62,9 +54,10 @@ TOOLTIPS = {
         "vs. oversold. Below -20 = most stocks cheap (bullish); above +20 = most expensive (bearish)."
     ),
     "nirnay_avg": (
-        "Average technical signal across all basket instruments, computed bottom-up from each "
-        "instrument's price action. Negative = net bullish; positive = net bearish. Moves "
-        "slowly and confirms (or contradicts) Aarambh's top-down view."
+        "Average technical signal across the Nirnay bottom-up units — basket constituents, or "
+        "self-ensemble views of the instrument's own price (Swayam self mode). Negative = net "
+        "bullish; positive = net bearish. Moves slowly and confirms (or contradicts) Aarambh's "
+        "top-down view."
     ),
     "agreement": (
         "How often Aarambh and Nirnay point in the same direction. Above 70% = both systems "
@@ -90,6 +83,30 @@ def render_convergence_tab(ts_filtered=None):
     nishkarsh_norm = st.session_state.get("nishkarsh_conv_normalized")
     aarambh_ts = st.session_state.get("aarambh_ts")
     nirnay_daily = st.session_state.get("nirnay_daily")
+    # Nirnay's bottom-up units are basket CONSTITUENTS in basket mode and
+    # self-ensemble VIEWS in Swayam self mode — keep copy accurate for both.
+    _self_mode = st.session_state.get("nirnay_mode") == "self"
+    _units = "views" if _self_mode else "constituents"
+
+    # ── Per-instrument marker / tier anchors ────────────────────────────────
+    # This target's own classification tiers (defaults == the pooled house
+    # convention; a _PER_INSTRUMENT_OVERRIDES entry retunes how THIS target's
+    # already-computed signal is MARKED, not how it's computed). Shadow the
+    # module-global names with per-instrument values for the rest of this render.
+    try:
+        _icfg = get_instrument_config(st.session_state.get("active_target", ""))
+    except KeyError:
+        _icfg = InstrumentConfig()
+    UI_CONSENSUS_STRONG = _icfg.ui_consensus_strong
+    UI_CONSENSUS_MODERATE = _icfg.ui_consensus_moderate
+    UI_CONVRAW_STRONG = _icfg.ui_convraw_strong
+    UI_CONVRAW_MODERATE = _icfg.ui_convraw_moderate
+    UI_NIRNAY_AVG_THRESHOLD = _icfg.ui_nirnay_avg_threshold
+    UI_AGREEMENT_STRONG = _icfg.ui_agreement_strong
+    UI_AGREEMENT_MODERATE = _icfg.ui_agreement_moderate
+    CONVICTION_MODERATE = _icfg.conviction_moderate
+    UI_NIRNAY_BULLISH = _icfg.ui_nirnay_bullish
+    UI_NIRNAY_BEARISH = _icfg.ui_nirnay_bearish
 
     if convergence_df is None or convergence_df.empty:
         st.info("No convergence data available. Run the analysis first.")
@@ -217,11 +234,11 @@ def render_convergence_tab(ts_filtered=None):
         # Mirrors Row 3 of the plot — reads the SAME aligned Nirnay Avg Signal point.
         if has_overlap and len(aligned_nirnay_raw):
             n_avg = float(aligned_nirnay_raw[-1])
-            render_metric_card("NIRNAY AVG SIGNAL", f"{n_avg:.2f}", "Bottom-up constituent momentum",
+            render_metric_card("NIRNAY AVG SIGNAL", f"{n_avg:.2f}", f"Bottom-up {_units[:-1]} momentum",
                                "success" if n_avg < UI_NIRNAY_BULLISH else "danger" if n_avg > UI_NIRNAY_BEARISH else "neutral",
                                tooltip=TOOLTIPS["nirnay_avg"])
         else:
-            render_metric_card("NIRNAY AVG SIGNAL", "N/A", "No constituent data", "neutral")
+            render_metric_card("NIRNAY AVG SIGNAL", "N/A", f"No {_units[:-1]} data", "neutral")
 
     with col4:
         agreement = convergence_df["agreement_ratio"].iloc[-1]
@@ -382,20 +399,25 @@ def render_convergence_tab(ts_filtered=None):
         )
         return
 
-    # Honesty for the carry-forward: when the basket's native data ends before the
-    # latest plotted session (its markets closed / haven't posted), say so — those
-    # trailing breadth points are carried forward, so they're provisional.
+    # Honesty for the carry-forward: when the bottom-up source's native data ends
+    # before the latest plotted session (its market(s) closed / haven't posted),
+    # say so — those trailing breadth points are carried forward, provisional.
+    # In self mode the "source" is the instrument's own OHLCV (self-ensemble
+    # views), not a constituent basket — keep the copy accurate.
     _nn_last = st.session_state.get("nirnay_native_last")
     _plot_last = aligned_dates[-1] if aligned_dates else None
     try:
         if _nn_last is not None and _plot_last is not None \
                 and pd.Timestamp(_nn_last).normalize() < pd.Timestamp(_plot_last).normalize():
+            _src = ("The instrument's own price data" if _self_mode
+                    else "The constituent basket's data")
+            _why = ("the instrument's market is closed or hasn't posted yet" if _self_mode
+                    else "the constituents' markets are closed or haven't posted yet")
             render_info_box(
                 "Breadth carried forward",
-                f"The constituent basket's data ends {pd.Timestamp(_nn_last):%d %b %Y}; later sessions "
-                f"(through {pd.Timestamp(_plot_last):%d %b %Y}) carry its last reads forward — the "
-                f"constituents' markets are closed or haven't posted yet, so bottom-up breadth on those "
-                f"bars is provisional.",
+                f"{_src} ends {pd.Timestamp(_nn_last):%d %b %Y}; later sessions "
+                f"(through {pd.Timestamp(_plot_last):%d %b %Y}) carry its last reads forward — {_why}, "
+                f"so bottom-up breadth on those bars is provisional.",
                 color="amber",
             )
     except Exception:

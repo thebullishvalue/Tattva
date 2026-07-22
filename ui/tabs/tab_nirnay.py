@@ -23,12 +23,12 @@ from ui.theme import chart_layout, style_axes
 from ui.components import (render_metric_card, render_section_header, render_control_hint,
                            section_gap, render_data_table)
 from core.config import (
+    get_instrument_config, InstrumentConfig,  # per-instrument breadth tier
     rgba,  # centralized chart palette (single source: config._PALETTE_RGB)
     COLOR_GREEN,
     COLOR_RED,
     COLOR_AMBER,
     COLOR_MUTED,
-    UI_BREADTH_HIGH,
     UI_CHART_HEIGHT_MEDIUM,
     UI_CHART_HEIGHT_LARGE,
 )
@@ -40,6 +40,10 @@ AMBER = COLOR_AMBER
 SLATE = COLOR_MUTED
 
 # ── Tooltip definitions ────────────────────────────────────────────────────
+# Two variants — BASKET (cross-sectional constituents) and SELF (Nirnay-Swayam
+# views of the target's own OHLCV) — selected in render_nirnay_tab by
+# nirnay_mode. Wording is the only difference; the underlying stats are the
+# same schema either way.
 TOOLTIPS = {
     "oversold_pct": (
         "Share of basket instruments whose MSF and MMR oscillators are in the oversold zone. "
@@ -60,6 +64,34 @@ TOOLTIPS = {
     "sell_signals": (
         "Count of constituents where the unified oscillator crossed from overbought into neutral, "
         "triggering a regime-change sell signal. More sell signals = broader distribution pressure."
+    ),
+    "trading_days": (
+        "Number of trading days in the Nirnay lookback window. "
+        "Longer histories produce more stable regime estimates and HMM calibration."
+    ),
+}
+
+TOOLTIPS_SELF = {
+    "oversold_pct": (
+        "Share of Swayam views (timescale/information-set/mechanism reads of the target's OWN "
+        "OHLCV) whose MSF and MMR oscillators are in the oversold zone. Above 60% often precedes "
+        "short-term bounce opportunities."
+    ),
+    "overbought_pct": (
+        "Share of Swayam views whose MSF and MMR oscillators are in the overbought zone. "
+        "Above 60% signals elevated pullback risk."
+    ),
+    "avg_signal": (
+        "Mean of the unified oscillator (MSF + MMR) across all Swayam views. "
+        "Below -2 = broad bullish pressure; above +2 = broad bearish pressure; near zero = mixed."
+    ),
+    "buy_signals": (
+        "Count of views where the unified oscillator crossed from oversold into neutral, "
+        "triggering a regime-change buy signal. More = broader multi-scale reversal agreement."
+    ),
+    "sell_signals": (
+        "Count of views where the unified oscillator crossed from overbought into neutral, "
+        "triggering a regime-change sell signal. More = broader multi-scale distribution agreement."
     ),
     "trading_days": (
         "Number of trading days in the Nirnay lookback window. "
@@ -194,10 +226,23 @@ def _render_avg_unified_signal_chart(df_n, dates):
     st.plotly_chart(fig_n, width='stretch', key="nirnay_avg_signal")
 
 
-def _render_individual_constituents(nirnay_constituent_dfs):
-    """Section: Individual Constituents — per-stock oscillator and regime."""
+def _render_individual_constituents(nirnay_constituent_dfs, is_self_mode: bool = False):
+    """Section: Individual Constituents — per-stock oscillator and regime.
+
+    In self mode the drop-down lists Swayam VIEWS in member-grid order
+    (timescale groups stay adjacent — L10·FULL next to L10·PRICE, not
+    scattered by alphabetical sort) instead of alphabetically.
+    """
     if nirnay_constituent_dfs:
-        sym = st.selectbox("Select Symbol", sorted(nirnay_constituent_dfs.keys()), key="nirnay_sym_select")
+        if is_self_mode:
+            from engines.nirnay_self import SWAYAM_MEMBER_ORDER
+            keys = [k for k in SWAYAM_MEMBER_ORDER if k in nirnay_constituent_dfs]
+            keys += sorted(k for k in nirnay_constituent_dfs if k not in SWAYAM_MEMBER_ORDER)
+            label = "Select View"
+        else:
+            keys = sorted(nirnay_constituent_dfs.keys())
+            label = "Select Symbol"
+        sym = st.selectbox(label, keys, key="nirnay_sym_select")
         if sym and sym in nirnay_constituent_dfs:
             cdf = nirnay_constituent_dfs[sym].iloc[-100:].copy()
             if isinstance(cdf.columns, pd.MultiIndex):
@@ -241,19 +286,37 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
     )
     nirnay_daily = st.session_state.get("nirnay_daily")
     nirnay_constituent_dfs = st.session_state.get("nirnay_constituent_dfs", {})
+    is_self_mode = st.session_state.get("nirnay_mode") == "self"
+    tooltips = TOOLTIPS_SELF if is_self_mode else TOOLTIPS
 
     if nirnay_daily is None or nirnay_daily.empty:
         st.info("No Nirnay constituent data available.")
         return
 
-    # Basket source hint — only when it's a degraded fallback (live scrape +
-    # cache both failed). A "snapshot (N)" basket for an uncapped large index
-    # (S&P 500/Nasdaq 100) is a small fraction of the true constituent set,
-    # so breadth below reflects that partial basket, not the full index
-    # (audit finding B4 — this was previously console-only).
-    _basket_src = st.session_state.get("nirnay_basket_source", "")
-    if _basket_src.startswith("snapshot") or _basket_src.startswith("stale"):
-        render_control_hint(f"Basket source: {_basket_src} · live resolution unavailable, using fallback")
+    if is_self_mode:
+        # NIRNAY · SWAYAM disclosure (NIRNAY_SWAYAM_PLAN.md §6.4): the basket
+        # source line becomes the swayam src_msg naturally (set in app.py);
+        # append the honest correlation caveat — self-ensemble views share
+        # one price series, so this reads breadth across independent CAUSAL
+        # ANGLES on the target, not independent cross-sectional names.
+        _n_eff = st.session_state.get("nirnay_swayam_n_eff")
+        _n_members = len(nirnay_constituent_dfs)
+        _eff_txt = f" · ~{_n_eff:.1f} effective" if _n_eff is not None else ""
+        render_control_hint(
+            f"NIRNAY · SWAYAM — {_n_members} views{_eff_txt} — self-referential "
+            "ensemble (timescale × information-set × mechanism reads of the "
+            "target's own OHLCV). Views share one price series; breadth here "
+            "is multi-scale agreement, not cross-sectional independence."
+        )
+    else:
+        # Basket source hint — only when it's a degraded fallback (live scrape +
+        # cache both failed). A "snapshot (N)" basket for an uncapped large index
+        # (S&P 500/Nasdaq 100) is a small fraction of the true constituent set,
+        # so breadth below reflects that partial basket, not the full index
+        # (audit finding B4 — this was previously console-only).
+        _basket_src = st.session_state.get("nirnay_basket_source", "")
+        if _basket_src.startswith("snapshot") or _basket_src.startswith("stale"):
+            render_control_hint(f"Basket source: {_basket_src} · live resolution unavailable, using fallback")
 
     # ── Normalize columns ───────────────────────────────────────────────
     df_n = nirnay_daily[~nirnay_daily.index.duplicated(keep="last")].copy()
@@ -298,38 +361,49 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
 
     dates = list(df_n.index)
 
+    # Word substitution for self mode: "basket"/"constituents"/"stocks"/
+    # "names" → "views" (NIRNAY_SWAYAM_PLAN.md §6.4) — the underlying schema
+    # is identical, only the noun for "what's being counted" changes.
+    _unit = "views" if is_self_mode else "basket"
+    _unit_of = "of views" if is_self_mode else "of basket"
+    _plural = "views" if is_self_mode else "constituents"
+
     # ── Phase 1: STATE — metric cards ──────────────────────────────────
+    try:   # per-instrument breadth-alert tier (shadow module global)
+        UI_BREADTH_HIGH = get_instrument_config(st.session_state.get("active_target", "")).ui_breadth_high
+    except KeyError:
+        UI_BREADTH_HIGH = InstrumentConfig().ui_breadth_high
     c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
     with c1:
         v = df_n["Oversold_Pct"].iloc[-1]
-        render_metric_card("OVERSOLD INSTRUMENTS", f"{v:.0f}%", "of basket", "success" if v > UI_BREADTH_HIGH else "neutral",
-                           tooltip=TOOLTIPS["oversold_pct"])
+        render_metric_card("OVERSOLD INSTRUMENTS", f"{v:.0f}%", _unit_of, "success" if v > UI_BREADTH_HIGH else "neutral",
+                           tooltip=tooltips["oversold_pct"])
     with c2:
         v = df_n["Overbought_Pct"].iloc[-1]
-        render_metric_card("OVERBOUGHT INSTRUMENTS", f"{v:.0f}%", "of basket", "danger" if v > UI_BREADTH_HIGH else "neutral",
-                           tooltip=TOOLTIPS["overbought_pct"])
+        render_metric_card("OVERBOUGHT INSTRUMENTS", f"{v:.0f}%", _unit_of, "danger" if v > UI_BREADTH_HIGH else "neutral",
+                           tooltip=tooltips["overbought_pct"])
     with c3:
         v = df_n["Avg_Signal"].iloc[-1]
         render_metric_card("AVG UNIFIED SIGNAL", f"{v:.2f}", "<-2 bullish · >+2 bearish", "success" if v < -2 else "danger" if v > 2 else "neutral",
-                           tooltip=TOOLTIPS["avg_signal"])
+                           tooltip=tooltips["avg_signal"])
     with c4:
         v = int(df_n["Buy_Signals"].iloc[-1])
         render_metric_card("BUY SIGNALS", str(v), "Oversold-to-neutral crosses", "success" if v > 0 else "neutral",
-                           tooltip=TOOLTIPS["buy_signals"])
+                           tooltip=tooltips["buy_signals"])
     with c5:
         v = int(df_n["Sell_Signals"].iloc[-1])
         render_metric_card("SELL SIGNALS", str(v), "Overbought-to-neutral crosses", "danger" if v > 0 else "neutral",
-                           tooltip=TOOLTIPS["sell_signals"])
+                           tooltip=tooltips["sell_signals"])
     with c6:
         render_metric_card("LOOKBACK WINDOW", str(len(df_n)), "Trading days", "info",
-                           tooltip=TOOLTIPS["trading_days"])
+                           tooltip=tooltips["trading_days"])
 
     section_gap()
 
     # ── Phase 2: REGIME ────────────────────────────────────────────────
     render_section_header(
         "HMM State Probabilities",
-        "Basket-average probability of a bull vs bear regime (mean of per-constituent HMM states). P > 0.5 = regime confidence. Frequent crossings = uncertainty.",
+        f"{_unit.capitalize()}-average probability of a bull vs bear regime (mean of per-{_plural[:-1]} HMM states). P > 0.5 = regime confidence. Frequent crossings = uncertainty.",
         icon="eye",
         accent="violet",
     )
@@ -340,7 +414,7 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
     # ── Phase 3: COMPOSITION ───────────────────────────────────────────
     render_section_header(
         "Zone Distribution Over Time",
-        "Daily share of basket instruments oversold vs overbought. Rising oversold = accumulation setup. Rising overbought = distribution risk.",
+        f"Daily share of {_plural} oversold vs overbought. Rising oversold = accumulation setup. Rising overbought = distribution risk.",
         icon="layers",
         accent="emerald",
     )
@@ -350,7 +424,7 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
 
     render_section_header(
         "Raw Zone Counts",
-        "Raw count of constituents per regime zone.",
+        f"Raw count of {_plural} per regime zone.",
         icon="bar-chart",
         accent="cyan",
     )
@@ -361,7 +435,7 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
     # ── Phase 4: SIGNALS ───────────────────────────────────────────────
     render_section_header(
         "Signal Counts Over Time",
-        "Daily regime-change signal count. Clusters across basket instruments often precede target reversals.",
+        f"Daily regime-change signal count. Clusters across {_plural} often precede target reversals.",
         icon="zap",
         accent="rose",
     )
@@ -380,8 +454,11 @@ def render_nirnay_tab(selected_tf: str | None = None) -> None:
 
     # ── Phase 5: DRILL-DOWN ────────────────────────────────────────────
     render_section_header(
-        "Individual Constituents",
-        "Per-stock MSF, MMR, unified signal, and regime. Verify index-level signals are backed by individual names.",
+        "Individual Views" if is_self_mode else "Individual Constituents",
+        ("Per-view MSF, MMR, unified signal, and regime. Verify the ensemble's "
+         "breadth read is backed by individual causal angles on the target."
+         if is_self_mode else
+         "Per-stock MSF, MMR, unified signal, and regime. Verify index-level signals are backed by individual names."),
         icon="database",
     )
-    _render_individual_constituents(nirnay_constituent_dfs)
+    _render_individual_constituents(nirnay_constituent_dfs, is_self_mode=is_self_mode)

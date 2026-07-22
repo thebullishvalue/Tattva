@@ -4,7 +4,7 @@ Tattva — Precedent view (historical analog matching + forward returns + backte
 Ports Arthagati's Similar-Periods view: covariance-aware Mahalanobis analog cards,
 a forward-return base-rate summary, and a descriptive state→forward-return
 backtest. Inputs are Tattva's engine.ts_data state features; forward-return
-horizons follow the active Signal-Horizon lens.
+horizons are a fixed term structure (core.config.PRECEDENT_HORIZONS).
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from analytics.analogs import (
     analog_skill_by_horizon,
 )
 from core.config import (
-    PRECEDENT_HONORARY_HORIZON,
     COLOR_GREEN, COLOR_RED, COLOR_GOLD, COLOR_CYAN, COLOR_MUTED,
 )
 from ui.components import (
@@ -75,7 +74,7 @@ def _render_period_card(period: dict, target: str, hold_horizons: tuple[int, ...
 
     fwd = period["fwd"]
     fwd_tiles = "".join(_render_fwd_tile(int(h), fwd.get(int(h))) for h in hold_horizons)
-    # Grid adapts to the lens hold count (2 for the finalized lenses) so tiles fill
+    # Grid adapts to the horizon count (6 for PRECEDENT_HORIZONS) so tiles fill
     # the row instead of left-packing into the legacy 4-column track.
     grid_style = f"grid-template-columns:repeat({max(1, len(hold_horizons))},1fr);"
 
@@ -147,17 +146,17 @@ def render_precedent_tab(
     computing it here exactly as before.
     """
 
-    # Display horizons = the lens hold grid + an honorary +1d reference tile (the
-    # analog has no edge at 1d; shown with a caveat, NOT part of calibration).
-    if PRECEDENT_HONORARY_HORIZON is not None and PRECEDENT_HONORARY_HORIZON not in hold_horizons:
-        display_hold = tuple(sorted(set((PRECEDENT_HONORARY_HORIZON,) + tuple(hold_horizons))))
-    else:
-        display_hold = tuple(hold_horizons)
+    # Display horizons = the FIXED precedent term structure passed in by app.py
+    # (core.config.PRECEDENT_HORIZONS = 1/3/5/10/20/60d), horizon-independent. 1d is
+    # a normal member here — the former "honorary" caveat is gone; the
+    # Analog-Skill walk-forward chart below discloses per-horizon edge (incl.
+    # where 1d/60d are weak) honestly via IC + p-value rather than a blanket note.
+    display_hold = tuple(hold_horizons)
 
     render_section_header(
         title="Similar Historical Periods",
         description=(f"Covariance-aware Mahalanobis state-matching · forward {active_target} "
-                     f"returns from each analog · lens horizons {'/'.join(str(h) for h in hold_horizons)}d"),
+                     f"returns from each analog · term structure {'/'.join(str(h) for h in display_hold)}d"),
         icon="compass",
         accent="emerald",
     )
@@ -178,15 +177,13 @@ def render_precedent_tab(
     if summary:
         cols = st.columns(len(summary), gap="small")
         for col, (h, s) in zip(cols, summary.items()):
-            _hon = (h == PRECEDENT_HONORARY_HORIZON)
             with col:
                 render_metric_card(
-                    label=f"+{h}D Median Return" + ("  · honorary" if _hon else ""),
+                    label=f"+{h}D Median Return",
                     value=f"{s['median']:+.1f}%",
-                    subtext=("reference only — no edge at 1d" if _hon
-                             else f"{s['positive_pct']:.0f}% positive ({s['n']} analogs)"),
-                    color_class="neutral" if _hon else ("success" if s["median"] > 0 else "danger"),
-                    icon="help-circle" if _hon else ("trending-up" if s["median"] > 0 else "trending-down"),
+                    subtext=f"{s['positive_pct']:.0f}% positive ({s['n']} analogs)",
+                    color_class="success" if s["median"] > 0 else "danger",
+                    icon="trending-up" if s["median"] > 0 else "trending-down",
                 )
 
     render_interpretation_card(
@@ -204,13 +201,14 @@ def render_precedent_tab(
 
     section_gap()
 
-    # ── Analog SKILL — term structure across ALL lens horizons ──────────────
+    # ── Analog SKILL — term structure across ALL precedent horizons ─────────
     # The base-rate cards above are a *snapshot* (today's analog pool). This
     # asks the harder, walk-forward question at EVERY horizon at once: across
     # history, how well did the analog matcher's prediction track what actually
-    # happened +Hd later? Reading the whole term structure (not just the lens
-    # horizon) shows WHERE the analog has edge — often it is stronger at one
-    # horizon and absent at another. Cached per config (O(n·grid·|H|)).
+    # happened +Hd later? Reading the whole term structure (1/3/5/10/20/60d)
+    # shows WHERE the analog has edge — typically strongest at ~10-20d and
+    # fading at the 1d and 60d ends, which the per-horizon IC/p-value below
+    # discloses honestly. Cached per config (O(n·grid·|H|)).
     _askk = (f"analog_skill::{active_target}|{'/'.join(map(str, hold_horizons))}|"
              f"{mom_window}|{len(ts)}|"
              f"{float(pd.to_numeric(ts['Price'], errors='coerce').iloc[-1]):.6g}")
@@ -230,7 +228,7 @@ def render_precedent_tab(
     if _scored:
         render_section_header(
             title="Analog Skill — Term Structure",
-            description=("Walk-forward IC (predicted vs realized) at each lens horizon — "
+            description=("Walk-forward IC (predicted vs realized) at each horizon (1→60d) — "
                          "the analog matcher's forward skill is NOT one number; it varies "
                          "by holding period. Bars = rank IC; hover for hit-rate and n."),
             icon="bar-chart",
@@ -254,17 +252,17 @@ def render_precedent_tab(
         style_axes(_fig_ts, y_title="Walk-forward IC (Spearman)", x_title="Holding horizon")
         st.plotly_chart(_fig_ts, width='stretch', key="analog_skill_term_structure")
 
-        # Plain-language read: best horizon + whether the lens horizon is where
-        # the edge actually lives.
+        # Plain-language read: best horizon + whether the forecast horizon is
+        # where the edge actually lives.
         _best_h = max(_scored, key=lambda h: _scored[h]["ic"])
         _best = _scored[_best_h]
         _lens_note = ""
         if fwd_horizon in _scored and _best_h != fwd_horizon:
-            _lens_note = (f" The active lens ({fwd_horizon}d, IC "
+            _lens_note = (f" The forecast horizon ({fwd_horizon}d, IC "
                           f"{_scored[fwd_horizon]['ic']:+.2f}) is NOT the strongest — "
                           f"the analog edge concentrates at {_best_h}d.")
         elif fwd_horizon in _scored:
-            _lens_note = f" The active lens ({fwd_horizon}d) is also the strongest horizon."
+            _lens_note = f" The forecast horizon ({fwd_horizon}d) is also the strongest horizon."
         st.caption(
             f"Strongest at +{_best_h}d: IC {_best['ic']:+.2f} (p={_best['pval']:.3f}), "
             f"hit-rate {_best['hit']:.0f}% over {_best['n']} non-overlapping windows.{_lens_note} "
@@ -274,7 +272,7 @@ def render_precedent_tab(
 
     # ── Analog prediction history: predicted vs realized over time ──────────
     # The term structure above is the SUMMARY; this is the DETAIL for the active
-    # lens horizon — what the matcher would have predicted at each PAST as-of
+    # forecast horizon — what the matcher would have predicted at each PAST as-of
     # date, using only information available then (candidate outcomes completed
     # by the as-of date, warm-up excluded, pool-only median cleaning — see
     # analytics.analogs.analog_prediction_series). Strided every `fwd_horizon`
@@ -283,7 +281,7 @@ def render_precedent_tab(
     # each rerun, and this is an O(n·grid) computation worth doing once.
     # Reuse the walk-forward the term structure already ran for this horizon
     # (identical parameters) instead of recomputing it; only fall back to a
-    # standalone compute if the lens horizon wasn't in the skill grid.
+    # standalone compute if the forecast horizon wasn't in the skill grid.
     _pred_df = None
     if fwd_horizon in _skill:
         _pred_df = _skill[fwd_horizon].get("df")
@@ -499,7 +497,7 @@ def render_precedent_tab(
             f"<span style='color:var(--ink-tertiary);'>In-sample (70%): Pearson {tr_p:.2f} · "
             f"Spearman {tr_s:.2f}</span><br><br>"
             "The extension→return link may be non-linear (see the quadratic curve, when shown), "
-            "stronger at a different lens horizon, or the test split (n above) may simply be "
+            "stronger at a different horizon, or the test split (n above) may simply be "
             "too small to detect a real but modest effect."
         )
         render_interpretation_card("Weak Out-of-Sample Fit", body, color="warning")

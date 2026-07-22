@@ -55,7 +55,6 @@ def render_data_tab(ts_filtered, ts, active_target):
     filtered_df = display_df.copy()
     if date_range_option != "All" and "Date" in filtered_df.columns:
         try:
-            from pandas import DateOffset
             max_date = pd.to_datetime(filtered_df["Date"]).max()
             offsets = {"Last 30": 30, "Last 90": 90, "Last 180": 180, "Last 365": 365}
             cutoff = max_date - pd.Timedelta(days=offsets[date_range_option])

@@ -24,7 +24,6 @@ import streamlit as st
 from ui.theme import chart_layout, style_axes
 from ui.components import (
     render_metric_card,
-    render_info_box,
     render_interpretation_card,
     render_section_header,
     section_gap,
@@ -38,13 +37,11 @@ from core.config import (
     COLOR_CYAN,
     COLOR_PURPLE,
     COLOR_MUTED,
-    CONVICTION_STRONG,
-    CONVICTION_MODERATE,
-    UI_BREADTH_HIGH,
+    get_instrument_config, InstrumentConfig,  # per-instrument display tiers (resolved
+    # at render via _active_tiers(); conviction/breadth/model-spread tiers are NOT
+    # imported as module globals — they're read off the active instrument's config).
     UI_R2_STRONG,
     UI_R2_ACCEPTABLE,
-    UI_MODEL_SPREAD_LOW,
-    UI_MODEL_SPREAD_HIGH,
     UI_CHART_HEIGHT_MEDIUM,
     UI_CHART_HEIGHT_XLARGE,
     UI_CHART_HEIGHT_SMALL,
@@ -109,6 +106,18 @@ TOOLTIPS = {
         "conviction is high)."
     ),
 }
+
+
+def _active_tiers() -> InstrumentConfig:
+    """This render's instrument config — per-instrument display tiers (conviction /
+    breadth / model-spread), resolved from the active target with a defaults
+    fallback. Sub-render helpers call this and shadow the module-global tier names
+    with per-instrument values, so a _PER_INSTRUMENT_OVERRIDES entry retunes how
+    THIS target's already-computed signal is displayed."""
+    try:
+        return get_instrument_config(st.session_state.get("active_target", ""))
+    except KeyError:
+        return InstrumentConfig()
 
 
 def _conviction_colors(values):
@@ -211,6 +220,9 @@ def _render_ddm_conviction_chart(ts_filtered, x_axis, signal, is_forward=False):
 
     # Interpretation card
     cv = signal["conviction_score"]
+    _t = _active_tiers()   # per-instrument conviction tiers (shadow module globals)
+    CONVICTION_STRONG = _t.conviction_strong
+    CONVICTION_MODERATE = _t.conviction_moderate
 
     if is_forward:
         if cv > CONVICTION_STRONG:
@@ -295,6 +307,7 @@ def _render_ddm_conviction_chart(ts_filtered, x_axis, signal, is_forward=False):
 
 def _render_market_breadth_chart(ts_filtered, x_axis):
     """Section: Market Breadth — oversold/overbought zone convergence."""
+    UI_BREADTH_HIGH = _active_tiers().ui_breadth_high   # per-instrument breadth-alert tier
     fig_zones = go.Figure()
     fig_zones.add_trace(go.Scatter(
         x=x_axis, y=ts_filtered["OversoldBreadth"],
@@ -322,6 +335,7 @@ def _render_market_state_cards(signal, regime_stats, ts, is_forward=False):
     latter only applies in relative-value (cumulative_residual) mode, which
     the shipped app never runs (see the audit's E3 finding).
     """
+    UI_BREADTH_HIGH = _active_tiers().ui_breadth_high   # per-instrument breadth-alert tier
     c1, c2, c3 = st.columns(3)
     with c1:
         render_metric_card(
@@ -411,6 +425,8 @@ def _render_model_quality_cards(model_stats, signal, is_forward=False):
     reverting spread. So those two cards are swapped for the calibration's
     out-of-sample **Val IC** (the real edge metric) and **Train IC**.
     """
+    _t = _active_tiers()   # per-instrument model-spread tiers (shadow module globals)
+    UI_MODEL_SPREAD_LOW, UI_MODEL_SPREAD_HIGH = _t.ui_model_spread_low, _t.ui_model_spread_high
     q1, q2, q3, q4 = st.columns(4)
     with q1:
         r2 = model_stats["r2_oos"]

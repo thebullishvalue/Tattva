@@ -35,11 +35,15 @@ from analytics.utils import sigmoid as _sigmoid, zscore_clipped as _zscore_clipp
 # ─── Market Strength Factor ──────────────────────────────────────────────────
 
 
+_MSF_COMPONENT_NAMES = ("momentum", "structure", "flow")
+
+
 def calculate_msf(
     df: pd.DataFrame,
     length: int = 20,
     roc_len: int = 14,
     clip: float = 3.0,
+    components: tuple[str, ...] | None = None,
 ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
     """Calculate Market Strength Factor from OHLCV data.
 
@@ -49,6 +53,12 @@ def calculate_msf(
     - **Trend**: Multi-timeframe composite (trend diff + momentum accel
       + volume-adjusted momentum + mean reversion)
     - **Flow**: Accumulation/distribution ratio + regime counting
+
+    ``components`` optionally restricts the final combine to a subset of
+    ``("momentum", "structure", "flow")`` — used by the Nirnay-Swayam
+    self-ensemble (engines/nirnay_self.py) to promote a single mechanism to
+    a standalone voter. ``None`` (default) combines all three and is
+    byte-identical to the pre-mask behaviour.
 
     Returns
     -------
@@ -107,12 +117,22 @@ def calculate_msf(
     regime_z = _zscore_clipped(regime_raw, length, clip)
     regime_norm = _sigmoid(regime_z, 1.5)
 
-    # Combine
-    osc_momentum = momentum_norm
-    osc_structure = (micro_norm + composite_trend_norm) / np.sqrt(2.0)
-    osc_flow = (accum_norm + regime_norm) / np.sqrt(2.0)
-    msf_raw = (osc_momentum + osc_structure + osc_flow) / np.sqrt(3.0)
-    msf_signal = _sigmoid(msf_raw * np.sqrt(3.0), 1.0)
+    # Combine — optionally restricted to a component subset (Nirnay-Swayam
+    # mechanism-isolated members). ``components=None`` uses all three, and
+    # the √3/√3 scaling below reduces to exactly the pre-mask formula.
+    osc_parts = {
+        "momentum": momentum_norm,
+        "structure": (micro_norm + composite_trend_norm) / np.sqrt(2.0),
+        "flow": (accum_norm + regime_norm) / np.sqrt(2.0),
+    }
+    active_names = components if components is not None else _MSF_COMPONENT_NAMES
+    unknown = set(active_names) - set(_MSF_COMPONENT_NAMES)
+    if unknown:
+        raise ValueError(f"Unknown MSF component(s): {sorted(unknown)}")
+    active = [osc_parts[name] for name in active_names]
+    n_active = float(len(active))
+    msf_raw = sum(active) / np.sqrt(n_active)
+    msf_signal = _sigmoid(msf_raw * np.sqrt(n_active), 1.0)
 
     return msf_signal, micro_norm, momentum_norm, accum_norm
 
@@ -277,6 +297,7 @@ def run_full_analysis(
     oversold: float = -5.0,
     overbought: float = 5.0,
     macro_columns: list[str] | None = None,
+    components: tuple[str, ...] | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     """Run the complete Nirnay pipeline on a single stock DataFrame.
 
@@ -287,6 +308,9 @@ def run_full_analysis(
     3. Blend signals with agreement multiplier
     4. Classify conditions (Oversold/Overbought/Neutral)
     5. Run regime intelligence loop (Kalman → GARCH → HMM → CUSUM)
+
+    ``components`` is forwarded to :func:`calculate_msf` (``None`` — the
+    default — is byte-identical to the pre-mask MSF combine).
     """
     if macro_columns is None:
         macro_columns = []
@@ -294,7 +318,7 @@ def run_full_analysis(
     # Compute MSF + MMR as locals, then attach in a single concat. Inserting
     # the six columns one-by-one into the (wide, 100+ macro) frame triggers
     # pandas' "highly fragmented DataFrame" PerformanceWarning on every stock.
-    msf, micro, momentum, flow = calculate_msf(df, length, roc_len)
+    msf, micro, momentum, flow = calculate_msf(df, length, roc_len, components=components)
     mmr, drivers, mmr_quality = calculate_mmr(
         df, length, num_vars=num_vars, macro_columns=macro_columns
     )

@@ -3,9 +3,17 @@ Tattva — FairValueEngine: walk-forward ensemble regression for forward-return 
 तत्त्व (Tattva) — "Principle / Essence"
 
 AARAMBH — Walk-forward ensemble that forecasts the target's forward return from
-trailing macro momentum (any target: commodity, FX, or equity index), with causal
-PCA, rolling robust-quantile z-scores, and DDM filtering. Out-of-sample skill is
-graded by rank IC.
+trailing macro momentum (any target: commodity, FX, equity index, or individual
+stock), with causal PCA, rolling robust-quantile z-scores, and DDM filtering.
+Out-of-sample skill is graded by rank IC.
+
+PER-INSTRUMENT TUNABLE: the training knobs (refit interval, min/max train window,
+ensemble members, ridge alphas, huber epsilon, lookback windows, PCA components)
+default to the global config constants but are overridden per fit when an
+InstrumentConfig is passed via ``fit(config=…)`` — so the forecast is tuned per
+instrument / asset class exactly like the Nirnay and Swayam breadth engines.
+Every knob is read into a per-run ``self.*`` attribute (see fit()); the module
+constants are only the fallback defaults.
 
 Imports math primitives from analytics.* instead of inline definitions.
 No Streamlit dependency.
@@ -14,13 +22,11 @@ No Streamlit dependency.
 from __future__ import annotations
 
 import logging
-import time
 import warnings
 from typing import Callable
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 from core.config import (
     LOOKBACK_WINDOWS,
@@ -50,12 +56,11 @@ except ImportError:
     _HAS_STATSMODELS = False
 
 try:
-    import inspect as _inspect
     import sklearn
     from sklearn.decomposition import PCA
     from sklearn.linear_model import ElasticNetCV, HuberRegressor, LinearRegression, RidgeCV
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     from sklearn.preprocessing import StandardScaler
+    # sklearn.metrics (r2/mae/mse) are imported locally where scored (see _compute_model_stats).
     _HAS_SKLEARN = True
     # Fastest EXACT PCA solver. "covariance_eigh" (sklearn ≥ 1.5) forms the p×p
     # covariance and eigendecomposes it — bit-identical components to a full SVD
@@ -138,6 +143,16 @@ class FairValueEngine:
         self.model_spread: np.ndarray = np.array([])
         self.residuals: np.ndarray = np.array([])
         self.price: np.ndarray | None = None
+        # Per-instrument training knobs — default to the global config constants;
+        # fit() overrides any that are passed (from the instrument's InstrumentConfig).
+        # Every reference below uses self.* so a per-instrument override takes effect.
+        self.min_train_size: int = int(MIN_TRAIN_SIZE)
+        self.max_train_size: int = int(MAX_TRAIN_SIZE)
+        self.refit_interval: int = int(REFIT_INTERVAL)
+        self.ensemble_models: tuple = tuple(ENSEMBLE_MODELS)
+        self.ridge_alphas: tuple = tuple(RIDGE_ALPHAS)
+        self.huber_epsilon: float = float(HUBER_EPSILON)
+        self.lookback_windows: tuple = tuple(LOOKBACK_WINDOWS)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -153,8 +168,16 @@ class FairValueEngine:
         purge: int = 0,
         label_mask: np.ndarray | None = None,
         price: np.ndarray | None = None,
+        config: "object | None" = None,
     ) -> "FairValueEngine":
         """Run the full walk-forward pipeline.
+
+        config: an optional InstrumentConfig (or any object exposing the
+            aarambh_* fields). When given, its per-instrument training knobs
+            (refit/min/max-train, ensemble, ridge alphas, huber epsilon, lookback
+            windows) override the global-constant defaults for THIS fit, so the
+            forecast engine is tuned per instrument exactly like Nirnay/Swayam.
+            Any field it lacks falls back to the global default.
 
         cumulative_residual: when True (relative-value returns mode), the
             per-period residual is replaced by its running sum — a synthetic
@@ -185,8 +208,6 @@ class FairValueEngine:
             Optional and only required for forward_signal mode; other modes
             keep using cumsum(y), where y genuinely is a per-period return.
         """
-        start_time = time.time()
-
         self.feature_names = feature_names or [f"X{i}" for i in range(X.shape[1])]
         self.n_samples = len(y)
         self.y = y.copy()
@@ -196,6 +217,19 @@ class FairValueEngine:
         self.purge = max(0, int(purge))
         self.label_mask = label_mask  # shape (n_samples,) bool — False for zero-filled tail rows
         self.price = np.asarray(price, dtype=np.float64) if price is not None else None
+
+        # Per-instrument training knobs: adopt from the passed InstrumentConfig
+        # (falling back to the global-constant defaults set in __init__). This is
+        # what makes Aarambh tunable per instrument / asset class, like the Nirnay
+        # (nirnay_*) and Swayam (swayam_*) knobs already are.
+        if config is not None:
+            self.min_train_size = int(getattr(config, "aarambh_min_train_size", self.min_train_size))
+            self.max_train_size = int(getattr(config, "aarambh_max_train_size", self.max_train_size))
+            self.refit_interval = int(getattr(config, "aarambh_refit_interval", self.refit_interval))
+            self.ensemble_models = tuple(getattr(config, "aarambh_ensemble_models", self.ensemble_models))
+            self.ridge_alphas = tuple(getattr(config, "aarambh_ridge_alphas", self.ridge_alphas))
+            self.huber_epsilon = float(getattr(config, "aarambh_huber_epsilon", self.huber_epsilon))
+            self.lookback_windows = tuple(getattr(config, "aarambh_lookback_windows", self.lookback_windows))
 
         # Detect structural breaks. This runs on the FULL series (including
         # forward-looking label information near the tail in forward_signal
@@ -340,7 +374,7 @@ class FairValueEngine:
         """Forward change analysis with significance testing."""
         ts = self.ts_data
         results = {}
-        burn_in = max(MIN_TRAIN_SIZE + 50, 80)
+        burn_in = max(self.min_train_size + 50, 80)
 
         for period in (5, 10, 20):
             buy_changes: list[float] = []
@@ -407,17 +441,17 @@ class FairValueEngine:
         # the (degenerate, tuning-sweep) case MIN > MAX the window can reach MIN — and
         # `global_weights[-n_samples:]` must still have n_samples elements, else the
         # sample_weight length mismatches X_train and the Ridge/PCA-OLS fits fail.
-        _wf_window = max(int(MAX_TRAIN_SIZE), int(MIN_TRAIN_SIZE))
+        _wf_window = max(int(self.max_train_size), int(self.min_train_size))
         global_weights = np.exp(-decay_rate * np.arange(_wf_window - 1, -1, -1))
         # We use the configured REFIT_INTERVAL (e.g. 21 days / 1 month)
         # which drastically speeds up the walk-forward vs refitting every few days.
-        dynamic_refit = max(1, int(REFIT_INTERVAL))
+        dynamic_refit = max(1, int(self.refit_interval))
 
         last_models: dict = {"ridge": None, "huber": None, "ols": None, "elasticnet": None, "pca_wls": None}
         valid_cols = np.ones(X.shape[1], dtype=bool)
 
-        total_chunks = (n - MIN_TRAIN_SIZE) // dynamic_refit + 1
-        for i, t_start in enumerate(range(MIN_TRAIN_SIZE, n, dynamic_refit)):
+        total_chunks = (n - self.min_train_size) // dynamic_refit + 1
+        for i, t_start in enumerate(range(self.min_train_size, n, dynamic_refit)):
             t_end = min(t_start + dynamic_refit, n)
             try:
                 result = self._process_wf_chunk(t_start, t_end, X, y, global_weights)
@@ -450,12 +484,12 @@ class FairValueEngine:
         _bd_purge = getattr(self, "purge", 0)
         _local_breaks = _rolling_mean_breaks(y[:max(0, t_start - _bd_purge)], max_breaks=3, trim=0.15)
         last_break = _local_breaks[-1] if _local_breaks else 0
-        max_lookback = max(0, t_start - MAX_TRAIN_SIZE)
+        max_lookback = max(0, t_start - self.max_train_size)
 
         if last_break > max_lookback:
             start_idx = last_break
-            if t_start - start_idx < MIN_TRAIN_SIZE:
-                start_idx = max(0, t_start - MIN_TRAIN_SIZE)
+            if t_start - start_idx < self.min_train_size:
+                start_idx = max(0, t_start - self.min_train_size)
         else:
             start_idx = max_lookback
 
@@ -484,6 +518,8 @@ class FairValueEngine:
         models, scaler, valid_cols = self._fit_ensemble(
             X[start_idx:train_end], y[start_idx:train_end], t_start, global_weights,
             n_pca=getattr(self, "n_pca_components", None),
+            ensemble_models=self.ensemble_models, ridge_alphas=self.ridge_alphas,
+            huber_epsilon=self.huber_epsilon,
         )
 
         X_chunk = X[t_start:t_end]
@@ -524,6 +560,9 @@ class FairValueEngine:
     def _fit_ensemble(
         X_train: np.ndarray, y_train: np.ndarray, t: int, global_weights: np.ndarray,
         n_pca: int | None = None,
+        ensemble_models: tuple = ENSEMBLE_MODELS,
+        ridge_alphas: tuple = RIDGE_ALPHAS,
+        huber_epsilon: float = HUBER_EPSILON,
     ) -> tuple[dict, any | None, np.ndarray]:
         models: dict = {"ridge": None, "huber": None, "ols": None, "elasticnet": None, "pca_wls": None, "reducer": None}
         scaler = None
@@ -561,17 +600,17 @@ class FairValueEngine:
             # and powers the feature-impact attribution. ElasticNet is excluded
             # by default (backtested as ~0/negative IC on PCA components); Huber
             # is the dominant cost and optional. See core/config.ENSEMBLE_MODELS.
-            if "ridge" in ENSEMBLE_MODELS:
+            if "ridge" in ensemble_models:
                 try:
-                    ridge = RidgeCV(alphas=list(RIDGE_ALPHAS), cv=None)
+                    ridge = RidgeCV(alphas=list(ridge_alphas), cv=None)
                     ridge.fit(X_feat, y_train, sample_weight=weights)
                     models["ridge"] = ridge
                 except Exception as e:
                     _warn_once("Ridge", e)
 
-            if "huber" in ENSEMBLE_MODELS:
+            if "huber" in ensemble_models:
                 try:
-                    huber = HuberRegressor(epsilon=HUBER_EPSILON, max_iter=HUBER_MAX_ITER, tol=1e-3)
+                    huber = HuberRegressor(epsilon=huber_epsilon, max_iter=HUBER_MAX_ITER, tol=1e-3)
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
                         huber.fit(X_feat, y_train, sample_weight=weights)
@@ -579,7 +618,7 @@ class FairValueEngine:
                 except Exception as e:
                     _warn_once("Huber", e)
 
-            if "elasticnet" in ENSEMBLE_MODELS:
+            if "elasticnet" in ensemble_models:
                 try:
                     enet = ElasticNetCV(l1_ratio=0.5, alphas=[0.1, 1.0, 10.0], cv=2, max_iter=1000, tol=1e-2, selection="random", n_jobs=1)
                     with warnings.catch_warnings():
@@ -690,7 +729,7 @@ class FairValueEngine:
     # ── Private: Analytics Pipeline ───────────────────────────────────────
 
     def _compute_model_stats(self) -> None:
-        oos_mask = np.arange(self.n_samples) >= MIN_TRAIN_SIZE
+        oos_mask = np.arange(self.n_samples) >= self.min_train_size
         y_oos = self.y[oos_mask]
         pred_oos = self.predictions[oos_mask]
         # Exclude rows where (a) prediction is non-finite or (b) the label is
@@ -755,7 +794,7 @@ class FairValueEngine:
         n = len(r)
         self.lookback_data = {}
 
-        for lb in LOOKBACK_WINDOWS:
+        for lb in self.lookback_windows:
             if n < lb:
                 continue
             min_periods = max(lb // 2, 5)
@@ -791,7 +830,7 @@ class FairValueEngine:
 
     def _compute_breadth_metrics(self) -> None:
         n = len(self.ts_data)
-        valid_lookbacks = [lb for lb in LOOKBACK_WINDOWS if f"Z_{lb}" in self.ts_data.columns]
+        valid_lookbacks = [lb for lb in self.lookback_windows if f"Z_{lb}" in self.ts_data.columns]
         num_lb = max(len(valid_lookbacks), 1)
 
         oversold = np.zeros(n)
@@ -987,7 +1026,7 @@ class FairValueEngine:
 
     def _compute_ou_diagnostics(self) -> None:
         r = self.residuals
-        oos_r = r[MIN_TRAIN_SIZE:]
+        oos_r = r[self.min_train_size:]
 
         if len(oos_r) > 30:
             theta, mu, sigma = ornstein_uhlenbeck_estimate(oos_r)
@@ -1038,7 +1077,7 @@ class FairValueEngine:
             self.ou_projection_lower = self.ou_projection.copy()
 
     def _compute_hurst(self) -> None:
-        oos_r = self.residuals[MIN_TRAIN_SIZE:]
+        oos_r = self.residuals[self.min_train_size:]
         # DFA log-log regression needs ≥200 points for ≥5 scale pairs.
         # Below that, the CI is ~±0.3 — meaningless — so report a neutral 0.5.
         if len(oos_r) > 200:

@@ -24,7 +24,6 @@ Universe selection is adapted from the Sanket terminal (@thebullishvalue).
 from __future__ import annotations
 
 import io
-import re
 import logging
 
 import pandas as pd
@@ -286,3 +285,76 @@ def resolve_index_constituents(target: str, cap: int = _DEFAULT_CAP) -> tuple[li
         snap = _stride_cap(snap, cap)
         return snap, f"snapshot ({len(snap)})"
     return [], "unavailable (Aarambh-only)"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Free-form individual-stock symbol resolution (Nirnay-Swayam targets)
+# ════════════════════════════════════════════════════════════════════════
+
+# Resolved symbol → (ticker, exchange_label), 7-day disk cache. Only SUCCESSES
+# are memoized to disk — a transient yfinance outage must not brand a symbol
+# invalid for a week (see the in-session failure memo below instead).
+_symbol_cache = Cache(ttl=7 * 86_400, version="v1", namespace="symbol_resolution")
+_symbol_fail_memo: dict[tuple[str, str], str] = {}   # (raw, market) → error message, THIS SESSION ONLY
+
+
+def resolve_stock_symbol(raw: str, market: str) -> tuple[str | None, str]:
+    """Resolve a user-typed symbol to a yfinance ticker with listing auto-detect.
+
+    ``market='india'``: an explicit ``.NS``/``.BO`` suffix on ``raw`` is
+    respected as-is (no probing); otherwise probes ``SYMBOL.NS`` first, then
+    ``SYMBOL.BO`` (NSE takes precedence for dual-listed names). ``market='us'``:
+    the bare symbol, uppercased, with ``.`` translated to ``-`` (yfinance
+    convention — e.g. ``BRK.B`` -> ``BRK-B``).
+
+    A candidate "hits" when :func:`data.fetcher.fetch_stock_target_series`
+    returns a usable series (>=20 real Close rows) — the SAME definition of
+    "usable data" the analysis pipeline uses, so a successful resolution here
+    means the subsequent fetch is a cache hit, not a re-probe.
+
+    Returns ``(ticker, exchange_label)`` on success — ``exchange_label`` is
+    one of ``"NSE"``, ``"BSE"``, ``"US"`` — or ``(None, error_message)`` on
+    failure, where the message names every candidate tried.
+    """
+    from data.fetcher import fetch_stock_target_series   # local: avoid a
+    # data.universe <-> data.fetcher import cycle (fetcher imports
+    # core.config, which imports this module for INDEX_TARGETS/_MAP).
+
+    cleaned = (raw or "").strip().upper()
+    if not cleaned or " " in cleaned or len(cleaned) > 20:
+        return None, f"'{raw}' is not a valid ticker symbol."
+
+    memo_key = (cleaned, market)
+    cached = _symbol_cache.get(cleaned, market)
+    if cached is not None:
+        return tuple(cached)
+    if memo_key in _symbol_fail_memo:
+        return None, _symbol_fail_memo[memo_key]
+
+    if market == "india":
+        if cleaned.endswith(".NS") or cleaned.endswith(".BO"):
+            candidates = [(cleaned, "NSE" if cleaned.endswith(".NS") else "BSE")]
+        else:
+            candidates = [(f"{cleaned}.NS", "NSE"), (f"{cleaned}.BO", "BSE")]
+    else:
+        candidates = [(cleaned.replace(".", "-"), "US")]
+
+    end = pd.Timestamp.today()
+    start = end - pd.Timedelta(days=365 * 9)
+    for ticker, exch in candidates:
+        try:
+            s = fetch_stock_target_series(ticker, start, end)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Stock symbol probe %s failed: %s", ticker, e)
+            s = None
+        if s is not None and not s.empty:
+            _symbol_cache.put(cleaned, market, value=(ticker, exch))
+            return ticker, exch
+
+    tried = " or ".join(f"{t} ({e})" for t, e in candidates)
+    if market == "india":
+        msg = f"'{raw}' not found on NSE (.NS) or BSE (.BO) via yfinance (tried {tried})."
+    else:
+        msg = f"'{raw}' not found on yfinance (tried {tried})."
+    _symbol_fail_memo[memo_key] = msg
+    return None, msg

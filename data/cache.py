@@ -49,7 +49,14 @@ _FORCE_UNTIL: dict[str, float] = {}
 def _current_session_key() -> str:
     try:
         from streamlit.runtime.scriptrunner import get_script_run_ctx
-        ctx = get_script_run_ctx()
+        try:
+            # suppress_warning=True silences Streamlit's "missing ScriptRunContext"
+            # log noise when called outside a script run (the research/ scripts run
+            # bare — they legitimately have no session). Kwarg exists in current
+            # Streamlit; fall back if a version ever drops it.
+            ctx = get_script_run_ctx(suppress_warning=True)
+        except TypeError:
+            ctx = get_script_run_ctx()
         if ctx is not None:
             return ctx.session_id
     except Exception:

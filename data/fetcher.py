@@ -5,8 +5,13 @@ Tattva — Unified data fetcher: yfinance macro / commodity / OHLCV universe.
 Each external call is wrapped with:
   1. **Two-tier cache** (memory + disk, TTL + versioned keys) — `data/cache.py`
   2. **Circuit breaker** (CLOSED → OPEN → HALF_OPEN per service) — `data/circuit_breaker.py`
-  3. **Retry-with-backoff** (1s → 2s → 4s) for transient failures
-  4. **Stale-fallback** — if a fetch fails AND the circuit is open, the last-good
+  3. **Retry-with-backoff** (1s → 2s → 4s) for transient (whole-batch) failures
+  4. **Partial-success completion** — a batch is ONE yfinance call, but yfinance
+     rate-limits a few tickers per batch, so it can come back incomplete. Rather
+     than caching the incomplete result: constituent OHLCV does one targeted
+     LIVE re-fetch of just the missing symbols; the macro universe backfills the
+     missing columns from the last-good snapshot (_backfill_missing_columns).
+  5. **Stale-fallback** — if a fetch fails AND the circuit is open, the last-good
      snapshot is returned so the UI keeps working through API outages.
 
 Macro data is sourced from Sanket's Global Macro bond-ETF universe via yfinance
@@ -26,7 +31,6 @@ import yfinance as yf
 from core.config import (
     GLOBAL_MACRO_MAP,
     MACRO_SYMBOLS_YF,
-    COMMODITY_TARGETS,
     INDEX_TARGETS_MAP,
     ALL_TARGETS,
 )
@@ -93,7 +97,38 @@ def fetch_constituent_ohlcv(
         stale = ohlcv_cache.get_stale(sym_key, start_yf, end_yf)
         return stale if stale is not None else {}
 
-    result: dict[str, pd.DataFrame] = {}
+    result = _parse_ohlcv_batch(raw, symbols)
+
+    # Partial success: yfinance rate-limits a handful of tickers per batch, so a
+    # 100-name basket can come back with 60. Do ONE targeted re-fetch of JUST the
+    # missing symbols (goes through the same circuit + backoff) to complete the set,
+    # rather than caching an incomplete result that would be reused as-is. Only when
+    # SOME tickers succeeded (a total-empty batch is an outage, not per-ticker limits
+    # — the circuit/stale path handles that).
+    missing = [s for s in symbols if s not in result]
+    if result and missing:
+        try:
+            raw2 = yfinance_circuit.call(
+                _yfinance_batch_download, tuple(sorted(missing)), start_yf, end_yf
+            )
+            recovered = _parse_ohlcv_batch(raw2, missing)
+            if recovered:
+                log.info("re-fetch recovered %d/%d rate-limited tickers",
+                         len(recovered), len(missing))
+                result.update(recovered)
+        except Exception as e:   # circuit open / still limited — keep what we have
+            log.warning("targeted re-fetch of %d missing tickers failed: %s",
+                        len(missing), e)
+
+    if result:
+        ohlcv_cache.put(sym_key, start_yf, end_yf, value=result)
+    return result
+
+
+def _parse_ohlcv_batch(raw, symbols: list[str]) -> dict[str, pd.DataFrame]:
+    """Extract a {symbol: OHLCV frame} dict from a group_by='ticker' yfinance batch.
+    Symbols yfinance dropped (rate-limited/delisted) simply don't appear."""
+    out: dict[str, pd.DataFrame] = {}
     if isinstance(raw, pd.DataFrame) and isinstance(raw.columns, pd.MultiIndex):
         for sym in symbols:
             try:
@@ -104,13 +139,10 @@ def fetch_constituent_ohlcv(
                 if not sub.empty and not close_col.isnull().all():
                     if isinstance(sub.columns, pd.MultiIndex):
                         sub.columns = [c[0] for c in sub.columns]
-                    result[sym] = sub
+                    out[sym] = sub
             except KeyError:
                 pass
-
-    if result:
-        ohlcv_cache.put(sym_key, start_yf, end_yf, value=result)
-    return result
+    return out
 
 
 # ─── Macro data (yfinance Global Macro universe + commodities/FX) ───────────
@@ -450,3 +482,35 @@ def _fetch_exogenous_targets(index: pd.Index) -> dict[str, pd.Series]:
         except Exception as e:  # noqa: BLE001
             log.warning("Exogenous %s fetch skipped: %s", _name, e)
     return out
+
+
+def fetch_stock_target_series(
+    ticker: str,
+    start_date: pd.Timestamp | str,
+    end_date: pd.Timestamp | str,
+) -> pd.Series | None:
+    """Close series for a single stock-target ticker (Nirnay-Swayam targets).
+
+    Individual-stock targets (TARGET_ARCHETYPE == 'self') are deliberately
+    NOT part of the macro batch universe (see fetch_commodity_dataset's
+    ``_fetch_macro_live_uncached`` call — a dynamically varying per-target
+    ticker set would break that batch's ``(start, end)``-keyed cache). Their
+    price column is injected separately via this single-ticker fetch.
+
+    Reuses fetch_constituent_ohlcv (two-tier cache + circuit breaker + stale
+    fallback) — a later Nirnay-Swayam OHLCV fetch of the SAME ticker is then
+    a cache hit, so this costs no extra network call overall.
+
+    Returns ``None`` if nothing usable came back (also doubles as the
+    "does this candidate ticker exist" probe used by symbol resolution).
+    """
+    ohlcv_map = fetch_constituent_ohlcv([ticker], start_date, end_date) or {}
+    odf = ohlcv_map.get(ticker)
+    if odf is None or odf.empty or "Close" not in odf.columns:
+        return None
+    s = pd.to_numeric(odf["Close"], errors="coerce").dropna()
+    if len(s) < 20:
+        return None
+    if getattr(s.index, "tz", None) is not None:
+        s.index = s.index.tz_localize(None)
+    return s.sort_index()

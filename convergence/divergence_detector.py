@@ -6,9 +6,9 @@ CONVERGENCE — Adaptive-weighted composite of 4 dimensions: Direction, Breadth,
 
 Divergence types
 ----------------
-- ``AARAMBH_LEADS``: Valuation extreme but constituents haven't turned
+- ``AARAMBH_LEADS``: Valuation extreme but bottom-up breadth hasn't turned
   (early warning).
-- ``NIRNAY_LEADS``: Constituents turning but valuation not yet extreme
+- ``NIRNAY_LEADS``: Bottom-up breadth turning but valuation not yet extreme
   (momentum-first move).
 - ``CONTRADICTION``: Persistent disagreement (uncertain environment).
 """
@@ -119,7 +119,7 @@ class CrossSystemDivergenceDetector:
             severity = min(1.0, abs(conviction) / 100.0)
             description = (
                 f"Aarambh shows extreme oversold (conviction={conviction:.0f}) "
-                f"but Nirnay constituents haven't turned ({nirnay_os_pct:.0f}% oversold). "
+                f"but Nirnay breadth hasn't turned ({nirnay_os_pct:.0f}% oversold). "
                 f"Early warning: valuation dislocation not yet reflected in price structure."
             )
         elif aarambh_stance == "EXTREME_BEARISH" and nirnay_stance != "BEARISH":
@@ -127,14 +127,14 @@ class CrossSystemDivergenceDetector:
             severity = min(1.0, abs(conviction) / 100.0)
             description = (
                 f"Aarambh shows extreme overbought (conviction={conviction:.0f}) "
-                f"but Nirnay constituents haven't turned. "
+                f"but Nirnay breadth hasn't turned. "
                 f"Early warning: valuation risk not yet reflected in price structure."
             )
         elif nirnay_stance == "BULLISH" and aarambh_stance not in ("BULLISH", "EXTREME_BULLISH"):
             div_type = "NIRNAY_LEADS"
             severity = min(1.0, abs(nirnay_avg_osc) / 10.0)
             description = (
-                f"Nirnay constituents turning bullish ({nirnay_os_pct:.0f}% oversold, "
+                f"Nirnay breadth turning bullish ({nirnay_os_pct:.0f}% oversold, "
                 f"avg osc={nirnay_avg_osc:.1f}) but Aarambh valuation not yet extreme "
                 f"(conviction={conviction:.0f}). Momentum-first move."
             )
@@ -142,8 +142,8 @@ class CrossSystemDivergenceDetector:
             div_type = "NIRNAY_LEADS"
             severity = min(1.0, abs(nirnay_avg_osc) / 10.0)
             description = (
-                f"Nirnay constituents turning bearish but Aarambh valuation not yet "
-                f"extreme. Momentum-first move to the downside."
+                "Nirnay breadth turning bearish but Aarambh valuation not yet "
+                "extreme. Momentum-first move to the downside."
             )
         elif aarambh_stance == "BULLISH" and nirnay_stance == "BEARISH":
             div_type = "CONTRADICTION"

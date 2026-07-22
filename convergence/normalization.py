@@ -60,8 +60,9 @@ import pandas as pd
 # spread, so BOTH sets carry the occupancy-convention anchors PRINTED by the
 # latest suite run (per its decision rule); measurements live in
 # research/TUNING_COVERAGE.md and the CHANGELOG.
-_STRONG = 0.41
-_MODERATE = 0.26
+# hero_thresholds 2026-07-20 CONSENSUS occupancy anchor p75/p90 = ±0.284/±0.428.
+_STRONG = 0.404
+_MODERATE = 0.279
 
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "buy_strong":     -_STRONG,
@@ -70,11 +71,18 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "sell_strong":    +_STRONG,
 }
 
+# Re-anchored to p75/p90 (±0.19/±0.33) from the latest `hero_thresholds` run:
+# the composite distribution shifted once commodities moved to Swayam self mode
+# (self-breadth changed the composite for the commodity targets in the pool), and
+# the old ±0.11/±0.16 had drifted to ~p58/p69 — moderate firing on 42% of days.
+# p75/p90 restores the house occupancy convention (consensus / convergence_score
+# / markers all use it). Cascades to intelligence DEFAULT_THRESHOLDS + the
+# conviction-model tiers (both derived from this dict).
 COMPOSITE_THRESHOLDS: dict[str, float] = {
-    "buy_strong":     -0.16,
-    "buy_moderate":   -0.11,
-    "sell_moderate":  +0.11,
-    "sell_strong":    +0.16,
+    "buy_strong":     -0.159,
+    "buy_moderate":   -0.092,
+    "sell_moderate":  +0.092,
+    "sell_strong":    +0.159,
 }
 
 

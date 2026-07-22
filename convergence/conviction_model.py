@@ -37,8 +37,8 @@ from analytics.utils import _apply_conviction_bounds
 # and never printed STRONG (F1 threshold-distribution pairing violation,
 # found by research/ui_anchors_study.py 2026-07-12). WEAK is the measured p50
 # of pooled |convergence_score| (5.76 → 6.0) — the "any lean at all" floor.
-_TIER_STRONG = abs(COMPOSITE_THRESHOLDS["sell_strong"]) * 100.0    # 18
-_TIER_MODERATE = abs(COMPOSITE_THRESHOLDS["sell_moderate"]) * 100.0  # 11
+_TIER_STRONG = abs(COMPOSITE_THRESHOLDS["sell_strong"]) * 100.0    # 33 (p90)
+_TIER_MODERATE = abs(COMPOSITE_THRESHOLDS["sell_moderate"]) * 100.0  # 19 (p75)
 _TIER_WEAK = 6.0
 
 

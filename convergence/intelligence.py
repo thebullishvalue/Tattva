@@ -63,12 +63,12 @@ from core.config import (
 log = logging.getLogger(__name__)
 
 # Bumped v1 -> v2 (audit findings F1/F2/F3): profiles saved under v1 were
-# calibrated under (a) an asymmetric DDM gain across lenses (Positional's
-# steady-state gain was 2x Tactical's — see core.config.SIGNAL_HORIZONS'
-# ddm_drift/ddm_leak invariant note) and (b) a UI that applied the learned
-# thresholds to the normalized-consensus diagnostic instead of the composite
-# they were actually scored against. Both changes shift what "calibrated"
-# means, so a v1 profile's (weights, thresholds) are stale evidence for the
+# calibrated under (a) an asymmetric DDM gain across the (since-removed)
+# forecast lenses — the longer lens's steady-state gain was 2x the short one's —
+# and (b) a UI that applied the learned thresholds to the normalized-consensus
+# diagnostic instead of the composite they were actually scored against. Both
+# changes shift what "calibrated" means, so a v1 profile's (weights, thresholds)
+# are stale evidence for the
 # CURRENT pipeline — load_profile_for below refuses to load a version
 # mismatch (treats it as absent, prompting fresh calibration) rather than
 # silently applying thresholds tuned for a different signal.

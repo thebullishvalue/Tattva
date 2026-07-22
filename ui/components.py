@@ -241,7 +241,7 @@ def render_nishkarsh_signal_card(
 
 # Trust tiers for the NON-OVERLAPPING Val IC (see convergence.intelligence.
 # _score_frame_nonoverlap): its effective sample size is ~n_val / stride, so at
-# a realistic holdout (~300-500 days) and the Positional lens (stride=10),
+# a realistic holdout (~300-500 days) and the longest scoring stride (10),
 # n_eff ~ 30-50 → SE(IC) ~ 1/sqrt(n_eff-3) ~ 0.15-0.19. The tier cut-points
 # below (0.10 / 0.20) sit at roughly 1 SE (MODEST) and 2 SE (SOLID) for that
 # worst-case n_eff so the chip is not overconfident.
@@ -477,7 +477,7 @@ def build_hero_verdict(
     else:
         score = float(aarambh_signal.get("conviction_score", 0)) / 100.0
         raw_label = str(aarambh_signal.get("signal", "HOLD"))
-        source = "Aarambh only (no basket convergence)"
+        source = "Aarambh only (no bottom-up convergence)"
         headline_is_convergence = False
 
     # ── 2. Label normalisation (the DDM classifier says NEUTRAL, the
@@ -516,12 +516,12 @@ def build_hero_verdict(
     # is actually true: inside the band, with the lean named when it exists.
     if direction == "neutral":
         if abs(score) < _FLAT_BAND:
-            headline = (f"{source}: {score:+.2f} — flat, no directional lean at "
-                        f"the {horizon_days}d lens right now.")
+            headline = (f"{source}: {score:+.2f} — flat, no directional lean over "
+                        f"the next ~{horizon_days} trading days right now.")
         else:
             lean = "bullish" if score < 0 else "bearish"
-            headline = (f"{source}: {score:+.2f} — inside the HOLD band at the "
-                        f"{horizon_days}d lens (leaning {lean}, but below the "
+            headline = (f"{source}: {score:+.2f} — inside the HOLD band over the "
+                        f"next ~{horizon_days} trading days (leaning {lean}, but below the "
                         f"action threshold).")
     else:
         headline = (f"{source} reads {direction} ({signal}, {score:+.2f}) over "

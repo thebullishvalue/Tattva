@@ -23,20 +23,12 @@ from pathlib import Path
 import streamlit as st
 
 from core.config import (
-    CHART_BG,
-    CHART_GRID,
-    CHART_ZEROLINE,
-    CHART_FONT_COLOR,
     COLOR_GREEN,
-    COLOR_RED,
-    COLOR_GOLD,
     COLOR_CYAN,
     COLOR_AMBER,
-    COLOR_PURPLE,
-    COLOR_MUTED,
-    VERSION,        # single source of truth (re-exported for app.py imports)
-    PRODUCT_NAME,
-    COMPANY,
+    VERSION,        # noqa: F401 — single source of truth, re-exported for app.py imports
+    PRODUCT_NAME,   # noqa: F401 — re-exported for app.py
+    COMPANY,        # noqa: F401 — re-exported for app.py
 )
 
 # Path to external CSS file

@@ -10,8 +10,10 @@ itself is unchanged; only its INPUTS are adapted to Tattva:
     (``engine.ts_data``) — robust-quantile extension (AvgZ), net internal breadth,
     target momentum, realized volatility, and rolling Hurst — instead of
     Arthagati's mood features.
-  • Forward-return horizons are the ACTIVE Signal-Horizon hold grid (so the
-    precedent read inherits the lens chosen in the sidebar), not a fixed 5/20/60/90.
+  • Forward-return horizons are the FIXED precedent term structure
+    (core.config.PRECEDENT_HORIZONS = 1/3/5/10/20/60d) — a complete span the
+    Precedent tab shows end-to-end, independent of the sidebar lens. (Callers
+    pass the horizon set explicitly; the default below mirrors that constant.)
 
 It answers an empirical, non-parametric question that complements the model
 forecast: "when the target's state looked statistically like today, what did the
@@ -228,10 +230,12 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
 def find_similar_periods(
     ts: pd.DataFrame,
     target_col: str,
-    hold_horizons: tuple[int, ...] = (3, 5, 10, 20),
+    hold_horizons: tuple[int, ...] = (1, 3, 5, 10, 20, 60),
     *,
     mom_window: int = 20,
     top_n: int = 10,
+    maha_weight: float = ANALOG_W_MAHA,
+    trajectory_weight: float = ANALOG_W_TRAJ,
     recency_weight: float = ANALOG_W_RECV,
 ) -> list[dict]:
     """Tattva analog finder — ported scoring machinery, Tattva-tuned weights.
@@ -295,7 +299,7 @@ def find_similar_periods(
     traj_window = mom_window
     traj_sim = np.zeros(len(historical))
     price_all = feat["Price"].to_numpy(dtype=np.float64)
-    if ANALOG_W_TRAJ > 0 and n > traj_window:
+    if trajectory_weight > 0 and n > traj_window:
         _x = np.arange(traj_window, dtype=np.float64)
         _xm = _x - _x.mean()
         _xvar = np.sum(_xm ** 2)
@@ -321,7 +325,7 @@ def find_similar_periods(
 
     # ── Part 3: Exponential recency decay (DROPPED → skipped when weight 0) ──
     recency_norm = np.zeros(len(historical))
-    if ANALOG_W_RECV > 0:
+    if recency_weight > 0:
         dates = historical["Date"]
         if np.issubdtype(np.asarray(dates).dtype, np.datetime64):
             days_since = (pd.Timestamp(latest["Date"]) - pd.to_datetime(dates)).dt.days.to_numpy(dtype=float)
@@ -331,7 +335,7 @@ def find_similar_periods(
         recency_norm = recency / max(recency.max(), 1e-6)
 
     # ── Combined ────────────────────────────────────────────────────────────
-    combined = ANALOG_W_MAHA * maha_sim + ANALOG_W_TRAJ * traj_sim + ANALOG_W_RECV * recency_norm
+    combined = maha_weight * maha_sim + trajectory_weight * traj_sim + recency_weight * recency_norm
     historical = historical.copy()
     historical["similarity"] = combined
 

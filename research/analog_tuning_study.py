@@ -251,6 +251,34 @@ def main():
     print("\n  Read each cell as full_IC / recent_IC. recent_IC is the honest test of"
           "\n  whether the analog still works in the CURRENT regime.", flush=True)
 
+    # ── PER-INSTRUMENT analog blend (gated: best blend beats this target's OWN
+    #    current-blend IC beyond noise) → analog_w_maha/traj/recv overrides ──
+    from core.config import InstrumentConfig as _IC
+    from research._per_instrument import IC_FLOOR, IC_MARGIN, print_overrides_snippet
+    _blends = [(1.0, 0.0, 0.0), (0.9, 0.1, 0.0), (0.8, 0.2, 0.0), (0.8, 0.1, 0.1),
+               (0.7, 0.3, 0.0), (0.6, 0.4, 0.0), (0.55, 0.35, 0.10), (0.5, 0.5, 0.0),
+               (0.5, 0.25, 0.25), (0.33, 0.33, 0.34), (0.2, 0.6, 0.2)]
+    _cur = (round(_IC().analog_w_maha, 3), round(_IC().analog_w_traj, 3), round(_IC().analog_w_recv, 3))
+    print("\n" + "=" * 74)
+    print(f"  PER-INSTRUMENT ANALOG BLEND @ +10d (gate |IC|≥{IC_FLOOR} & beat current by ≥{IC_MARGIN})")
+    print("=" * 74)
+    overrides: dict = {}
+    for t in TARGETS:
+        ics = {(wm, wt, wr): _walk_ic(t, 10, _cfg(wm=wm, wt=wt, wr=wr))[0]
+               for (wm, wt, wr) in _blends}
+        ics = {k: v for k, v in ics.items() if np.isfinite(v)}
+        if not ics:
+            continue
+        cur_ic = ics.get(_cur, np.nan)
+        (bwm, bwt, bwr), bic = max(ics.items(), key=lambda kv: kv[1])
+        adopt = ((bwm, bwt, bwr) != _cur and bic >= IC_FLOOR
+                 and (not np.isfinite(cur_ic) or bic - cur_ic >= IC_MARGIN))
+        flag = "  ADOPT" if adopt else "  (noise → current)"
+        print(f"    {t:<22} best={bwm}/{bwt}/{bwr}  |IC|={bic:+.3f}  current|IC|={cur_ic:+.3f}{flag}")
+        if adopt:
+            overrides[t] = {"analog_w_maha": bwm, "analog_w_traj": bwt, "analog_w_recv": bwr}
+    print_overrides_snippet(overrides)
+
 
 if __name__ == "__main__":
     main()

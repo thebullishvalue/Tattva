@@ -9,8 +9,10 @@ This re-runs the choice honestly.
 Scope (one-factor-at-a-time around current defaults):
   • REFIT_INTERVAL, ENSEMBLE_MODELS (incl. 4-model + elasticnet re-test),
     MAX_TRAIN_SIZE, MIN_TRAIN_SIZE, PCA, RIDGE_ALPHAS (with a ridge ensemble)
-  • Scored at BOTH lenses (10d & 20d) — engine defaults are global, so we pick what
-    is robust across both.
+  • Scored at the single fixed FORECAST_HORIZON (10d) — the Signal-Horizon lens
+    selector was removed, so the system forecasts one horizon; the engine defaults
+    are global and horizon-independent, so 10d (the only horizon used) is what we
+    tune on. (To re-check cross-horizon robustness, add a second key to HORIZONS.)
   • Across ALL ~33 targets (every asset class).
 
 Metric: mean NON-OVERLAPPING (stride = horizon) OOS Spearman IC of the Aarambh
@@ -44,6 +46,11 @@ import os as _os, sys as _sys  # research/: put repo root on path so `from core.
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from core.config import (
     MIN_DATA_POINTS, TARGET_EXCLUDED_PREDICTORS, COMMODITY_TARGETS, ALL_TARGETS,
+    REFIT_INTERVAL, MAX_TRAIN_SIZE, MIN_TRAIN_SIZE, HUBER_EPSILON, LOOKBACK_WINDOWS,
+    RIDGE_ALPHAS, InstrumentConfig, TARGET_CATEGORIES, ENSEMBLE_MODELS,
+)
+from research._per_instrument import (
+    print_overrides_snippet,
 )
 from data.fetcher import fetch_commodity_dataset
 import engines.aarambh as aa
@@ -72,16 +79,22 @@ _LEAK_IC = 0.35
 # still DISPLAYED so the small windows the study was asked to probe remain visible.
 _MIN_SANE_WINDOW = 100
 
-HORIZONS = {10: 20, 20: 40}            # horizon : momentum window
+HORIZONS = {10: 20}                    # {horizon: momentum} — the single fixed
+                                       # FORECAST_HORIZON (10d). 20d dropped: it
+                                       # was the removed Positional lens, and
+                                       # scoring a horizon the system never uses
+                                       # doubled the walk-forward for no signal.
 
-# OFAT base. ens defaults to the FAST (ridge+ols) basket so the non-ensemble levers
-# (REFIT/MAX/MIN/PCA/RIDGE_ALPHAS) sweep ~3× faster — their *winner* is decided by
-# relative IC holding the ensemble fixed, so the ranking is unchanged. The
-# ENSEMBLE_MODELS lever overrides `ens` explicitly and DOES test the real baskets
-# (ols+huber, 4-model, elasticnet) — that's the only place the ensemble is the question.
-BASE = dict(refit=5, ens=("ridge", "ols"), maxt=750, mint=500, pca=20,
-            ralpha=(0.01, 0.1, 1.0, 10.0, 100.0),
-            heps=1.35, lookb=(5, 10, 20, 50, 100))
+# OFAT base = the LIVE config (pulled from core.config so it never drifts from the
+# shipped values — the non-swept levers stay at what the app actually runs, so each
+# sweep measures the real interaction). ens is the ONE deliberate exception: it
+# defaults to the FAST (ridge+ols) basket so the non-ensemble levers sweep ~3×
+# faster (relative ranking is unchanged holding the ensemble fixed); the
+# ENSEMBLE_MODELS lever overrides `ens` and DOES test the real baskets.
+BASE = dict(refit=REFIT_INTERVAL, ens=("ridge", "ols"),
+            maxt=MAX_TRAIN_SIZE, mint=MIN_TRAIN_SIZE,
+            pca=InstrumentConfig().pca_components,
+            ralpha=RIDGE_ALPHAS, heps=HUBER_EPSILON, lookb=LOOKBACK_WINDOWS)
 
 # Each lever → list of (value, full-cfg-override-dict).
 # GRID DEPTH NOTE (2026-07-12): grids densified for a finer optimum search. The
@@ -271,7 +284,7 @@ def run():
         w.writerow(["lever", "value", "target", "class", "horizon", "ic", "n"]); f.flush()
 
     total = sum(len(vs) for vs in levers.values()) * len(targets) * len(HORIZONS)
-    print(f"Aarambh post-purge tuning · {len(targets)} targets · {len(HORIZONS)} lenses · "
+    print(f"Aarambh post-purge tuning · {len(targets)} targets · {len(HORIZONS)} horizon(s) · "
           f"{sum(len(v) for v in levers.values())} configs → {total} fits "
           f"({len(done)} already done)", flush=True)
     t0 = time.time(); k = 0
@@ -386,6 +399,144 @@ def aggregate():
             continue
         chg = "" if str(v) == cur.get(lever, "") else f"   ← CHANGE from {cur.get(lever)}"
         print(f"    {lever:<18} {str(v):<18} (IC {ic:+.3f}){chg}")
+
+    _per_instrument_aarambh(d)
+
+
+# Study lever → (InstrumentConfig field, value-parser). Aarambh is now tunable
+# PER INSTRUMENT (engines/aarambh.py reads these off the InstrumentConfig passed to
+# fit()), so — like nirnay_index / swayam / per_asset — this study emits a gated
+# per-target `_PER_INSTRUMENT_OVERRIDES` snippet in addition to the class-level block.
+_RIDGE_LABEL_TO_TUPLE = {label: tuple(ov["ralpha"]) for label, ov in _cfgs()["RIDGE_ALPHAS"]}
+_LOOKBACK_LABEL_TO_TUPLE = {label: tuple(ov["lookb"]) for label, ov in _cfgs()["LOOKBACK_WINDOWS"]}
+_LEVER_TO_FIELD = {
+    "REFIT_INTERVAL":   ("aarambh_refit_interval",  lambda v: int(float(v))),
+    "MAX_TRAIN_SIZE":   ("aarambh_max_train_size",  lambda v: int(float(v))),
+    "MIN_TRAIN_SIZE":   ("aarambh_min_train_size",  lambda v: int(float(v))),
+    "PCA_COMPONENTS":   ("pca_components",          lambda v: int(float(v))),
+    "HUBER_EPSILON":    ("aarambh_huber_epsilon",   lambda v: float(v)),
+    "ENSEMBLE_MODELS":  ("aarambh_ensemble_models", lambda v: tuple(str(v).split("+"))),
+    "RIDGE_ALPHAS":     ("aarambh_ridge_alphas",    lambda v: _RIDGE_LABEL_TO_TUPLE.get(str(v))),
+    "LOOKBACK_WINDOWS": ("aarambh_lookback_windows",lambda v: _LOOKBACK_LABEL_TO_TUPLE.get(str(v))),
+}
+# Live config default per field (the value the gate must be beaten by).
+_FIELD_DEFAULT = {
+    "aarambh_refit_interval": REFIT_INTERVAL, "aarambh_max_train_size": MAX_TRAIN_SIZE,
+    "aarambh_min_train_size": MIN_TRAIN_SIZE, "pca_components": InstrumentConfig().pca_components,
+    "aarambh_huber_epsilon": HUBER_EPSILON, "aarambh_ensemble_models": tuple(ENSEMBLE_MODELS),
+    "aarambh_ridge_alphas": tuple(RIDGE_ALPHAS), "aarambh_lookback_windows": tuple(LOOKBACK_WINDOWS),
+}
+
+
+# Joint-confirmation gate: the ASSEMBLED per-instrument config (all levers together)
+# must actually beat the class default out-of-sample by this IC margin AND be
+# positive. This fixes the OFAT-independence flaw — per-lever argmaxes are marginal
+# effects around a fixed base; stitching them gives a config whose JOINT skill was
+# never measured, and on near-zero noisy ICs the interactions are the size of the
+# signal. So we score the real combined config and only wire it if it earns its keep.
+_CONFIRM_MARGIN = 0.02
+_CONFIRM_MIN_N = 50     # …and on enough non-overlapping OOS points to be trustworthy
+                        # (a high min_train starves the sample; a +0.3 IC on n=33 is noise)
+
+
+def _study_cfg_from_fields(ov: dict) -> dict:
+    """Assemble a fit_ic() config dict = CLASS DEFAULT ⊕ per-target field overrides."""
+    ic = InstrumentConfig()
+    g = lambda field, attr: ov.get(field, getattr(ic, attr))
+    return dict(
+        refit=int(g("aarambh_refit_interval", "aarambh_refit_interval")),
+        ens=tuple(g("aarambh_ensemble_models", "aarambh_ensemble_models")),
+        maxt=int(g("aarambh_max_train_size", "aarambh_max_train_size")),
+        mint=int(g("aarambh_min_train_size", "aarambh_min_train_size")),
+        pca=int(g("pca_components", "pca_components")),
+        ralpha=tuple(g("aarambh_ridge_alphas", "aarambh_ridge_alphas")),
+        heps=float(g("aarambh_huber_epsilon", "aarambh_huber_epsilon")),
+        lookb=tuple(g("aarambh_lookback_windows", "aarambh_lookback_windows")),
+    )
+
+
+def _per_instrument_candidate(s) -> dict:
+    """Per-target field overrides = highest-SIGNED-IC value per lever, with
+    aarambh_max_train_size forced ABOVE min_train (else the cap is inert), and a
+    knob omitted when its best equals the class default.
+
+    Window levers honour the SAME structural floor as the class-level aggregate():
+    a MAX/MIN_TRAIN value < _MIN_SANE_WINDOW is ⚠small-win — the post-purge fit
+    collapses to a near-constant forecast whose IC is small-sample NOISE, so it can
+    spuriously 'win' a target. aggregate() excludes such rows from the class
+    recommendation; the per-instrument argmax must too, else a degenerate window
+    (e.g. max_train=50/min_train=15) gets wired into the overrides snippet — a
+    config the study elsewhere declares incoherent. Fall back to the field default
+    only if the (impossible) case of no sane row arises."""
+    ov: dict = {}
+    mn = s[s.lever == "MIN_TRAIN_SIZE"].copy()
+    if len(mn):
+        mn["v"] = mn["value"].astype(float)
+        mn = mn[mn["v"] >= _MIN_SANE_WINDOW]
+    min_v = int(mn.loc[mn.ic.idxmax(), "v"]) if len(mn) else _FIELD_DEFAULT["aarambh_min_train_size"]
+    mx = s[s.lever == "MAX_TRAIN_SIZE"].copy()
+    if len(mx):
+        mx["v"] = mx["value"].astype(float)
+        mx = mx[mx["v"] >= _MIN_SANE_WINDOW]
+    if len(mx):
+        ab = mx[mx["v"] > min_v]
+        max_v = int((ab if len(ab) else mx).loc[(ab if len(ab) else mx).ic.idxmax(), "v"])
+    else:
+        max_v = _FIELD_DEFAULT["aarambh_max_train_size"]
+    for lever, (field, parse) in _LEVER_TO_FIELD.items():
+        sl = s[s.lever == lever]
+        if not len(sl):
+            continue
+        val = min_v if lever == "MIN_TRAIN_SIZE" else max_v if lever == "MAX_TRAIN_SIZE" \
+            else parse(sl.loc[sl.ic.idxmax(), "value"])
+        if val is None:
+            continue
+        if isinstance(val, (list, tuple)):
+            val = tuple(val)
+        if val != _FIELD_DEFAULT[field]:
+            ov[field] = val
+    return ov
+
+
+def _per_instrument_aarambh(d):
+    """Per-target signed-IC argmax per lever → assemble the full config → CONFIRM its
+    joint walk-forward IC beats the class default (beyond noise) → only then wire it.
+    Catalogue (non-stock) targets only; free-form stocks stay asset-level."""
+    own = {nm for cat in ("Commodities", "Currency (FX)", "India Indices",
+                          "US Indices", "ETF Universe") for nm in TARGET_CATEGORIES.get(cat, [])}
+    d10 = d[(d.horizon == 10) & np.isfinite(d["ic"])]
+    cand = {t: _per_instrument_candidate(d10[d10["target"] == t])
+            for t in sorted(own & set(d10["target"]))}
+
+    print("\n" + "=" * 78)
+    print("  PER-INSTRUMENT AARAMBH — JOINT-CONFIRMED (assembled config vs class default)")
+    print(f"  adopt iff joint IC > 0 AND joint − default ≥ {_CONFIRM_MARGIN}  (fixes OFAT independence)")
+    print("=" * 78)
+    try:
+        _df()   # ensure the shared dataset is loaded (fit_ic→_matrix needs it)
+        default_cfg = _study_cfg_from_fields({})
+        base_cache: dict = {}
+        overrides: dict = {}
+        for t in sorted(cand):
+            ov = cand[t]
+            if not ov:
+                continue
+            joint, nj = fit_ic(_study_cfg_from_fields(ov), t, 10, HORIZONS[10])
+            if t not in base_cache:
+                base_cache[t] = fit_ic(default_cfg, t, 10, HORIZONS[10])
+            base, nb = base_cache[t]
+            adopt = (np.isfinite(joint) and joint > 0 and nj >= _CONFIRM_MIN_N
+                     and (not np.isfinite(base) or joint - base >= _CONFIRM_MARGIN))
+            flag = "  ADOPT" if adopt else (f"  → revert (n={nj}<{_CONFIRM_MIN_N})"
+                     if np.isfinite(joint) and nj < _CONFIRM_MIN_N else "  → revert to default")
+            print(f"    {t:<22} joint IC={joint:+.3f}  default IC={base:+.3f}  "
+                  f"Δ={joint-base:+.3f}  n={nj}{flag}", flush=True)
+            if adopt:
+                overrides[t] = ov
+        print_overrides_snippet(overrides)
+    except Exception as e:   # no data loaded (e.g. --agg standalone) → can't confirm
+        print(f"  (confirmation skipped — {e}); emitting UNCONFIRMED candidates:")
+        print_overrides_snippet({t: ov for t, ov in cand.items() if ov})
 
 
 if __name__ == "__main__":

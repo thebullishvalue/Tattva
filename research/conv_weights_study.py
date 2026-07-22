@@ -105,6 +105,7 @@ def main() -> None:
     print(f"  {'config':<26} {'mean IC':>8} {'IC>0':>6}   per-target")
     print("  " + "-" * 70)
     best = (None, -9)
+    PT: dict = {}       # {target: {label: ic}} for the per-instrument reco
     for label, vec in GRID:
         w = _w(vec)
         ics = {}
@@ -112,6 +113,7 @@ def main() -> None:
             ic, _ = _score_frame_nonoverlap(f, w, dict(COMPOSITE_THRESHOLDS), HOLD)
             if np.isfinite(ic):
                 ics[tgt] = ic
+                PT.setdefault(tgt, {})[label] = ic
         if not ics:
             continue
         arr = np.array(list(ics.values()))
@@ -126,6 +128,34 @@ def main() -> None:
     print("\n  DECISION RULE: adopt a new weight vector only if it beats the current")
     print("  one by a margin that survives the per-target spread (not one target");
     print("  carrying the mean) — otherwise the factory vector stands as validated.")
+
+    # ── PER-INSTRUMENT dim weights (gated: best vector beats this target's OWN
+    #    factory IC beyond noise) ──────────────────────────────────────────
+    from core.config import InstrumentConfig as _IC
+    from research._per_instrument import IC_FLOOR, IC_MARGIN, print_overrides_snippet
+    LABEL_VEC = dict(GRID)
+    factory_w = _IC().weights_seed()
+    print("\n" + "=" * 74)
+    print(f"  PER-INSTRUMENT DIM WEIGHTS (best vector vs factory, gate |IC|≥{IC_FLOOR} "
+          f"& beat factory by ≥{IC_MARGIN})")
+    print("=" * 74)
+    overrides: dict = {}
+    for tgt, f in frames.items():
+        fac_ic, _ = _score_frame_nonoverlap(f, factory_w, dict(COMPOSITE_THRESHOLDS), HOLD)
+        cand = [(ic, lbl) for lbl, ic in PT.get(tgt, {}).items() if np.isfinite(ic)]
+        if not cand:
+            continue
+        bic, blbl = max(cand)
+        adopt = (bic >= IC_FLOOR and (not np.isfinite(fac_ic) or bic - fac_ic >= IC_MARGIN))
+        flag = "  ADOPT" if adopt else "  (noise → factory)"
+        print(f"    {tgt:<22} best={blbl:<22} |IC|={bic:+.3f}  factory|IC|={fac_ic:+.3f}{flag}")
+        if adopt:
+            w = _w(LABEL_VEC[blbl])
+            overrides[tgt] = {"conv_weight_direction": round(w["w_direction"], 3),
+                              "conv_weight_breadth": round(w["w_breadth"], 3),
+                              "conv_weight_magnitude": round(w["w_magnitude"], 3),
+                              "conv_weight_regime": round(w["w_regime"], 3)}
+    print_overrides_snippet(overrides)
 
 
 if __name__ == "__main__":

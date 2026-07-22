@@ -68,10 +68,10 @@ from convergence.intelligence import (
     DEFAULT_THRESHOLDS,
 )
 
-# Same target set / lens as the marker study (commodities/FX + small India
+# Same target set as the marker study (commodities/FX + small India
 # sectors; large baskets skipped for runtime).
 TARGETS = ["Gold", "Copper", "Cotton", "USD/INR", "Jeera", "Nifty Bank", "Nifty IT", "Nifty Auto"]
-HOLD = (5, 10)          # Tactical lens hold grid (the default lens)
+HOLD = (5, 10)          # the fixed forecast hold horizons (HOLD_HORIZONS)
 N_TRIALS = 20           # per-window mini-TPE budget (matches walk_forward_ic)
 L2_ALPHA = 0.10
 N_CV_FOLDS = 4

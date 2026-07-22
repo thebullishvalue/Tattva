@@ -75,8 +75,10 @@ _MIN_STRONG_N = 25          # occupancy floor: pooled non-overlap obs per strong
 
 
 def _consensus_obs(hs=(10, 20)):
-    """Pooled non-overlapping (signal, fwd%) per horizon for the live consensus."""
+    """Pooled non-overlapping (signal, fwd%) per horizon for the live consensus.
+    Returns (pooled_obs, per_target_signal) — the latter for the per-instrument reco."""
     pooled = {h: ([], []) for h in hs}
+    per_tgt: dict = {}
     for k, tgt in enumerate(TARGETS, 1):
         try:
             ts = _aarambh_ts(tgt)
@@ -93,6 +95,7 @@ def _consensus_obs(hs=(10, 20)):
             continue
         v = (causal_normalize(np.array(raw_a, float))
              + causal_normalize(np.array(raw_n, float))) / 2.0
+        per_tgt[tgt] = v
         pr = pd.to_numeric(ts["Price"], errors="coerce").to_numpy(float)
         pidx = {d: i for i, d in enumerate(ts.index)}
         for h in hs:
@@ -103,13 +106,15 @@ def _consensus_obs(hs=(10, 20)):
                     continue
                 V.append(v[j]); R.append((pr[i + h] / pr[i] - 1) * 100)
         print(f"  [{k}/{len(TARGETS)}] {tgt:<12} {len(dates)} aligned days", flush=True)
-    return {h: (np.array(V), np.array(R)) for h, (V, R) in pooled.items()}
+    return {h: (np.array(V), np.array(R)) for h, (V, R) in pooled.items()}, per_tgt
 
 
 def _composite_obs(hs=(5, 10)):
-    """Pooled non-overlapping (composite, Ret_hb%) per horizon from the live frame."""
+    """Pooled non-overlapping (composite, Ret_hb%) per horizon from the live frame.
+    Returns (pooled_obs, per_target_signal) — the latter for the per-instrument reco."""
     from calibration_lift_study import _convergence_frame
     pooled = {h: ([], []) for h in hs}
+    per_tgt: dict = {}
     for k, tgt in enumerate(TARGETS, 1):
         try:
             frame = _convergence_frame(tgt)
@@ -121,6 +126,7 @@ def _composite_obs(hs=(5, 10)):
                   f"({0 if frame is None else len(frame)} frame rows)", flush=True)
             continue
         comp = _composite_signal(frame, DEFAULT_WEIGHTS.copy())
+        per_tgt[tgt] = np.asarray(comp, dtype=float)
         for h in hs:
             col = f"Ret_{h}b"
             if col not in frame.columns:
@@ -131,7 +137,7 @@ def _composite_obs(hs=(5, 10)):
                 if np.isfinite(comp[j]) and np.isfinite(r[j]):
                     V.append(comp[j]); R.append(r[j])
         print(f"  [{k}/{len(TARGETS)}] {tgt:<12} {len(frame)} frame rows", flush=True)
-    return {h: (np.array(V), np.array(R)) for h, (V, R) in pooled.items()}
+    return {h: (np.array(V), np.array(R)) for h, (V, R) in pooled.items()}, per_tgt
 
 
 def _spread_t(a: np.ndarray, b: np.ndarray) -> float:
@@ -221,14 +227,37 @@ def main():
     t0 = time.time()
 
     print("\n### building CONSENSUS series (live causal construction)…", flush=True)
-    cons = _consensus_obs((10, 20))
+    cons, cons_pt = _consensus_obs((10, 20))
     _sweep("CONSENSUS (hero headline · DEFAULT_THRESHOLDS)", cons,
            (abs(DEFAULT_THRESHOLDS["buy_moderate"]), abs(DEFAULT_THRESHOLDS["buy_strong"])))
 
     print("\n### building COMPOSITE frames (live CrossValidator pipeline)…", flush=True)
-    comp = _composite_obs((5, 10))
+    comp, comp_pt = _composite_obs((5, 10))
     _sweep("COMPOSITE (calibrated-row factory · COMPOSITE_THRESHOLDS)", comp,
            (abs(COMPOSITE_THRESHOLDS["buy_moderate"]), abs(COMPOSITE_THRESHOLDS["buy_strong"])))
+
+    # ── PER-INSTRUMENT thresholds (gated: target |signal| p75/p90 vs the pooled
+    #    house convention) ──────────────────────────────────────────────────
+    from research._per_instrument import (per_instrument_anchor_reco, merge_overrides,
+                                           print_overrides_snippet)
+    print("\n" + "=" * 78)
+    print("  PER-INSTRUMENT CLASSIFICATION THRESHOLDS (target p75/p90 vs pooled)")
+    print("=" * 78)
+    def _q(arr, q):
+        a = np.abs(np.asarray(arr, float)); a = a[np.isfinite(a)]
+        return (float(np.quantile(a, q)), int(len(a))) if len(a) else (float("nan"), 0)
+    own = set(TARGETS)
+    overrides: dict = {}
+    for field, pt, pooled in (
+        ("consensus_moderate", cons_pt, abs(DEFAULT_THRESHOLDS["buy_moderate"])),
+        ("consensus_strong",   cons_pt, abs(DEFAULT_THRESHOLDS["buy_strong"])),
+        ("composite_moderate", comp_pt, abs(COMPOSITE_THRESHOLDS["buy_moderate"])),
+        ("composite_strong",   comp_pt, abs(COMPOSITE_THRESHOLDS["buy_strong"])),
+    ):
+        q = 0.75 if field.endswith("moderate") else 0.90
+        merge_overrides(overrides, per_instrument_anchor_reco(
+            field, {t: _q(pt[t], q) for t in pt}, pooled, own))
+    print_overrides_snippet(overrides)
 
     print(f"\n  total {time.time() - t0:.0f}s", flush=True)
 

@@ -44,6 +44,9 @@ from core.config import (
     UI_CONSENSUS_STRONG, UI_CONSENSUS_MODERATE,
     UI_CONVRAW_STRONG, UI_CONVRAW_MODERATE, UI_NIRNAY_AVG_THRESHOLD,
 )
+from research._per_instrument import (
+    per_instrument_anchor_reco, merge_overrides, print_overrides_snippet,
+)
 import engines.aarambh as aa
 aa.ENSEMBLE_MODELS = ("ridge", "ols")          # fast base for the conviction series
 from engines.aarambh import FairValueEngine
@@ -170,6 +173,7 @@ def main():
     _load()
     print(f"Tattva — Unified-Signal marker study · {len(TARGETS)} targets", flush=True)
     S1, S2, S3, FW = [], [], [], []
+    PT: dict = {}       # per-target series, for the per-instrument marker reco
     t0 = time.time()
     for k, tgt in enumerate(TARGETS, 1):
         try:
@@ -180,6 +184,7 @@ def main():
         if r is None:
             print(f"  [{k}/{len(TARGETS)}] {tgt:<12} skipped", flush=True)
             continue
+        PT[tgt] = r
         S1.append(r["S1"]); S2.append(r["S2"]); S3.append(r["S3"]); FW.append(r["fwd"])
         print(f"  [{k}/{len(TARGETS)}] {tgt:<12} {len(r['S1'])} days", flush=True)
     if not S1:
@@ -200,6 +205,29 @@ def main():
     print("\n  NOTE: percentiles describe how EXTREME a reading is vs history (robust).")
     print("  Forward-return-by-quintile is the (noisy) edge check — near-zero IC means")
     print("  the markers are interpretive guides, not actionable thresholds.")
+
+    # ── PER-INSTRUMENT markers (gated) ───────────────────────────────────
+    # Adopt a target-specific marker only where its OWN |signal| distribution
+    # materially diverges from the pooled anchor; else keep the house convention.
+    print("\n" + "=" * 72)
+    print("  PER-INSTRUMENT MARKERS (target's own p90/p75 vs pooled anchor)")
+    print("=" * 72)
+    def _q(arr, q):
+        a = np.abs(arr[np.isfinite(arr)])
+        return (float(np.quantile(a, q)), int(len(a))) if len(a) else (float("nan"), 0)
+    def _pool(arr, q):
+        return float(np.quantile(np.abs(arr[np.isfinite(arr)]), q))
+    own = set(TARGETS)
+    overrides: dict = {}
+    for field, sig, qq in (
+        ("ui_consensus_strong", "S1", 0.90), ("ui_consensus_moderate", "S1", 0.75),
+        ("ui_convraw_strong", "S2", 0.90), ("ui_convraw_moderate", "S2", 0.75),
+        ("ui_nirnay_avg_threshold", "S3", 0.75),
+    ):
+        pooled = {"S1": S1, "S2": S2, "S3": S3}[sig]
+        merge_overrides(overrides, per_instrument_anchor_reco(
+            field, {t: _q(PT[t][sig], qq) for t in PT}, _pool(pooled, qq), own))
+    print_overrides_snippet(overrides)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ Question: at each horizon, do the predictions actually predict — and which is 
 potent, TATTVA'S OWN model forecast or the analog/PRECEDENT base rate?
 
 For each horizon config we fit the real FairValueEngine at that horizon (so its
-forecast AND the residual→AvgZ/breadth state features are native to the lens),
+forecast AND the residual→AvgZ/breadth state features are native to the horizon),
 then walk forward and score TWO causal predictors against realized returns:
 
   • TATTVA  — engine.ts_data["FairValue"]: the model's predicted forward return
@@ -13,7 +13,8 @@ then walk forward and score TWO causal predictors against realized returns:
   • ANALOG  — median forward return of the top-N Mahalanobis analogs (purge =
               horizon, so each analog's outcome is known as of the as-of date).
 
-Horizons studied: 5d (honorary), Tactical 10d, Swing 20d, Positional 90d.
+Horizons studied: 5d, 10d (the fixed forecast horizon), 20d, 90d — a spread
+spanning the fixed 1/3/5/10/20/60d precedent term structure and beyond.
 
 Run: python3 precedent_study.py
 """
@@ -48,17 +49,17 @@ W_MAHA, W_TRAJ, W_RECV = 0.55, 0.35, 0.10
 CONFIGS = [
     ("2d",             2,   5),
     ("3d",             3,  10),
-    ("5d (honorary)",  5,  10),
+    ("5d",             5,  10),
     ("7d",             7,  15),
-    ("Tactical 10d",  10,  20),
+    ("10d (forecast)", 10,  20),   # the fixed forecast horizon
     ("12d",           12,  24),
     ("15d",           15,  30),
-    ("Swing 20d",     20,  40),
+    ("20d",           20,  40),
     ("25d",           25,  45),
     ("30d",           30,  50),
     ("40d",           40,  60),
     ("60d",           60,  90),
-    ("Positional 90d", 90, 90),
+    ("90d",           90,  90),
     ("120d",         120, 120),
 ]
 

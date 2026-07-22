@@ -8,8 +8,65 @@ constraint, or product identity — tuning is not meaningful), or **budget** (a 
 budget, not a signal parameter). Anything **pending** is an open gap.
 
 Re-generate the evidence: `python research/run_tuning.py` (full suite) — study keys
-below refer to that suite. Last full audit: **2026-07-13** (full suite re-run
-from scratch on widened 10→3000 grids, `reports/tuning_20260713_004005.txt`).
+below refer to that suite. Last full audit: **2026-07-13**. Latest re-run:
+**2026-07-18** (`reports/tuning_20260718_173837.txt`, post per-instrument /
+self-mode refactor).
+
+**2026-07-18 run — decisions applied (each result read against its study's own
+"adopt only beyond noise" rule; most knobs stood):**
+- `NIRNAY_MSF_LENGTH` **18 → 5** — short windows won CROSS-UNIVERSE at the
+  corrected baseline (`nirnay` commodity/FX |IC| 0.083@5 vs 0.039@18; `nirnay_index`
+  0.103@5 vs 0.050@18); 18 sat in the worst part of both curves.
+- `COMPOSITE_THRESHOLDS` **±0.11/±0.16 → ±0.19/±0.33** — the composite distribution
+  shifted once commodities went Swayam self-mode, and the old pair had drifted to
+  ~p58/p69; re-anchored to the p75/p90 house convention (`hero_thresholds`).
+- **Stood (per the rules):** aarambh knobs (see note below), Nirnay ROC/sensitivity
+  (inert), base_weight / MMR_num_vars (gains concentrated in self-mode or single
+  targets), the Swayam grid (within noise), DDM leak (product/smoothing choice —
+  lower-leak IC gain is just less smoothing + more lag), conv weights (inert), and
+  the UI/marker anchors (within convention or a suspicious unexplained shift).
+- **aarambh_full this run is NOT authoritative:** its `BASE` was stale
+  (refit=5/maxt=750/mint=500/pca=20 held during sweeps vs live 63/350/150/2), so the
+  interactions were measured off-baseline. `BASE` is now pulled from live config
+  (like `nirnay`'s) — re-run `aarambh_full` for valid numbers.
+
+**Per-instrument vs asset-level model**: the engine-knob constants below are the
+DEFAULT values of `core.config.InstrumentConfig`. Five catalogue classes are tuned
+**per instrument** — every commodity, the currency, every India index, every US
+index and the ETF target carries its own knobs via `PER_INSTRUMENT_TUNING`
+(hand-wired values in `_PER_INSTRUMENT_OVERRIDES`, layered on the class default).
+The India/US **stock** classes stay **asset-level** (one config per market in
+`STOCK_CONFIGS`), because free-form symbols can't be pre-tuned. The study
+justifications below establish the class DEFAULTS (what an un-overridden instrument
+uses); the per-instrument STUDIES (`swayam`, `nirnay_index`, `nirnay`, `per_asset`,
+and now `aarambh_full` for the forecast knobs) emit a **gated per-target**
+recommendation — a copy-paste `_PER_INSTRUMENT_OVERRIDES` snippet — adopting an
+instrument-specific value only when that target's own best \|IC\| clears a floor
+AND beats its class-default \|IC\| by a margin (else it keeps the class default).
+Populating those overrides needs a clean study re-run.
+
+**Aarambh is now per-instrument too** (2026-07-20): the 7 training knobs
+(`aarambh_refit_interval` / `aarambh_min_train_size` / `aarambh_max_train_size` /
+`aarambh_ensemble_models` / `aarambh_ridge_alphas` / `aarambh_huber_epsilon` /
+`aarambh_lookback_windows`, plus `pca_components`) are `InstrumentConfig` fields
+threaded into `FairValueEngine.fit(config=…)`, so the fair-value forecast can be
+tuned per instrument / asset class exactly like the breadth engines.
+
+**Interpretation layer is now per-instrument too** (2026-07-20): the data-anchored
+markers, UI tiers, classification thresholds and analog blend weights are
+`InstrumentConfig` fields (consumed at the read sites — convergence classification
+threshold seed, Convergence/Aarambh/Nirnay tab markers & tiers, analog matcher
+weights). Only STRUCTURAL constants stay global (R²/ADF/KPSS/HMM cut-points and
+chart dimensions — statistical definitions, not distribution anchors, so
+per-instrument is meaningless). The interpretation STUDIES (`markers`,
+`hero_thresholds`, `ui_anchors`, `conv_weights`, `analog`) now ALSO emit gated
+per-instrument recommendations — a copy-paste `_PER_INSTRUMENT_OVERRIDES` snippet.
+Two gate flavours (research/_per_instrument.py): the percentile-anchor studies
+(markers / hero_thresholds / ui_anchors) adopt a target-specific anchor only when
+its OWN distribution diverges from the pooled default by ≥25% AND has ≥250 obs
+(thin targets keep the house convention); the IC studies (conv_weights / analog)
+use the same |IC|-floor + beat-default-by-margin gate as the engine studies. So
+every study — engine and interpretation — is now at full per-instrument parity.
 
 **POLICY CHANGE (2026-07-13, per user directive): config now tracks the
 report's recommendation outputs LITERALLY.** Every constant with an explicit
@@ -45,9 +102,12 @@ that is expected under this policy, not drift.
 
 | Constant | Status | Evidence / study key |
 |---|---|---|
-| NIRNAY_MSF_LENGTH | study-tuned | `nirnay` + `nirnay_index` (cross-universe guard: 20 stands, commodity winner rejected) |
-| NIRNAY_ROC_LEN, REGIME_SENSITIVITY, BASE_WEIGHT, MMR_NUM_VARS | study-tuned | `nirnay` (densified OFAT; sensitivity/num_vars measured INERT) |
+| NIRNAY_MSF_LENGTH = 5 (basket-mode default) | study-tuned | `nirnay` + `nirnay_index` 2026-07-18: short windows win cross-universe (|IC| 0.083/0.103 @5 vs 0.039/0.050 @18); only affects basket mode (self mode uses swayam_lengths) |
+| NIRNAY_ROC_LEN, REGIME_SENSITIVITY, BASE_WEIGHT, MMR_NUM_VARS | study-tuned | `nirnay` (densified OFAT; sensitivity/num_vars measured INERT); `per_asset` per class |
 | NIRNAY_OVERSOLD / OVERBOUGHT (±5) | data-anchored | `ui_anchors` 2026-07-12: ±5 = p81 of 152k pooled per-instrument obs — validated, kept |
+| NIRNAY_SWAYAM_LENGTHS, NIRNAY_SWAYAM_ROC_FRAC (self-ensemble grid) | study-tuned | `swayam` tunes the grid span + roc_frac PER COMMODITY (breadth IC on each self-mode commodity → gated `_PER_INSTRUMENT_OVERRIDES` snippet). Efficacy vs basket: `nirnay_swayam` (NIRNAY_SWAYAM_PLAN.md §7). Class default runs until a per-commodity override is wired |
+| Per-instrument `InstrumentConfig` knobs (commodity/fx/india_index/us_index/etf) | study-tuned | PER INSTRUMENT: `swayam` (per-commodity Swayam grid), `nirnay_index` (per-index MSF, all 24 India indices), `nirnay` (USD/INR + Jeera basket knobs), `per_asset` (per-index MSF: S&P 500 / Nasdaq 100 / Dow Jones + ETF). Each emits a gated snippet → `_PER_INSTRUMENT_OVERRIDES`. Stock classes are ASSET-LEVEL (`per_asset` pools **India=Nifty 100**, **US=Nasdaq 100** → `STOCK_CONFIGS`), not per instrument |
+| register_stock_target / resolve_stock_symbol, NIRNAY_SWAYAM_FALLBACK | structural | free-form individual-stock symbol resolution (NSE→BSE probe, runtime target registration) + basket-empty fallback switch (kept `False` until `nirnay_swayam` passes) |
 
 ## Convergence layer (core/config.py, convergence/)
 
@@ -55,11 +115,11 @@ that is expected under this policy, not drift.
 |---|---|---|
 | CONV_WEIGHT_DIRECTION/BREADTH/MAGNITUDE/REGIME | study-tuned | `conv_weights` (unfitted vector sweep on live frames) |
 | DEFAULT_THRESHOLDS (consensus ±0.26/±0.39) | study-tuned | `hero_thresholds` (no separation winner → p75/p90 occupancy anchor) |
-| COMPOSITE_THRESHOLDS (±0.11/±0.18) | study-tuned | `hero_thresholds` (8-target p75/p90 re-validation) |
+| COMPOSITE_THRESHOLDS (±0.19/±0.33) | study-tuned | `hero_thresholds` 2026-07-18: re-anchored ±0.11/±0.16 → p75/p90 after the composite distribution shifted (commodities → Swayam self mode); old pair had drifted to ~p58/p69. Conviction-model tiers derive from this, so they auto-tracked (19/33) |
 | Headline construction (consensus vs calibrated) | study-tuned | `calibration_lift` (3-arm paired: consensus +0.039 ≥ cal +0.022; cal−raw = 0.000) |
 | CONV_DDM_LEAK/DRIFT/LRV | study-tuned | `ddm` |
 | CONV_STRONG/MODERATE/WEAK_BULLISH/BEARISH (±27/18/11) | data-anchored | `ui_anchors` 2026-07-12: re-anchored ±60/30/10 → p97.5/p90/p75 of \|convergence_score\| (old MODERATE=p98, STRONG unreachable — max observed ≈35); aligned with COMPOSITE_THRESHOLDS×100 |
-| conviction_model tiers (6/11/18, was CONVICTION_* 20/40/60) | data-anchored | F1 fix 2026-07-12: the model bins the smoothed COMPOSITE, now on the composite's own anchors (COMPOSITE_THRESHOLDS×100 + measured p50); sharing the engine's tiers put NEUTRAL on ~96% of days |
+| conviction_model tiers (6/19/33, derived from COMPOSITE_THRESHOLDS×100) | data-anchored | binds the smoothed COMPOSITE on the composite's own anchors; DERIVED, so it auto-tracked the 2026-07-18 re-anchor (was 6/11/18) |
 | CONV_ADAPTIVE_SHIFT_MAX (0.10) | pending | pipeline-embedded (weights shift during frame BUILDING); sweeping requires per-value frame rebuilds — documented gap, low priority (calibration_lift showed the weight layer is flat) |
 | INTEL_N_TRIALS, L2 α, CV folds | budget | Optuna budget/regularization of a layer measured to add zero OOS lift (`calibration_lift`) — tuning its budget cannot matter until the layer itself earns lift |
 | DIV_LOOKBACK / DIV_PERSISTENCE_THRESHOLD | structural | event-window definitions (what "recent"/"persistent" mean); hero RISK row windows by DIV_LOOKBACK — vocabulary, not an edge claim |
@@ -72,7 +132,7 @@ that is expected under this policy, not drift.
 | ANALOG_W_MAHA/TRAJ/RECV (1/0/0) | study-tuned | `analog` + `analog_confirm` (22 blends; nothing beats noise) |
 | TOP_N (10), recency half-life, feature set, aggregation | study-tuned | `analog` (incl. pairwise drops, 4 aggregation modes) |
 | Theiler exclusion window max(tw,h) | structural | statistical independence requirement (audit A5), not tunable — smaller reintroduces overlap double-counting |
-| PRECEDENT_HONORARY_HORIZON (+1d tile) | study-tuned | `analog` (1d IC ≈ 0 → display-only, caveated) |
+| PRECEDENT_HORIZONS (1/3/5/10/20/60d term structure) | structural | display/term-structure span for the Precedent tab — a presentation choice, not a fitted signal knob; per-horizon edge is disclosed live by the Analog-Skill walk-forward IC (1d/60d ends read weak by design). Replaces the former display-only PRECEDENT_HONORARY_HORIZON +1d tile |
 
 ## Hero card interpretation (ui/components.py)
 

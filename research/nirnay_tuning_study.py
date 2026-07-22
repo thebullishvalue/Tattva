@@ -8,8 +8,16 @@ the cross-sectional BREADTH signal — and are the current hand-set values reaso
 Method: for each config (one-factor-at-a-time around the current defaults), run the
 REAL Nirnay pipeline per constituent (MSF + MMR + regime loop), aggregate to a daily
 breadth oscillator (mean Unified_Osc across the basket), and score its NON-OVERLAPPING
-OOS rank IC vs the TARGET's forward 10d return. Run on the 7 commodity/FX targets
-(small baskets); equity indices skipped (50+ constituents each → too heavy).
+OOS rank IC vs the TARGET's forward 10d return (the fixed forecast horizon). Run on
+the commodity/FX baskets (small baskets); equity indices skipped here (50+
+constituents → too heavy; nirnay_index covers them).
+
+SCOPE (post-refactor): these validate the BASKET-mode Nirnay knobs — the ones that
+apply at runtime to the basket-mode classes (FX, Jeera, indices). The commodity
+targets now run Nirnay-SWAYAM self-mode live, but their curated baskets are retained
+(core.config.COMMODITY_BASKETS) and used here as additional basket cross-sections for
+statistical power on these shared knobs. The self-mode knobs (Swayam grid, self
+breadth) are tuned by `swayam` and `per_asset` instead.
 
 Honest caveat: breadth is ONE dimension of an already-modest convergence signal, so
 big swings are not expected — the goal is "do the knobs matter / are defaults sane".
@@ -31,10 +39,32 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)
 from data.fetcher import fetch_commodity_dataset, fetch_macro_live, fetch_constituent_ohlcv
 from data.constituents import get_commodity_basket
 from engines.nirnay import run_full_analysis
+from core.config import (
+    NIRNAY_MSF_LENGTH, NIRNAY_ROC_LEN, NIRNAY_REGIME_SENSITIVITY,
+    NIRNAY_BASE_WEIGHT, NIRNAY_MMR_NUM_VARS,
+)
+from research._per_instrument import (
+    per_instrument_reco, merge_overrides, print_overrides_snippet,
+)
+
+# Study-knob → InstrumentConfig field, for the per-instrument override snippet.
+CONFIG_FIELD = {
+    "length": "nirnay_msf_length", "roc": "nirnay_roc_len",
+    "sens": "nirnay_regime_sensitivity", "bw": "nirnay_base_weight",
+    "nv": "nirnay_mmr_num_vars",
+}
+# Targets this study OWNS for per-instrument wiring: the BASKET-mode ones (fx +
+# hybrid). The commodities are self-mode at runtime — their per-instrument grid
+# is tuned by `swayam`; here they are context cross-sections for the shared knobs.
+OWN_TARGETS = {"USD/INR", "Jeera"}
 
 TARGETS = ["Gold", "Silver", "Copper", "Cotton", "USD/INR", "Brent Crude", "Jeera"]
-H = 10                                   # forward horizon (Tactical lens)
-BASE = dict(length=20, roc=14, sens=1.5, bw=0.6, nv=5)
+H = 10                                   # forward horizon (the fixed FORECAST_HORIZON)
+# Sweep centre = the LIVE InstrumentConfig defaults (pulled from config so this
+# never drifts from the shipped values again). The "←current" tag below marks
+# whichever grid point equals the live default.
+BASE = dict(length=NIRNAY_MSF_LENGTH, roc=NIRNAY_ROC_LEN, sens=NIRNAY_REGIME_SENSITIVITY,
+            bw=NIRNAY_BASE_WEIGHT, nv=NIRNAY_MMR_NUM_VARS)
 # Widened + densified 2026-07-13 (the base cfg is computed once and shared
 # across all five sweeps via the _RFA per-constituent cache, so extra grid
 # points are cheap). Ranges span from near-degenerate short windows to
@@ -131,14 +161,18 @@ def main():
     print(f"Nirnay structural study · {len(TARGETS)} commodity/FX targets · "
           f"breadth IC vs +{H}d return (non-overlapping)", flush=True)
     recs = {}
+    overrides: dict = {}          # per-instrument overrides accumulated across levers
     t0 = time.time()
     for lever, (field, vals) in SWEEPS.items():
-        print(f"\n### {lever}  (base: len20/roc14/sens1.5/bw0.6/nv5)", flush=True)
+        print(f"\n### {lever}  (base: len{BASE['length']}/roc{BASE['roc']}/"
+              f"sens{BASE['sens']}/bw{BASE['bw']}/nv{BASE['nv']})", flush=True)
         print(f"  {'value':<8} {'mean|IC|':>9} {'mean IC':>9}   per-target IC", flush=True)
         best = (None, -9)
+        table: dict = {}          # {value: {target: ic}} for the per-instrument reco
         for v in vals:
             cfg = dict(BASE); cfg[field] = v
             ics = {t: breadth_ic(cfg, t) for t in TARGETS}
+            table[v] = ics
             arr = np.array([x for x in ics.values() if np.isfinite(x)])
             if not len(arr):
                 continue
@@ -149,13 +183,16 @@ def main():
             if mabs > best[1]:
                 best = (v, mabs)
         recs[lever] = best
+        merge_overrides(overrides, per_instrument_reco(
+            CONFIG_FIELD[field], table, BASE[field], OWN_TARGETS))
     print(f"\n  total {time.time()-t0:.0f}s", flush=True)
     print("\n" + "=" * 64)
-    print("  NIRNAY STRUCTURAL — best per knob (by mean |breadth IC|)")
+    print("  NIRNAY STRUCTURAL — best per knob (by mean |breadth IC|, class-level)")
     print("=" * 64)
     for lever, (v, ic) in recs.items():
         chg = "  (unchanged)" if v == BASE[SWEEPS[lever][0]] else f"  ← vs current {BASE[SWEEPS[lever][0]]}"
         print(f"    {lever:<20} {str(v):<6} |IC| {ic:.3f}{chg}")
+    print_overrides_snippet(overrides)
 
 
 if __name__ == "__main__":

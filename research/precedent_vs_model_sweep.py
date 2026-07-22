@@ -1,11 +1,12 @@
 """
-Tattva — MODEL vs ANALOG across the universe, at the two finalized lenses (10d/20d).
+Tattva — MODEL vs ANALOG across the universe, over a horizon sweep.
 
 Now that the Aarambh walk-forward is purged (no train-label leakage), this maps
 where the honest model forecast beats the precedent base rate — and vice-versa —
 per asset class. Refits the engine at EACH horizon (so FairValue forecasts that
 horizon) with purge = horizon, then scores both predictors on NON-OVERLAPPING
-windows.
+windows. The system's fixed forecast horizon is 10d (the Signal-Horizon lens
+selector was removed); the wider sweep here is context for where each signal leads.
 
 Run: python3 -u precedent_vs_model_sweep.py
 """

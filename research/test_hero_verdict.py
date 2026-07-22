@@ -69,7 +69,7 @@ def run() -> None:
     # Degenerate gate is the CALLER's job (consensus passed as None) — chain
     # must fall to the honest Aarambh-only source.
     v = build_hero_verdict(**_v(consensus=None))
-    assert v["source"] == "Aarambh only (no basket convergence)" and v["score"] == -0.30
+    assert v["source"] == "Aarambh only (no bottom-up convergence)" and v["score"] == -0.30
     checks += 1
 
     # ── 2. Label normalisation ───────────────────────────────────────────

@@ -123,7 +123,7 @@ def run() -> None:
     # ── 7. THRESHOLD-DISTRIBUTION PAIRING (the F1 principle, post-anchor) ──
     # The composite classifier's defaults must be the composite's OWN
     # data-anchored cut-points, not the consensus's (wider) set — a score at
-    # the composite's real p90 (~0.18) must label directional, not HOLD.
+    # the composite's real p90 (~0.33, ×100 = 33) must label directional, not HOLD.
     from convergence.normalization import (
         classify_convergence_score, COMPOSITE_THRESHOLDS,
         DEFAULT_THRESHOLDS as CONSENSUS_THRESHOLDS,
@@ -135,13 +135,15 @@ def run() -> None:
     assert abs(COMPOSITE_THRESHOLDS["buy_moderate"]) < abs(CONSENSUS_THRESHOLDS["buy_moderate"]), (
         "composite thresholds should be tighter than consensus thresholds "
         "(different distributions)")
-    assert classify_convergence_score(-20.0) == "STRONG BUY"   # ~p90+ magnitude
-    assert classify_convergence_score(-12.0) == "BUY"          # ~p75-p90
-    assert classify_convergence_score(-5.0) == "HOLD"          # sub-moderate
-    assert classify_convergence_score(+20.0) == "STRONG SELL"
-    # A p90-scale day under the CONSENSUS thresholds would misread as HOLD —
-    # the exact mispairing this check exists to prevent:
-    assert classify_convergence_score(-20.0, CONSENSUS_THRESHOLDS) == "HOLD"
+    # Anchored to COMPOSITE p75/p90 = ±0.092/±0.159 (×100 = ±9.2/±15.9).
+    assert classify_convergence_score(-25.0) == "STRONG BUY"   # beyond p90 (15.9)
+    assert classify_convergence_score(-12.0) == "BUY"          # p75-p90 (9.2-15.9)
+    assert classify_convergence_score(-5.0) == "HOLD"          # sub-moderate (<9.2)
+    assert classify_convergence_score(+25.0) == "STRONG SELL"
+    # A composite-directional day (-12 → BUY on composite) reads HOLD under the
+    # WIDER consensus thresholds (moderate ±27.9) — the exact mispairing this
+    # check exists to prevent:
+    assert classify_convergence_score(-12.0, CONSENSUS_THRESHOLDS) == "HOLD"
     checks += 1
 
     print(f"convergence integrity: ALL {checks} CHECK GROUPS PASSED "

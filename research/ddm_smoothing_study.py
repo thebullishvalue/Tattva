@@ -14,11 +14,11 @@ leak controls memory, gain controls response strength; sweeping leak alone
 would silently change gain and make magnitudes incomparable across the grid.
 
 Scoring per (target, leak): the smoothed series' NON-OVERLAPPING Spearman IC
-vs +10d/+20d forward return (sign-flipped; negative = bullish), plus two cost
-metrics — sign flips/year (whipsaw) and lag (days by which smoothed's cross-
-correlation with raw peaks). A smoother filter should cut whipsaw without
-destroying what little IC the raw series carries or adding lag beyond the
-lens horizon.
+vs +10d (the fixed forecast horizon) and +20d (a robustness horizon) forward
+return (sign-flipped; negative = bullish), plus two cost metrics — sign
+flips/year (whipsaw) and lag (days by which smoothed's cross-correlation with
+raw peaks). A smoother filter should cut whipsaw without destroying what little
+IC the raw series carries or adding lag beyond the forecast horizon.
 
 Run: python -u research/ddm_smoothing_study.py   (script mode from repo root)
 """
@@ -102,7 +102,7 @@ def _sweep(name: str, series_by_tgt: dict[str, tuple[np.ndarray, np.ndarray]],
         if mic > best[1]:
             best = (leak, mic)
     print(f"  best mean IC: leak={best[0]} ({best[1]:+.3f}) — adopt ONLY if the IC")
-    print("  separation is materially outside noise AND lag stays within the lens;")
+    print("  separation is materially outside noise AND lag stays within the horizon;")
     print("  otherwise the shipped leak stands (memory/whipsaw is a product choice).")
 
 

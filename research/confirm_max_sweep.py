@@ -33,30 +33,27 @@ def main():
     df = _df()
     targets = [t for t in ALL_TARGETS if t in df.columns and df[t].notna().mean() >= 0.5]
     print(f"Confirmatory MAX_TRAIN sweep @ live MIN={MIN_TRAIN_SIZE} · {len(targets)} targets · "
-          f"lenses {list(HORIZONS)}", flush=True)
-    print(f"  {'MAX_TRAIN':<10} {'10d':>8} {'20d':>8} {'combined':>9} "
-          f"{'Cmdty/FX':>9} {'India-Eq':>9} {'US-Eq':>7}", flush=True)
-    print("  " + "-" * 64, flush=True)
+          f"horizon(s) {list(HORIZONS)}", flush=True)
+    print(f"  {'MAX_TRAIN':<10} {'IC':>8} {'Cmdty/FX':>9} {'India-Eq':>9} {'US-Eq':>7}", flush=True)
+    print("  " + "-" * 52, flush=True)
     t0 = time.time()
     rows = []
     for maxt in MAXT:
         cfg = dict(BASE); cfg["mint"] = MIN_TRAIN_SIZE; cfg["maxt"] = maxt   # ens=ridge+ols (fast base)
-        rec = {"Cmdty/FX": [], "India-Eq": [], "US-Eq": [], 10: [], 20: []}
+        rec: dict = {"Cmdty/FX": [], "India-Eq": [], "US-Eq": [], "ic": []}
         for tgt in targets:
             for h, mom in HORIZONS.items():
                 ic, _ = fit_ic(cfg, tgt, h, mom)
                 if np.isfinite(ic):
-                    rec[h].append(ic); rec[_class(tgt)].append(ic)
-        ic10, ic20 = np.mean(rec[10]), np.mean(rec[20])
-        comb = np.nanmean([ic10, ic20])
+                    rec["ic"].append(ic); rec[_class(tgt)].append(ic)
+        ic_mean = np.mean(rec["ic"]) if rec["ic"] else np.nan
         cf, ie, us = (np.mean(rec[c]) if rec[c] else np.nan for c in ("Cmdty/FX", "India-Eq", "US-Eq"))
-        rows.append((maxt, comb))
+        rows.append((maxt, ic_mean))
         mark = "  ←current" if maxt == MAX_TRAIN_SIZE else ""
-        print(f"  {maxt:<10} {ic10:>+8.3f} {ic20:>+8.3f} {comb:>+9.3f} "
-              f"{cf:>+9.3f} {ie:>+9.3f} {us:>+7.3f}{mark}", flush=True)
+        print(f"  {maxt:<10} {ic_mean:>+8.3f} {cf:>+9.3f} {ie:>+9.3f} {us:>+7.3f}{mark}", flush=True)
     best = max(rows, key=lambda x: x[1])
     print("  " + "-" * 64, flush=True)
-    print(f"  best @ MIN={MIN_TRAIN_SIZE}: MAX_TRAIN={best[0]} (combined IC {best[1]:+.3f})  "
+    print(f"  best @ MIN={MIN_TRAIN_SIZE}: MAX_TRAIN={best[0]} (mean IC {best[1]:+.3f})  "
           f"[{time.time()-t0:.0f}s]", flush=True)
 
 

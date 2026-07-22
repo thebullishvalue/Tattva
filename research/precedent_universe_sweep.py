@@ -1,9 +1,10 @@
 """
 Tattva — Precedent (analog) potency sweep across the WHOLE target universe.
 
-Goal: let real computational evidence pick the two horizons to keep — a SHORT
-(Tactical) and a LONG (Positional) — and decide which horizons the analog
-precedent is actually reliable at (so we trim the Precedent hold grid to those).
+Goal: let real computational evidence validate the SINGLE fixed forecast horizon
+(FORECAST_HORIZON = 10d — the Signal-Horizon lens selector was removed) and decide
+which horizons the analog precedent is actually reliable at, framing the fixed
+precedent term structure (PRECEDENT_HORIZONS = 1/3/5/10/20/60d) shown on the tab.
 
 Method (honest, fully causal):
   • Fit the real FairValueEngine once per target (20d/40d) → causal ts_data

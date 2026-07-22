@@ -49,7 +49,7 @@ from core.config import (
 )
 from calibration_lift_study import _ts_nd, _convergence_frame, TARGETS
 
-H = 10  # forward lens for the (informational) edge check
+H = 10  # forward horizon for the (informational) edge check
 
 _PCTS = (25, 40, 50, 60, 70, 75, 80, 85, 90, 92.5, 95, 97.5, 99, 99.5)
 
@@ -89,6 +89,8 @@ def main() -> None:
     conv_b, spread, bandw, osb, agree, cscore = [], [], [], [], [], []
     avg_sig = []
     fwd_conv = []
+    # Per-target arrays for the per-instrument (gated) anchor reco.
+    PT_conv: dict = {}; PT_agree: dict = {}; PT_cscore: dict = {}; PT_osb: dict = {}
     t0 = time.time()
     for k, tgt in enumerate(TARGETS, 1):
         ts, nd = _ts_nd(tgt)
@@ -96,7 +98,8 @@ def main() -> None:
             print(f"  [{k}/{len(TARGETS)}] {tgt:<12} skipped", flush=True); continue
         ok = ts.get("Valid")
         tsv = ts[ok.astype(bool)] if ok is not None else ts
-        conv_b.append(pd.to_numeric(tsv.get("ConvictionBounded"), errors="coerce").to_numpy(float))
+        _cb = pd.to_numeric(tsv.get("ConvictionBounded"), errors="coerce").to_numpy(float)
+        conv_b.append(_cb); PT_conv[tgt] = _cb
         # ×1e4: the UI tile (tab_aarambh) displays ModelSpread in BASIS POINTS;
         # the raw column is a log-return std (~1e-3). Pooling the raw units
         # against the bps-scaled constants produced a false "dead scale" read
@@ -107,9 +110,13 @@ def main() -> None:
         if "ConvictionUpper" in tsv.columns and "ConvictionLower" in tsv.columns:
             bandw.append((pd.to_numeric(tsv["ConvictionUpper"], errors="coerce")
                           - pd.to_numeric(tsv["ConvictionLower"], errors="coerce")).to_numpy(float))
+        _osb_t = []
         for c in ("OversoldBreadth", "OverboughtBreadth"):
             if c in tsv.columns:
-                osb.append(pd.to_numeric(tsv[c], errors="coerce").to_numpy(float))
+                _arr = pd.to_numeric(tsv[c], errors="coerce").to_numpy(float)
+                osb.append(_arr); _osb_t.append(_arr)
+        if _osb_t:
+            PT_osb[tgt] = np.concatenate(_osb_t)
         pr = pd.to_numeric(tsv.get("Price"), errors="coerce").to_numpy(float)
         fr = np.full(len(pr), np.nan)
         fr[:-H] = (pr[H:] / pr[:-H] - 1) * 100
@@ -123,9 +130,11 @@ def main() -> None:
         except Exception:
             frame = None
         if frame is not None:
-            for col, sink in (("agreement_ratio", agree), ("convergence_score", cscore)):
+            for col, sink, pt in (("agreement_ratio", agree, PT_agree),
+                                  ("convergence_score", cscore, PT_cscore)):
                 if col in frame.columns:
-                    sink.append(pd.to_numeric(frame[col], errors="coerce").to_numpy(float))
+                    _a = pd.to_numeric(frame[col], errors="coerce").to_numpy(float)
+                    sink.append(_a); pt[tgt] = _a
         print(f"  [{k}/{len(TARGETS)}] {tgt:<12} pooled", flush=True)
 
     print(f"\n  built in {time.time()-t0:.0f}s")
@@ -173,6 +182,38 @@ def main() -> None:
                      {"OVERSOLD/OVERBOUGHT": abs(NIRNAY_OVERSOLD)})
     except Exception as e:
         print(f"\n  per-instrument osc pool failed: {e}")
+
+    # ── PER-INSTRUMENT tiers (gated: target distribution vs pooled anchor) ──
+    # Skipped here on purpose: UI_MODEL_SPREAD_* (this pool uses the fast ridge+ols
+    # basket — the caveat above; re-anchor only from an ols+huber measurement) and
+    # NIRNAY_OVERSOLD/OVERBOUGHT (the osc pool isn't cleanly per-target).
+    from core.config import InstrumentConfig as _IC
+    from research._per_instrument import (per_instrument_anchor_reco, merge_overrides,
+                                          print_overrides_snippet)
+    _b = _IC()
+    print("\n" + "=" * 74)
+    print("  PER-INSTRUMENT TIERS (target percentile vs pooled convention anchor)")
+    print("=" * 74)
+    def _q(arr, q):
+        a = np.abs(np.asarray(arr, float)); a = a[np.isfinite(a)]
+        return (float(np.quantile(a, q)), int(len(a))) if len(a) else (float("nan"), 0)
+    own = set(TARGETS)
+    overrides: dict = {}
+    #  field                  per-target src   pooled default        percentile
+    for field, src, pooled, q in (
+        ("conviction_weak",     PT_conv,   _b.conviction_weak,     0.50),
+        ("conviction_moderate", PT_conv,   _b.conviction_moderate, 0.75),
+        ("conviction_strong",   PT_conv,   _b.conviction_strong,   0.90),
+        ("ui_agreement_moderate", PT_agree, _b.ui_agreement_moderate, 0.75),
+        ("ui_agreement_strong",   PT_agree, _b.ui_agreement_strong,   0.90),
+        ("conv_display_weak",     PT_cscore, _b.conv_display_weak,     0.50),
+        ("conv_display_moderate", PT_cscore, _b.conv_display_moderate, 0.75),
+        ("conv_display_strong",   PT_cscore, _b.conv_display_strong,   0.90),
+        ("ui_breadth_high",       PT_osb,    _b.ui_breadth_high,       0.90),
+    ):
+        merge_overrides(overrides, per_instrument_anchor_reco(
+            field, {t: _q(src[t], q) for t in src}, pooled, own))
+    print_overrides_snippet(overrides)
 
     print("\n  NOTE: these are EXTREMENESS tiers (display/alert vocabulary), not")
     print("  actionable edges. Re-anchor a constant when its current occupancy is")

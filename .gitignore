@@ -9,4 +9,3 @@ research/.tune_cache/
 research/reports/
 .cache/
 *.log
-.pytest_cache/

@@ -1,11 +1,95 @@
-# Tattva
-# streamlit is pinned exactly: 1.53+ moved to Starlette/uvicorn and, unpinned, can resolve a
-# Starlette whose GZipResponder signature Streamlit's server does not match (every request 500s).
-# 1.52.x keeps the Tornado server; 1.52.2 is the lowest that runs on Streamlit Cloud's Python.
+# Tattva — Unified Convergence Analysis System
+# @thebullishvalue Product
+
+# Core Framework
+# Lower bound: the UI passes width='stretch' to st.button/st.plotly_chart/
+# st.dataframe, an argument introduced in 1.42 — on older versions (e.g. 1.37.1)
+# the app crashes at first render with TypeError: unexpected keyword 'width'.
+#
+# Upper bound, <1.53.0 — two independent reasons, either one sufficient:
+#
+#  1. THE SERVER STACK. 1.53 began the move off Tornado to Starlette/uvicorn,
+#     and Streamlit did not cap its Starlette dependency until 1.61.1. Every
+#     release in 1.57.0–1.61.0 declares `starlette>=0.40.0` (1.60/1.61.0 widen
+#     it only to `<2`), so a fresh install resolves whatever Starlette is
+#     newest. Starlette 1.4.0 made `thread_minimum_size` a REQUIRED
+#     keyword-only argument of `GZipResponder.__init__`, which Streamlit's
+#     `_MediaAwareGZipResponder` subclass does not pass — so every HTTP
+#     request, health checks included, dies with
+#     `TypeError: GZipResponder.__init__() missing 1 required keyword-only
+#     argument: 'thread_minimum_size'` and the deploy serves 500s. (Narrow
+#     window: 1.4.1 gave the argument a default. But an unpinned resolve is a
+#     lottery, and this is what Streamlit Cloud drew.) Staying under 1.53
+#     keeps the Tornado server, so the ASGI path that crashes is never run.
+#
+#  2. THE UI IS BUILT ON STREAMLIT'S INTERNAL DOM. The design system hooks
+#     `data-testid` attributes, the placement of the `st-key-*` class, and the
+#     exact wrapper nesting inside an element container — `.panel-hdr`
+#     centring depends on dissolving `stMarkdown`/`stMarkdownContainer` with
+#     `display: contents`. None of that is public API. It was measured against
+#     1.51.0; a frontend rewrite would silently un-style the app.
+#
+# PINNED EXACTLY, and it has to be — this package is a UI contract, not a
+# dependency with a floor.
+#
+# A range is what caused a live bug. The ceiling `<1.53.0` still admitted
+# 1.52.x, so a local run on 1.51.0 and a Streamlit Cloud deploy on 1.52.2 were
+# two different frontends: 1.52 inserts an anonymous `display: flex;
+# flex-direction: row` div between `stMarkdown` and `stMarkdownContainer`, and
+# every rule in theme.css that repairs Streamlit's collapsing wrappers lands
+# somewhere different because of it. The landing page's system panels rendered
+# with their copy beside their spec rows at half width each, and the rail's
+# group labels overlapped the controls under them. Nothing was wrong with the
+# CSS; it had been measured against a frontend that was not the one served.
+#
+# 1.52.2 and not 1.51.0, which is the version the design system was originally
+# measured against, because 1.51 CANNOT run on Streamlit Cloud: it requires
+# `pyarrow<22`, and pyarrow only publishes cp314 wheels from 22.0.0, while
+# Cloud is on Python 3.14. The deployable floor is therefore 1.52.0, and the
+# UI is now measured against 1.52.2 instead.
+#
+# Develop on this exact version too. `pip install -r requirements.txt` gives it
+# to you; a local interpreter on a different Streamlit is how this bug reached
+# production in the first place.
 streamlit==1.52.2
+# Belt and braces, inert under the ceiling above: on Tornado, Streamlit never
+# imports Starlette, so this only installs ~1MB of unused package. It earns its
+# place the day someone raises that ceiling — it caps Starlette below 1.4.0 and
+# stops the crash reappearing on a Streamlit that still ships the unfixed call.
 starlette>=0.46.0,<1.0.0
 pandas>=2.1.0
 numpy>=1.24.0
-scipy>=1.11.0
 plotly>=5.18.0
-yfinance>=0.2.40
+# Deliberately unpinned. On the deploy target (Linux x86_64, Python 3.14) pip
+# resolves numba 0.66.0 / llvmlite 0.48.0 — both stable — and backtracks numpy
+# to 2.4.6 on its own to satisfy numba's `numpy<2.5`.
+#
+# On an INTEL Mac the same install yields numba 0.63.0b1, a pre-release, and
+# that is not something a version pin here can fix: numba 0.66.0 publishes a
+# cp314 wheel for macosx_12_0_ARM64 and none for macOS x86_64, so on Intel
+# there is no stable wheel to choose and pip falls back to the beta. Capping
+# numpy does NOT change this (verified: capped, Intel macOS still resolves the
+# beta) — it just constrains numpy for no gain. Local Intel-Mac concern only;
+# it does not reach the deployment.
+numba
+
+# Scientific Computing
+scipy>=1.11.0
+scikit-learn>=1.5.0  # 1.5+ enables PCA svd_solver="covariance_eigh" (exact, ~2x faster walk-forward)
+statsmodels>=0.14.0
+
+# Data Sources (yfinance pulls requests transitively)
+yfinance>=0.2.31
+
+# Per-exchange trading calendars for holiday-aware data-freshness counting
+# (data/calendars.py). Offline, keyless — ships its own holiday tables. OPTIONAL:
+# if absent, freshness degrades gracefully to a plain Mon–Fri busday count.
+exchange_calendars>=4.5
+
+# HTML parsers for index-constituent scraping (pandas.read_html, data/universe.py).
+# lxml is the primary parser; html5lib is a lenient fallback for malformed markup.
+lxml>=4.9.0
+html5lib>=1.1
+
+# Terminal Support
+colorama>=0.4.6

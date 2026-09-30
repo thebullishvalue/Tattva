@@ -34,7 +34,7 @@ from core.config import (
     INDEX_TARGETS_MAP,
     ALL_TARGETS,
 )
-from data.cache import ohlcv_cache, macro_cache, _current_session_key
+from data.cache import ohlcv_cache, macro_cache, driver_cache, _current_session_key
 from data.circuit_breaker import (
     yfinance_circuit,
     CircuitBreakerError,
@@ -454,6 +454,46 @@ def fetch_macro_live(
         log.warning("Macro fetch empty; serving last-good snapshot")
         return stale
     return combined
+
+
+def fetch_value_drivers(
+    start_date: pd.Timestamp | str,
+    end_date: pd.Timestamp | str,
+) -> pd.DataFrame:
+    """Samanvaya's value drivers (``engines.pragati.samanvaya.DRIVER_TICKERS``), raw closes.
+
+    Swayam's self-read of the target values it the way the Pragati indicator does: an RV leg
+    hedged against ~20 macro drivers (global yields, the dollar, oil, precious metals, the INR
+    crosses, the home equity index). Fetched through the same retrying macro downloader with
+    ``auto_adjust=False`` — the non-repainting guarantee (see ``_yfinance_batch_download_macro``)
+    — and cached in its own namespace. Returns an empty frame when nothing arrives; Swayam then
+    runs its value leg unhedged, which Samanvaya handles and discloses.
+    """
+    from engines.pragati.samanvaya import DRIVER_TICKERS
+
+    start_str = str(pd.Timestamp(start_date).date())
+    end_str = str(pd.Timestamp(end_date).date() + pd.Timedelta(days=1))
+    cached = driver_cache.get(start_str, end_str)
+    if cached is not None:
+        return cached
+    close = pd.DataFrame()
+    try:
+        raw = _yfinance_batch_download_macro(tuple(DRIVER_TICKERS), start_str, end_str)
+        close = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
+        close = pd.DataFrame(close).dropna(how="all", axis=1)
+        close.index = pd.to_datetime(close.index)
+        if close.index.tz is not None:
+            close.index = close.index.tz_convert(None)
+    except Exception as e:                       # noqa: BLE001 — degrade, never break a run
+        log.warning("Value-driver fetch failed: %s", e)
+    if not close.empty:
+        driver_cache.put(start_str, end_str, value=close)
+        return close
+    stale = driver_cache.get_stale(start_str, end_str)
+    if stale is not None:
+        log.warning("Value-driver fetch empty; serving last-good snapshot")
+        return stale
+    return close
 
 
 # ─── Commodity model dataset (FVO matrix from yfinance) ──────────────────

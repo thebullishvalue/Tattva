@@ -2,9 +2,9 @@
 Tattva — Main Streamlit entrypoint.
 तत्त्व (Tattva) — "Principle / Essence"
 
-TATTVA — Two systems. One conclusion. A top-down cross-asset fair value (Mūla) and
-the target's own conviction read through the Pragati indicator (Swayam) — across
-commodities, FX, crypto, equity indices and stocks — unified by adaptive convergence.
+TATTVA — Two systems. One conclusion. A top-down macro forecast and a bottom-up
+basket regime read — across commodities, FX, and equity indices — unified by
+adaptive convergence.
 
 Usage:
     streamlit run app.py
@@ -99,18 +99,19 @@ from ui.tabs.tab_data import render_data_tab
 from ui.tabs.tab_precedent import render_precedent_tab
 
 # ── Data ─────────────────────────────────────────────────────────────────────
-from data.fetcher import fetch_constituent_ohlcv, fetch_value_drivers, fetch_commodity_dataset, fetch_stock_target_series
+from data.fetcher import fetch_constituent_ohlcv, fetch_macro_live, fetch_commodity_dataset, fetch_stock_target_series
 from data.calendars import trading_days_behind, is_session, session_mask, resolve_exchange
 from data.universe import resolve_stock_symbol
 
 # ── Engines ──────────────────────────────────────────────────────────────────
 from engines.mula import FairValueEngine
 from engines.mula.blocks import block_membership
-from engines.swayam import RUNG_NAMES, SwayamEngine
+from engines.swayam import aggregate_views
+from engines.swayam.kernel import view_skill_weights
 
 # ── Valuation engine (MŪLA) ─────────────────────────────────────────────────
 # MulaEngine SUBCLASSES FairValueEngine, so every isinstance check and cache
-# path downstream works unchanged. Engine 2 is Swayam (engines/swayam). There is no
+# path downstream works unchanged. Engine 2 is Swayam, unchanged. There is no
 # engine selector: this import guard exists only so that a broken or missing
 # engines.mula package degrades silently to the pipeline core (no ECM layer)
 # instead of taking the app down.
@@ -128,7 +129,8 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, TARGET_EXCLUDED_PREDICTORS, ALL_TARGETS, TARGET_CATEGORIES, is_stock_target, FORECAST_HORIZON, RAW_YIELD_PREDICTORS, DIV_LOOKBACK, TIMEFRAME_TRADING_DAYS, FREEFORM_STOCK_CATEGORIES, register_stock_target, get_instrument_config
+from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, TARGET_EXCLUDED_PREDICTORS, ALL_TARGETS, TARGET_CATEGORIES, is_stock_target, FORECAST_HORIZON, RAW_YIELD_PREDICTORS, DIV_LOOKBACK, TIMEFRAME_TRADING_DAYS, swayam_macro_columns, FREEFORM_STOCK_CATEGORIES, register_stock_target, get_instrument_config
+from engines.swayam import build_swayam_frames, effective_member_count, default_swayam_members
 from core.config import GLOBAL_MACRO_MAP, MACRO_SYMBOLS_YF, INDEX_TARGETS_MAP
 
 # Friendly column name → ticker, for resolving each predictor/target column to its
@@ -143,7 +145,7 @@ _COLUMN_TICKERS = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF, **INDEX_TARGETS_MAP, 
 # the user switches Gold → Silver → Gold) restores instantly instead of
 # recomputing the whole 5-phase pipeline. Bounded (LRU) to cap memory.
 _BUNDLE_KEYS = (
-    "engine", "fvo_ts", "swayam_daily", "swayam_frame", "swayam_current",
+    "engine", "fvo_ts", "swayam_daily", "swayam_view_dfs",
     "convergence_df", "divergence_events", "nishkarsh_result", "last_agreement",
     "nishkarsh_conv_normalized", "wf_results",
     "intelligence_active_weights", "intelligence_active_thresholds",
@@ -161,7 +163,7 @@ _BUNDLE_KEYS = (
     # "basket source: snapshot" hint for a target resolved live, or the
     # Convergence tab's "breadth carried forward" notice firing/missing
     # based on the WRONG target's basket-freshness timestamp).
-    "swayam_native_last",
+    "swayam_native_last", "swayam_n_eff",
 )
 # Keep the last N configs. The comment here previously said "the 3
 # commodities" — stale since the universe grew to 30+ targets (commodities,
@@ -172,13 +174,38 @@ _BUNDLE_KEYS = (
 # recomputing.
 _RESULTS_CACHE_MAX = 6
 
-# The Swayam frame kept in session for its tab: the display columns only (the engine's full
-# read is ~70 columns; the tab draws these).
-_SWAYAM_FRAME_COLS = (
-    "close", "conv", "value", "trace", "hist", "thr", "push", "push_tier", "c_tape", "c_ready",
-    "v_tape", "v_ready", "cvg_cell", "cvg_units", "cvg_held", "cvg_cph", "cvg_vph", "cvg_quiet",
-    "turn_buy", "turn_sell", "decl", "armed", "stack_ok", "stack_why", "hedge", "drivers",
+# Baskets at/above this size get their per-constituent frames trimmed before
+# entering the _RESULTS_CACHE_MAX-deep results_cache LRU (audit finding F19).
+# swayam_view_dfs carries ~200 columns per constituent (the full
+# kernel output); only the ~9 the Swayam tab's drill-down actually
+# displays (_SWAYAM_DRILLDOWN_COLS) are needed once the result is just sitting
+# in the switch-back cache. A small commodity basket (~15-20 names) is cheap
+# either way and kept at full width so nothing else that might read the wider
+# frame in-session breaks; an uncapped large index (S&P 500 ~500 names) is
+# where the ~200-column full width, multiplied across up to 6 LRU entries,
+# actually matters.
+_CONSTITUENT_TRIM_THRESHOLD = 60
+_SWAYAM_DRILLDOWN_COLS = (
+    "Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition",
+    "Regime", "Vol_Regime", "Change_Point", "Confidence",
 )
+
+
+def _bundle_swayam_view_dfs(dfs: dict) -> dict:
+    """Trim swayam_view_dfs to the Swayam tab's drill-down columns
+    before it enters the per-config results_cache LRU, for baskets at/above
+    _CONSTITUENT_TRIM_THRESHOLD names. Only affects the SNAPSHOT stored in
+    results_cache — the live session_state copy the active render reads
+    (and engines.swayam.aggregate_views, which needs the
+    full width and runs before this snapshot is taken) is never touched.
+    """
+    if not dfs or len(dfs) < _CONSTITUENT_TRIM_THRESHOLD:
+        return dfs
+    trimmed = {}
+    for sym, df in dfs.items():
+        cols = [c for c in _SWAYAM_DRILLDOWN_COLS if c in df.columns]
+        trimmed[sym] = df[cols] if cols else df.iloc[:, :0]
+    return trimmed
 
 
 def _ensure_stock_target_column(df: pd.DataFrame, active_target: str) -> pd.DataFrame:
@@ -242,7 +269,7 @@ def _render_header(frame=None) -> None:
     """
     render_header(
         title=f"{PRODUCT_NAME}",
-        tagline="Cross-Asset Fair Value · Self-Read Conviction · Unified Convergence",
+        tagline="Cross-Asset Fair Value · Self-Referential Breadth · Unified Convergence",
     )
     if frame is not None:
         render_ticker(frame)
@@ -261,13 +288,13 @@ _SYSTEM_PANELS = (
      (("Estimator", "Recursive discounted DLM"),
       ("Equilibrium", "MP factors + asset blocks"),
       ("Reversion", "ECM κ̂ · predictive likelihood"))),
-    ("swayam", "System 02", "SWAYAM", "Self-read conviction",
-     "Reads the instrument's own price and volume through the Pragati indicator: who "
-     "controls the tape, read on a daily and weekly ladder, set against where price stands "
-     "in value, and met in a 3 \u00d7 3 grid that marks capitulation turns.",
-     (("Signal", "Conviction ladder \u00d7 value"),
-      ("Breadth", "Rung share past the inner zone"),
-      ("Regime", "Grid lean \u00b7 \u25b2 / \u25bc events"))),
+    ("swayam", "System 02", "SWAYAM", "Bottom-up breadth",
+     "Reads the instrument's own internals through a self-referential bank of views "
+     "spanning timescale, information set and mechanism, then aggregates them by "
+     "realised skill rather than by a fixed grid.",
+     (("Signal", "MSF + MMR oscillator"),
+      ("Breadth", "Oversold / overbought share"),
+      ("Regime", "HMM \u00b7 GARCH \u00b7 CUSUM"))),
     ("convergence", "System 03", "CONVERGENCE", "Adaptive fusion",
      "Scores the two systems against each other across four dimensions \u2014 direction, "
      "breadth, magnitude, regime \u2014 with weights learned forward from resolved "
@@ -745,7 +772,7 @@ def main():
         sel_cat = st.selectbox("Asset Class", _categories, key="target_category")
 
         if sel_cat in FREEFORM_STOCK_CATEGORIES:
-            # India Stocks / US Stocks: no fixed catalogue to browse — enter
+            # India Stocks / US Stocks: no constituent basket to browse — enter
             # a symbol directly. The asset class supplies the suffix policy
             # (data.universe.resolve_stock_symbol): India tries SYMBOL.NS
             # first, then SYMBOL.BO; US uses the bare symbol.
@@ -803,7 +830,7 @@ def main():
         elif not has_data:
             # Initial load. The fetch pulls the entire macro universe once and
             # is target-agnostic — the chosen commodity only selects Mūla's
-            # target column and the OHLCV Swayam reads.
+            # target column and Swayam's basket.
             if st.button("Run Analysis", type="primary", width="stretch"):
                 # No spinner — drive the main-area progress bar from the very first
                 # click. The fetch is one blocking call, so we show the stage before it
@@ -833,7 +860,7 @@ def main():
         else:
             df = st.session_state["data"]
             # Post-load target switch — re-runs the engines on the already
-            # fetched universe (no re-fetch; only the target's own OHLCV re-pulls).
+            # fetched universe (no re-fetch; only the Swayam basket re-pulls).
             if selected_commodity != st.session_state.get("active_target"):
                 if st.button(f"Switch → {selected_commodity}", type="primary",
                              width="stretch"):
@@ -979,7 +1006,7 @@ def main():
                            # must be dropped on a live re-fetch too, else Refresh
                            # Data re-pulls the Mūla macro universe live but
                            # silently keeps serving the PRE-refresh Swayam
-                           # analysis.
+                           # basket/constituent analysis.
                            "_swayam_fetch_cache", "_swayam_analysis_cache"):
                     st.session_state.pop(_k, None)
                 # The convergence tab's actual per-config normalization cache key is
@@ -1452,32 +1479,35 @@ def main():
         if _nf_cache is not None and _nf_cache.get("key") == _swayam_fetch_key:
             console.start_phase("DATA ACQUISITION", 1, 5)
             target_ohlcv = _nf_cache["target_ohlcv"]
-            swayam_drivers = _nf_cache["swayam_drivers"]
-            console.item("Drivers/OHLCV", "reused cached fetch (horizon-independent)")
-            progress_bar(progress_container, 19, "Data Acquisition Reused", "Value drivers (cached)")
+            swayam_macro_df = _nf_cache["swayam_macro_df"]
+            macro_cols_list = _nf_cache["macro_cols_list"]
+            console.item("Macro/OHLCV", "reused cached fetch (horizon-independent)")
+            progress_bar(progress_container, 19, "Data Acquisition Reused", f"{len(macro_cols_list)} Macros (cached)")
             console.end_phase("DATA ACQUISITION")
         else:
             console.start_phase("DATA ACQUISITION", 1, 5)
-            progress_bar(progress_container, 16, "Fetching Swayam Inputs",
-                         f"{active_target} · own OHLCV + value drivers")
+            progress_bar(progress_container, 16, "Resolving Swayam Source",
+                         f"{active_target} · own OHLCV (self-referential ensemble)")
 
+            console.section("Macro Data")
             end_date = pd.Timestamp.today()
-            # Match the Mūla model-dataset window (~9y) so Swayam's read overlaps the FULL
-            # series — convergence then runs on real data, not neutral placeholders.
+            # Match the Mūla model-dataset window (~9y) so the Swayam views and
+            # macro drivers overlap the FULL series — convergence then runs on
+            # real data, not neutral placeholders.
             start_date = end_date - pd.DateOffset(days=365 * 9)
-
-            console.section("Value Drivers")
-            # Swayam values the target the way the Pragati indicator does: an RV leg hedged
-            # against Samanvaya's ~20 macro drivers (global yields, the dollar, oil, precious
-            # metals, the INR crosses, the home equity index) plus a price-only breadth leg.
-            swayam_drivers = fetch_value_drivers(start_date, end_date)
+            macro_df = fetch_macro_live(start_date, end_date)
             console.item("Date Range", f"{start_date.date()} to {end_date.date()}")
-            if swayam_drivers is not None and not swayam_drivers.empty:
-                console.success(f"Value drivers: {swayam_drivers.shape[1]} series × {len(swayam_drivers)} rows")
+            if not macro_df.empty:
+                console.item("YF Columns", f"{len(macro_df.columns)} symbols")
+                console.item("Rows", len(macro_df))
+                console.success(f"Macro data: {len(macro_df.columns)} symbols × {len(macro_df)} rows")
             else:
-                console.warning("No value drivers — Swayam's value leg runs unhedged")
+                console.warning("No macro data available")
 
             console.section("Target OHLCV")
+            # Swayam needs the target's own OHLC (and volume where it exists —
+            # the volume-dependent views abstain when it does not; see
+            # ensemble._is_volume_dependent).
             _tgt_ticker = ALL_TARGETS[active_target]
             progress_bar(progress_container, 18, "Fetching Target OHLCV", f"yfinance · {_tgt_ticker}")
             _ohlcv = fetch_constituent_ohlcv([_tgt_ticker], start_date, end_date)
@@ -1489,15 +1519,22 @@ def main():
                                                 and target_ohlcv["Volume"].fillna(0).abs().sum() > 0))
                 console.success(f"Target OHLCV: {len(target_ohlcv)} rows")
             else:
-                console.warning(f"No OHLCV for {_tgt_ticker} — Swayam will be unavailable")
+                console.warning(f"No OHLCV for {_tgt_ticker} — Swayam breadth will be unavailable")
+
+            console.section("Swayam Macro Assembly")
+            swayam_macro_df = macro_df.copy() if macro_df is not None and not macro_df.empty else pd.DataFrame()
+            if not swayam_macro_df.empty:
+                console.item("YF Symbols", len(swayam_macro_df.columns))
+                console.success(f"Macro indicators: {len(swayam_macro_df.columns)} × {len(swayam_macro_df)} rows")
+            macro_cols_list = list(swayam_macro_df.columns) if not swayam_macro_df.empty else []
             console.end_phase("DATA ACQUISITION")
-            _nd = 0 if swayam_drivers is None else swayam_drivers.shape[1]
-            progress_bar(progress_container, 19, "Data Acquisition Complete", f"{_nd} Value Drivers")
+            progress_bar(progress_container, 19, "Data Acquisition Complete", f"{len(swayam_macro_df.columns)} Macros")
 
             st.session_state["_swayam_fetch_cache"] = {
                 "key": _swayam_fetch_key,
                 "target_ohlcv": target_ohlcv,
-                "swayam_drivers": swayam_drivers,
+                "swayam_macro_df": swayam_macro_df,
+                "macro_cols_list": macro_cols_list,
             }
 
         # ── Phase 2: Mūla (FairValueEngine) ─────────────────────────────────
@@ -1594,11 +1631,7 @@ def main():
         # causes want different responses. Only "incomplete fetch" is worth
         # re-running for, so it is the only one reported as a warning.
         try:
-            # Read from the engine's own output on this target's calendar (fvo_ts is only
-            # built in Phase 4 — referencing it here raised a swallowed NameError, so this
-            # report never printed).
-            _wr = (pd.Series(engine.ts_data["WithheldReason"].to_numpy(), index=_cal)
-                   if "WithheldReason" in engine.ts_data.columns else None)
+            _wr = fvo_ts.get("WithheldReason") if fvo_ts is not None else None
             if _wr is not None:
                 _c = _wr[_wr.astype(str) != ""].astype(str).value_counts()
                 if len(_c):
@@ -1626,61 +1659,95 @@ def main():
         progress_bar(progress_container, 40, "Mūla Engine Complete", f"Signal: {sig['signal']} ({sig['strength']}) · Conviction: {sig['conviction_score']:+.0f}")
 
         # ── Phase 3: Swayam Breadth ───────────────────────────────────────
-        # HORIZON-INDEPENDENT (audit finding F17): the Pragati read depends only
-        # on the target's own OHLCV + the value-driver window, never on the
-        # scoring horizon. Cached under the SAME
+        # HORIZON-INDEPENDENT (audit finding F17): the view bank and its
+        # aggregation depend only on the target's own OHLCV + the macro driver
+        # window, never on the scoring horizon. Cached under the SAME
         # _swayam_fetch_key as Phase 1; only the target-calendar reindex below
         # (cheap — no yfinance calls) re-runs.
         console.start_phase("SWAYAM ENGINE", 3, 5)
         progress_bar(progress_container, 42, "Running Swayam Engine",
-                     "Pragati · conviction ladder × value → grid")
+                     "MSF+MMR+Regime · self-referential view bank")
 
         _na_cache = st.session_state.get("_swayam_analysis_cache")
         if _na_cache is not None and _na_cache.get("key") == _swayam_fetch_key:
-            swayam_engine = _na_cache["swayam_engine"]
-            console.item("Swayam", "reused cached fit (horizon-independent)")
-            progress_bar(progress_container, 74, "Swayam Engine Reused", "Cached read")
+            swayam_view_dfs = _na_cache["swayam_view_dfs"]
+            swayam_daily_pre_reindex = _na_cache["swayam_daily_pre_reindex"]
+            if "n_eff" in _na_cache:
+                st.session_state["swayam_n_eff"] = _na_cache["n_eff"]
+            console.item("View Bank", "reused cached fit (horizon-independent)")
+            progress_bar(progress_container, 74, "Swayam Engine Reused", f"{len(swayam_view_dfs)} Views (cached)")
         else:
-            swayam_engine = SwayamEngine()
+            swayam_daily_pre_reindex = pd.DataFrame()
+            swayam_view_dfs = {}
+
             if target_ohlcv is not None and not target_ohlcv.empty:
-                console.section("Pragati on the Target")
-                _p = swayam_engine.params
-                console.item("Conviction", f"lookback {_p.length} · smooth {_p.smooth} · norm {_p.norm} · "
-                                           f"{_p.participation} participation (cap {_p.cap:g}x)")
-                console.item("Ladder", "UP — Weekly · Daily (fixed: Tattva never repaints a past bar)")
-                console.item("Value", "Samanvaya — RV leg vs the value drivers + price-only breadth leg")
-                progress_bar(progress_container, 55, "Running Swayam Engine", "conviction · value · grid")
-                swayam_engine.fit(target_ohlcv, swayam_drivers, ALL_TARGETS[active_target])
+                console.section("Self-Referential View Bank")
+                # Leakage guard: drop the target's own macro column + its
+                # excluded-predictor near-replicas from the MMR driver pool — a
+                # view's Close correlates ~1.0 with the target's own macro
+                # column, which would let MMR "explain" the target with itself
+                # and silently zero the deviation oscillator.
+                swayam_cols = swayam_macro_columns(active_target, macro_cols_list)
+                _swayam_members = default_swayam_members(_icfg.swayam_lengths, _icfg.swayam_roc_frac)
+                console.item("Views (bank)", f"{len(_swayam_members)} · timescale × information-set × mechanism")
+                console.item("Timescale Span", str(_icfg.swayam_lengths))
+                console.item("Regime Sensitivity", _icfg.swayam_regime_sensitivity)
+                console.item("Base Weight", _icfg.swayam_base_weight)
+                console.item("Macro Columns (post-leakage-guard)", len(swayam_cols))
+
+                def _swayam_progress(done, total, name):
+                    pct_val = int(45 + done / max(total, 1) * 30)
+                    progress_bar(progress_container, pct_val, f"View {name}", f"{done}/{total} views")
+
+                swayam_view_dfs = build_swayam_frames(
+                    target_ohlcv, swayam_macro_df, swayam_cols,
+                    members=_swayam_members,
+                    regime_sensitivity=_icfg.swayam_regime_sensitivity,
+                    base_weight=_icfg.swayam_base_weight,
+                    num_vars=_icfg.swayam_mmr_num_vars,
+                    oversold=_icfg.swayam_oversold, overbought=_icfg.swayam_overbought,
+                    progress_cb=_swayam_progress,
+                )
+                n_eff = effective_member_count(swayam_view_dfs)
+                st.session_state["swayam_n_eff"] = n_eff
+                console.success(f"View bank: {len(swayam_view_dfs)} views · ~{n_eff:.1f} effective")
+
+            if swayam_view_dfs:
+                console.section("Aggregation")
+                # Views are weighted by their own realised skill, estimated
+                # causally (analytics.adaptive) — a timescale that has stopped
+                # predicting this instrument contributes less to breadth, and
+                # no grid had to be chosen for that to happen.
+                _view_w = view_skill_weights(swayam_view_dfs, horizon=FWD_HORIZON)
+                swayam_daily_pre_reindex = aggregate_views(swayam_view_dfs, weights=_view_w)
+                if not _view_w.empty:
+                    _last = _view_w.iloc[-1].sort_values(ascending=False)
+                    console.item("View Weighting", f"skill-weighted · {len(_last)} views")
+                    console.item("Top Views", " · ".join(f"{k} {v:.2f}" for k, v in _last.head(4).items()))
+                    console.item("Weakest View", f"{_last.index[-1]} {_last.iloc[-1]:.2f}")
+
             st.session_state["_swayam_analysis_cache"] = {
                 "key": _swayam_fetch_key,
-                "swayam_engine": swayam_engine,
+                "swayam_view_dfs": swayam_view_dfs,
+                "swayam_daily_pre_reindex": swayam_daily_pre_reindex,
+                "n_eff": st.session_state.get("swayam_n_eff"),
             }
-        swayam_daily_pre_reindex = swayam_engine.daily
-        _sw_now = swayam_engine.current()
-        if _sw_now:
-            console.item("State", f"{_sw_now['state']} ({_sw_now['family']}) · {_sw_now['units']:.2f} units")
-            console.item("Conviction · value", f"{_sw_now['conviction']:+.0f} · {_sw_now['value']:+.0f}"
-                                                f" · push {_sw_now['push_tier']}")
-            console.item("Rungs", " · ".join(f"{k} {v:+.0f}" for k, v in _sw_now["rungs"].items()
-                                             if v is not None))
-            _lu = _sw_now["last_capitulation"]
-            console.item("Last ▲ capitulation", str(_lu.date()) if _lu is not None else "none in the window")
-            console.item("Value drivers", f"{_sw_now['drivers']} in use")
-        elif target_ohlcv is None or target_ohlcv.empty:
-            console.warning("Swayam unavailable — no OHLCV for the target; the read is Mūla-only")
-        else:
-            console.warning("Swayam produced no published rows — too little history to calibrate")
 
+        # ── HORIZON-DEPENDENT tail: reindex onto the target's calendar ──────
+        # Cheap (pure pandas, no yfinance) — re-runs since the horizon's
+        # warm-up trim can shift the target's date spine.
         swayam_daily = swayam_daily_pre_reindex
         if not swayam_daily.empty:
-            # Carry Swayam forward onto the TARGET's trading calendar (the Mūla
-            # macro calendar). Swayam reads the target's own OHLCV, whose last bar
-            # can trail the macro calendar (a holiday, or a Monday-morning IST run
-            # before the target posts); its last read IS its current value.
-            # Reindexing it onto the target's dates (ff-fill) lets the SIGNAL,
-            # cards and plots all reach the latest session. We record Swayam's
-            # true last-native date so the UI can flag how much is carried over
-            # (the partial-session notice covers the row-level staleness).
+            # Carry the basket forward onto the TARGET's trading calendar. The
+            # views share the target's own calendar by construction, but the macro
+            # driver pool behind MMR does not
+            # than the target — on a Monday-morning IST run, or when the target's
+            # market is open but the basket's is on holiday, the basket's last close
+            # IS its current value. Reindexing it onto the target's dates (ff-fill)
+            # lets the SIGNAL, cards and plots all reach the target's latest session
+            # instead of truncating to the slowest constituent. We record the
+            # basket's true last-native date so the UI can flag how much is carried
+            # over (the partial-session notice covers the row-level staleness).
             st.session_state["swayam_native_last"] = pd.Timestamp(swayam_daily.index.max())
             if active_date in data.columns:
                 _cal = pd.DatetimeIndex(sorted(pd.to_datetime(
@@ -1688,9 +1755,9 @@ def main():
                 _nd = swayam_daily.copy()
                 _nd.index = pd.to_datetime(_nd.index).normalize()
                 _nd = _nd[~_nd.index.duplicated(keep="last")].sort_index()
-                # _Native marks rows that are a genuine Swayam observation
+                # _Native marks rows that are a genuine basket observation
                 # (present in _nd BEFORE the reindex) vs carried forward by
-                # the ffill below (the target's market was closed/hadn't
+                # the ffill below (the basket's market was closed/hadn't
                 # posted that day). Carried through so the calibration
                 # overlap gate can require NATIVE overlap, not ffilled
                 # rows masquerading as fresh Swayam signal (audit finding
@@ -1710,7 +1777,7 @@ def main():
             console.success(f"Swayam aggregation: {len(swayam_daily)} trading days")
 
         console.end_phase("SWAYAM ENGINE")
-        progress_bar(progress_container, 75, "Swayam Engine Complete", f"{len(RUNG_NAMES)} Rungs · {len(swayam_daily)} Trading Days")
+        progress_bar(progress_container, 75, "Swayam Engine Complete", f"{len(swayam_view_dfs)} Views · {len(swayam_daily)} Trading Days")
 
         # ── Phase 4: Convergence ──────────────────────────────────────────
         console.start_phase("CONVERGENCE", 4, 5)
@@ -1734,9 +1801,11 @@ def main():
         # First pass builds the dim_* sub-scores; the composite it also writes
         # is superseded below by the online-weighted recomputation.
         _validator_weights = _prior_w
-        # The vote count is the number of conviction-ladder rungs Swayam reads
-        # (Daily, Weekly); Total_Analyzed reports how many reported that day.
-        _expected_constituents = len(RUNG_NAMES) if not swayam_daily.empty else None
+        # The vote count is the Swayam bank's member count. Every view always
+        # reports, so coverage reads 1.0 — unlike a basket, where a constituent
+        # could simply be missing that day and breadth was read off a partial
+        # cross-section without saying so.
+        _expected_constituents = len(swayam_view_dfs) or None
         validator = CrossValidator(
             active_weights=_validator_weights,
             expected_constituents=_expected_constituents,
@@ -2023,10 +2092,7 @@ def main():
         st.session_state["engine_cache"] = cache_key
         st.session_state["fvo_ts"] = fvo_ts
         st.session_state["swayam_daily"] = swayam_daily
-        _sf = swayam_engine.frame
-        st.session_state["swayam_frame"] = (_sf[[c for c in _SWAYAM_FRAME_COLS if c in _sf.columns]]
-                                            if not _sf.empty else _sf)
-        st.session_state["swayam_current"] = swayam_engine.current()
+        st.session_state["swayam_view_dfs"] = swayam_view_dfs
         st.session_state["convergence_df"] = convergence_df
         st.session_state["divergence_events"] = events
         st.session_state["nishkarsh_result"] = results[-1] if results else None
@@ -2072,9 +2138,8 @@ def main():
         )
 
         console.item("Mūla Engine", "✅ Cached")
-        _sw_ok = "✅" if not swayam_daily.empty else "⚠️"
-        console.item("Swayam Daily", f"{_sw_ok} {len(swayam_daily)} rows")
-        console.item("Swayam State", f"{_sw_ok} {(swayam_engine.current() or {}).get('state', 'unread')}")
+        console.item("Swayam Daily", f"✅ {len(swayam_daily)} rows")
+        console.item("View Bank", f"✅ {len(swayam_view_dfs)} views")
         console.item("Convergence DF", f"✅ {len(convergence_df)} rows")
         console.item("Convergence Result", f"✅ {display_signal}")
 
@@ -2083,7 +2148,7 @@ def main():
         console.summary("RUN SUMMARY", {
             "Total Phases": "5/5 complete",
             "Mūla Rows": len(engine.ts_data),
-            "Swayam Rungs": len(RUNG_NAMES) if not swayam_daily.empty else 0,
+            "Swayam Views": len(swayam_view_dfs),
             "Swayam Trading Days": len(swayam_daily),
             "Convergence Scores": len(convergence_df),
             "Overlap Dates": overlap_count,
@@ -2102,6 +2167,11 @@ def main():
         _rcache = st.session_state.setdefault("results_cache", {})
         _rcache.pop(cache_key, None)
         _bundle_snapshot = {bk: st.session_state.get(bk) for bk in _BUNDLE_KEYS}
+        # Trim large baskets' per-constituent frames before they enter the LRU
+        # (audit finding F19) — see _bundle_swayam_view_dfs's docstring.
+        _bundle_snapshot["swayam_view_dfs"] = _bundle_swayam_view_dfs(
+            _bundle_snapshot.get("swayam_view_dfs") or {}
+        )
         _rcache[cache_key] = _bundle_snapshot
         while len(_rcache) > _RESULTS_CACHE_MAX:
             _rcache.pop(next(iter(_rcache)))

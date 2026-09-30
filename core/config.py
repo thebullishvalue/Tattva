@@ -18,7 +18,7 @@ global fallback). See the InstrumentConfig section lower in this file.
 
 # Single source of truth for the app version — ui/theme.py imports these (do not
 # redefine elsewhere; past drift between config and theme is why this is centralized).
-VERSION = "3.0.0"
+VERSION = "2.7.0"
 PRODUCT_NAME = "Tattva"
 COMPANY = "@thebullishvalue"
 
@@ -114,13 +114,26 @@ DDM_LEAK_RATE = 0.03
 DDM_DRIFT_SCALE = 0.056
 DDM_LONG_RUN_VAR = 100.0
 
-# ─── Swayam ─────────────────────────────────────────────────────────────────
-# Swayam is the Pragati indicator on the target (engines/swayam/engine.py); its parameters
-# are the indicator's own (engines/pragati/core.py · Params — lookback 20, smooth 3, norm 200,
-# signal 9, inner zone ±30, θ 1.5, cooldown 10), shared with Sanket and Pragyam and measured
-# there, so there is nothing per-instrument to tune here. The MSF / MMR view-bank knobs that
-# lived here (lengths, ROC fraction, regime sensitivity, base weight, MMR driver count,
-# oversold/overbought) went with the view bank — see CHANGELOG 3.0.0.
+# ─── Swayam Breadth Defaults ─────────────────────────────────────────────────
+# The per-series kernel's structural knobs. These are shared by every member of
+# the Swayam view bank; the member's own timescale comes from swayam_lengths.
+#
+# SWAYAM_MSF_LENGTH / SWAYAM_ROC_LEN are gone: they parameterised the single
+# basket-mode read, and the Swayam members each carry their own length. Their
+# tuning history is instructive about why this whole layer moved to online
+# estimation — three validating universes returned contradictory class winners
+# (3, 40, 18, 12) on a flat sign-flipping surface, and the standing value was
+# "held at 20" because no reconciliation rule existed. A bank that weights all
+# of those by realised skill needs no such rule.
+SWAYAM_REGIME_SENSITIVITY = 8.0  # swayam 2026-07-21 (|IC| 0.073 @8.0)
+SWAYAM_BASE_WEIGHT = 0.0         # MSF share of the FIXED half of the MSF/MMR
+                                 # blend (kernel: 0.5*bw + 0.5*adaptive).
+SWAYAM_MMR_NUM_VARS = 4          # swayam 2026-07-21 class-level best
+
+# Condition thresholds on Unified_Osc (±10 scale): classify Oversold/Overbought/
+# Neutral and gate buy/sell + divergence. ±5 = p75-p85 occupancy (ui_anchors).
+SWAYAM_OVERSOLD = -5
+SWAYAM_OVERBOUGHT = 5
 
 # ─── Convergence Layer Defaults ──────────────────────────────────────────────
 
@@ -377,7 +390,7 @@ MACRO_SYMBOLS_YF = {
     "USD/SGD": "USDSGD=X",
     "USD/TRY": "USDTRY=X",
     # EM FX legs — LatAm/Africa coverage (CEW only carries the basket level)
-    # plus the USD/Asia crosses.
+    # plus the USD/Asia crosses the USD/INR Swayam basket already uses.
     "USD/MXN": "MXN=X",
     "USD/BRL": "BRL=X",
     "USD/ZAR": "ZAR=X",
@@ -466,7 +479,7 @@ COMMODITY_TARGETS = {
 # Swayam self-mode or to a constituent basket). Both are gone with the basket
 # engine. Every target now reads breadth off its own price through Swayam, so
 # there is no proxy whose orientation could disagree and no routing decision
-# left to encode.
+# left to encode. See engines/swayam/ensemble.py for why the proxy read went.
 
 # Predictors that quasi-replicate a target and must be excluded from Mūla
 # to avoid contaminating its fair-value residual (the spread the whole system
@@ -523,9 +536,9 @@ TARGET_EXCLUDED_PREDICTORS = {
               "RBOB Gasoline", "Heating Oil"]}
 
 # ─── Index targets (equity indices: India sectoral/broad, US, sector-ETF) ─────
-# The Mūla and Swayam target is the index price (catalogue in data/universe.py).
-# Their price tickers are merged into the fetched universe so the index level is an
-# available column.
+# The Mūla target is the index price; the Swayam basket is the index's own
+# constituents (resolved live + cached in data/universe.py). Their price tickers
+# are merged into the fetched universe so the index level is an available column.
 from data.universe import INDEX_TARGETS, INDEX_TARGETS_MAP  # noqa: E402
 
 # Equity-index ETFs already in the macro pool that would replicate an index
@@ -618,7 +631,8 @@ def register_stock_target(display_name: str, ticker: str, market: str) -> None:
     same wiring the old static STOCK_TARGETS loop used: ALL_TARGETS,
     and the market-based Mūla predictor
     exclusions (own-market index targets + broad ETFs — the same guard that
-    applies to catalogue index targets, see TARGET_EXCLUDED_PREDICTORS). Also installs the instrument's own
+    feeds the Swayam MMR leakage filter via TARGET_EXCLUDED_PREDICTORS,
+    see swayam_macro_columns above). Also installs the instrument's own
     InstrumentConfig, cloned from the market's STOCK_CONFIGS asset-class config
     with its market-based exclusions. Does NOT append to TARGET_CATEGORIES —
     freeform categories render a text input, not a list.
@@ -634,11 +648,39 @@ def register_stock_target(display_name: str, ticker: str, market: str) -> None:
         excluded_predictors=tuple(excl),
     ))
 
+# ─── Swayam (self-referential ensemble) ───────────────────────────────
+# Timescale axis (log-spaced) + the ROC fraction that derives each member's
+# roc_len — see engines/swayam/ensemble.py
+# (default_swayam_members) for how these build the 15-member grid.
+SWAYAM_LENGTHS = (8, 14, 22, 34, 52)   # swayam 2026-07-21 class-level best (|IC| 0.096 vs default-5)
+SWAYAM_ROC_FRAC = 0.85                  # swayam 2026-07-21 class-level best (|IC| 0.094 vs 0.7)
+
+# (The empty-basket fallback flag lived here. With no baskets, there is no
+# empty-basket case to fall back FROM.)
+
+
+def swayam_macro_columns(target: str, macro_cols: list[str]) -> list[str]:
+    """Macro candidates for self-mode MMR: drop the target's own column and
+    its TARGET_EXCLUDED_PREDICTORS near-replicas.
+
+    In basket mode a constituent correlating with the target's own macro
+    column is harmless (|r|<1, a different instrument). In self mode it is
+    fatal: the member's Close correlates ~1.0 with the target's own macro
+    column, MMR's top-N driver selection locks onto it, predicted ≈ actual,
+    deviation ≈ 0, and the MMR half of every macro-anchored member dies
+    silently while mmr_quality reads perfect. This reuses the same
+    self-explanation guard TARGET_EXCLUDED_PREDICTORS already applies to
+    Mūla, applied here to the MMR driver pool instead.
+    """
+    drop = {target, *TARGET_EXCLUDED_PREDICTORS.get(target, [])}
+    return [c for c in macro_cols if c not in drop]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Per-instrument configuration registry
 # ═══════════════════════════════════════════════════════════════════════════
 # Every named target has its OWN full config — structure (leakage exclusions,
-# horizons), estimability floors, and warm-up priors. app.py reads get_instrument_config(target),
+# view bank, horizons), estimability floors, and warm-up priors. app.py reads get_instrument_config(target),
 # so any instrument retunes in isolation. EVERY catalogue target has an explicit
 # INSTRUMENT_CONFIGS entry (no silent fallback — get_instrument_config raises for an
 # unregistered target); free-form stocks are configured per ASSET CLASS
@@ -655,7 +697,8 @@ class InstrumentConfig:
     they are:
 
     **Structure** — what question to ask. Horizons (what you intend to hold),
-    the Mūla discount grid (the hypothesis space to average over), the leakage exclusions (which predictors would let a target
+    the Swayam view bank and the Mūla discount grid (the hypothesis space to
+    average over), the leakage exclusions (which predictors would let a target
     explain itself). These are declared because no amount of data tells you
     what you are trying to do.
 
@@ -673,13 +716,24 @@ class InstrumentConfig:
 
     What is NO LONGER here: routing (``archetype`` / ``polarity`` / ``basket``
     / ``basket_alias``) died with the basket breadth engine, and the Swayam
-    basket knobs (``swayam_msf_length`` / ``swayam_roc_len``) with it, and the MSF /
-    MMR view-bank knobs with the view bank (3.0.0): Swayam is now the Pragati indicator,
-    whose parameters are the indicator's own.
+    basket knobs (``swayam_msf_length`` / ``swayam_roc_len``) with it. The
+    Swayam kernel knobs kept their values but are named for the engine that
+    now owns them.
     """
 
     # ── Structure: leakage guard ────────────────────────────────────────────
-    excluded_predictors: tuple[str, ...] = ()      # Mūla leakage guard
+    excluded_predictors: tuple[str, ...] = ()      # Mūla + Swayam-MMR leakage guard
+
+    # ── Structure: Swayam breadth ───────────────────────────────────────────
+    # `swayam_lengths` is a SPAN to weight, not a length to pick — members are
+    # weighted by their own online skill (analytics.adaptive.OnlineSkillWeights).
+    swayam_lengths: tuple[int, ...] = SWAYAM_LENGTHS
+    swayam_roc_frac: float = SWAYAM_ROC_FRAC
+    swayam_regime_sensitivity: float = SWAYAM_REGIME_SENSITIVITY
+    swayam_base_weight: float = SWAYAM_BASE_WEIGHT
+    swayam_mmr_num_vars: int = SWAYAM_MMR_NUM_VARS
+    swayam_oversold: float = SWAYAM_OVERSOLD
+    swayam_overbought: float = SWAYAM_OVERBOUGHT
 
     # ── Scoring / display horizons ──────────────────────────────────────────
     forecast_horizon: int = FORECAST_HORIZON
@@ -745,15 +799,15 @@ class InstrumentConfig:
     ui_consensus_moderate: float = 0.28
     ui_convraw_strong: float = 66.67
     ui_convraw_moderate: float = 33.33
-    ui_swayam_avg_threshold: float = 3.0   # the conviction tape's inner zone (±30) on Swayam's ±10
+    ui_swayam_avg_threshold: float = 2.87
     # Other UI display tiers.
     ui_agreement_strong: float = 0.89
     ui_agreement_moderate: float = 0.799
     ui_breadth_high: float = 60.0
     ui_model_spread_low: float = 15.82
     ui_model_spread_high: float = 29.92
-    ui_swayam_bullish: float = -3.0
-    ui_swayam_bearish: float = 3.0
+    ui_swayam_bullish: float = -2.9
+    ui_swayam_bearish: float = 2.9
 
     def weights_seed(self) -> dict[str, float]:
         """Convergence dimension weights as the CrossValidator/Intelligence seed."""
@@ -779,24 +833,28 @@ class InstrumentConfig:
 
 
 # Per-asset-class DEFAULT tuning. Each class is a NAMED constant so an entire class
-# can be retuned in one place without editing every member. The India-index default IS
-# the Nifty 50 baseline — the other India indices copy it (per spec). Every class runs
-# the base defaults today; the per-class Swayam grids that used to be pinned here went
-# with the MSF / MMR view bank (3.0.0).
+# can be retuned in one place (e.g. give all commodities a different Swayam grid)
+# without editing every member. The India-index default IS the Nifty 50 baseline —
+# the other India indices copy it (per spec). Values below are the `per_asset`
+# 2026-07-21 class-level bests for the classes it owns (us_index/etf MSF, stock Swayam
+# grids). commodity/fx inherit the global defaults; the self-mode STOCK grids are
+# PINNED to per_asset's stock recommendation so they do NOT drift with the global
+# SWAYAM_* globals (which the `swayam` study tunes on commodities).
 CLASS_CONFIG_DEFAULTS: dict[str, InstrumentConfig] = {
     "commodity":   InstrumentConfig(),
     "fx":          InstrumentConfig(),
     "india_index": InstrumentConfig(),   # == Nifty 50 baseline tuning
-    "us_index":    InstrumentConfig(),
-    "etf":         InstrumentConfig(),
+    "us_index":    InstrumentConfig(),   # per_asset us_index MSF (18) was n=3 targets vs a NaN default — not
+    "etf":         InstrumentConfig(),   # credible; etf (12) was n=1. Both inert (members carry their own MSF), so
+                                         # kept at the global default rather than pinning a degenerate class-level best.
     # per_asset 2026-07-21 (asset-level, pooled Nifty100 / Nasdaq100 universes):
     # Crypto starts on the global default: it has not been through a tuning
     # sweep, and a hand-picked knob would be a guess wearing a number. A swept
     # value belongs in the per-instrument registry once one exists.
     "crypto":      InstrumentConfig(),
     # per_asset 2026-07-21 (asset-level, pooled Nifty100 / Nasdaq100 universes):
-    "stock_india": InstrumentConfig(),
-    "stock_us":    InstrumentConfig()}
+    "stock_india": InstrumentConfig(swayam_lengths=(10, 14, 20, 28, 40), swayam_roc_frac=0.7),
+    "stock_us":    InstrumentConfig(swayam_lengths=(10, 14, 20, 28, 40), swayam_roc_frac=0.55)}
 
 # Free-form stock ASSET-CLASS configs — one per market, applied to any symbol
 # entered under India Stocks / US Stocks (register_stock_target clones the
@@ -841,10 +899,11 @@ PER_INSTRUMENT_TUNING: dict[str, dict] = {
 # of one IC standard error (SE ~= 1/sqrt(n-3) ~= 0.09 at n~130), so they rubber-stamp
 # noise. Re-gated here at ~1 SE, everything dropped inheriting the (coherent)
 # class default:
+#   - swayam_lengths: both candidate spans beat their default by only ~0.03 (< bar) -> revert
+#     to the class Swayam grid (the target keeps its breadth signal, just not a bespoke span).
 #   - analog_w_*: dropped (the analog study's own verdict is that the class default 1/0/0 stands).
-#   - ui_swayam_avg_threshold: the Gold/Jeera display calibrations were anchored on the
-#     retired MSF/MMR oscillator and are dropped (3.0.0); the tier is re-estimated from
-#     the new conviction tape by analytics.adaptive as history accrues.
+#   - ui_swayam_avg_threshold: KEPT (Gold/Jeera) — a data-anchored DISPLAY calibration
+#     (the target's own p75, gated >=25% divergence + n>=250), not an edge claim.
 #
 # The per-instrument ENGINE tunings that used to live here were all Aarambh
 # walk-forward knobs (refit cadence / train window / ensemble roster / ridge
@@ -857,8 +916,8 @@ PER_INSTRUMENT_TUNING: dict[str, dict] = {
 # class defaults until a study measures otherwise.
 _PER_INSTRUMENT_OVERRIDES: dict[str, dict] = {
     # -- Commodities --
-    'Gold': {},
-    'Jeera': {},
+    'Gold': {'ui_swayam_avg_threshold': 3.6887},
+    'Jeera': {'ui_swayam_avg_threshold': 2.1131},
     # -- Currency (FX) --
     'USD/INR': {},
     # -- India Indices --
@@ -992,11 +1051,11 @@ UI_BREADTH_HIGH = 60
 UI_AGREEMENT_STRONG = 0.89    # = p90
 UI_AGREEMENT_MODERATE = 0.799  # = p75
 
-# Swayam avg-signal lean tier (metric-card coloring). Swayam's Avg_Signal is the
-# conviction tape on a ±10 scale (3.0.0), so the prior is the tape's own inner zone
-# (±30 → ±3); analytics.adaptive re-estimates it from the target's history.
-UI_SWAYAM_BULLISH = -3.0
-UI_SWAYAM_BEARISH = 3.0
+# Swayam avg-signal lean tier (metric-card coloring). Data-anchored at p75 of
+# pooled |Avg_Signal|, matching UI_SWAYAM_AVG_THRESHOLD — one anchor for the
+# same series everywhere (study: `ui_anchors`).
+UI_SWAYAM_BULLISH = -2.9
+UI_SWAYAM_BEARISH = 2.9
 
 # ── Unified-Signal plot marker thresholds (data-anchored) ────────────────────
 # The 3-row Unified Signal plot's reference lines + marker-color tiers, set to
@@ -1007,8 +1066,9 @@ UI_CONSENSUS_STRONG = 0.41      # Row 1 · norm_avg (consensus, [-1,1]) = p90 (m
 UI_CONSENSUS_MODERATE = 0.28    #                                       = p75 (markers 2026-07-20)
 UI_CONVRAW_STRONG = 66.67       # Row 2 · ConvictionRaw (Mūla, ~[-100,100]) = p90 (markers 2026-07-20)
 UI_CONVRAW_MODERATE = 33.33     #                                              = p75 (markers 2026-07-20)
-UI_SWAYAM_AVG_THRESHOLD = 3.0    # Row 3 · Avg_Signal (Swayam's conviction tape, [-10,10]) —
-                                # prior = the tape's inner zone; re-estimated adaptively
+UI_SWAYAM_AVG_THRESHOLD = 2.87   # Row 3 · Avg_Signal (Swayam, [-10,10]) —
+                                # single tier at p75, matching the other rows'
+                                # moderate tier
 
 # Model spread tiers — BASIS POINTS (tab_fvo converts the raw
 # log-return-std column ×1e4 before comparing). Data-anchored at ~p75/p90.

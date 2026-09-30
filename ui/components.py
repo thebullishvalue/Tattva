@@ -1054,7 +1054,7 @@ def build_hero_verdict(
             "name": "breadth", "value": g_breadth,
             "label": ("internals agree" if aligned > 0.1 else
                       "internals disagree" if aligned < -0.1 else "internals split"),
-            "detail": f"Swayam net breadth {net:+.0%} across the conviction ladder's rungs (daily, weekly).",
+            "detail": f"Swayam net breadth {net:+.0%} across the view bank.",
         })
     else:
         g_breadth = 0.5

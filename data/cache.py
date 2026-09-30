@@ -247,9 +247,6 @@ class Cache:
 
 ohlcv_cache = Cache(ttl=3600, version="v1", namespace="ohlcv")
 macro_cache = Cache(ttl=3600, version="v1", namespace="macro")
-# Samanvaya's ~20 value drivers (Swayam's self-read of the target) — own namespace so a
-# driver batch can never be served for the macro panel, or the other way round.
-driver_cache = Cache(ttl=3600, version="v1", namespace="drivers")
 
 
 def begin_force_refresh(window: float = 300.0) -> None:
@@ -271,4 +268,5 @@ def begin_force_refresh(window: float = 300.0) -> None:
 def all_caches() -> list[Cache]:
     """Return all module-level cache instances for diagnostics + force-refresh."""
     from data.sheets import sheets_cache       # local imports avoid an import cycle
-    return [ohlcv_cache, macro_cache, sheets_cache, driver_cache]
+    from data.universe import _constituent_cache
+    return [ohlcv_cache, macro_cache, sheets_cache, _constituent_cache]

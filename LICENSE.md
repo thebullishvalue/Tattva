@@ -1,7 +1,7 @@
 # LICENSE
 
 **TATTVA (तत्त्व) — Unified Convergence Engine**
-**Version 3.0.0**
+**Version 2.7.0**
 
 ---
 
@@ -89,7 +89,6 @@ to terminate this licence at any time for breach of terms.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 3.0.0 | 2026-09-30 | Swayam rebuilt on the Pragati indicator (conviction ladder × Samanvaya value → 3 × 3 grid → ▲ capitulation / ▼ distribution; measured and pre-registered, research/swayam_v3_study.md), MSF/MMR view bank and HMM/GARCH/CUSUM removed, dead constituent resolution removed, Mūla consolidation (engines/mula) |
 | 2.7.0 | 2026-07-20 | Nirnay-Swayam self mode (self-referential 15-view breadth on the target's own OHLCV — commodities + free-form individual stocks), free-form symbol entry (NSE `.NS`→BSE `.BO` resolution), precedent term structure expanded to 1/3/5/10/20/60d, Signal-Horizon selector removed (single fixed 10d), **full per-instrument configuration** (every Aarambh/Nirnay/Swayam/convergence/interpretation knob on `InstrumentConfig`, tuned per instrument for the 5 catalogue classes and per market for stocks), research-suite overhaul (interactive/from-scratch orchestrator, gated per-instrument recommendations from every study, live heartbeat), and fetcher partial-success re-fetch |
 | 2.6.0 | 2026-07-13 | Signal tables, hero decision synthesis, full system re-tune, universe expansion |
 | 2.5.0 | 2026-07-04 | Audit hardening, hero verdict rebuild, UI/UX polish |

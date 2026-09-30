@@ -11,6 +11,52 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ## [Unreleased]
 
+---
+
+## [3.0.0] — 2026-09-30 — *Rebuilt from scratch*
+
+Tattva is rebuilt from first principles around its purpose: one 10-day call per target, with its
+own track record beside it. No code from 2.x is carried over. (A 3.0.0 that rebuilt only Swayam on
+the Pragati indicator reached `main` briefly and was reverted, `771fd90`. This release replaces it.)
+
+### The system
+- **Mūla (world-relative).** A daily-re-estimated exposure model of the target against about 25
+  global markets (lags 0 and 1; causal; a factor that is the target itself is left out). The signal
+  is the 60-day return the world did not explain, which reverts.
+- **Swayam (self).** The target's own stretch: its 60- and 250-day trend and its place in the
+  60-day range, which reverts.
+- **Convergence.** Timing z = ½(Mūla + Swayam), scaled. Expected move = the target's own drift +
+  0.05·z. BUY or SELL only when |z| ≥ 0.5 and the engines agree; otherwise NO CALL.
+- **Track record.** Every call is scored on non-overlapping 10-day outcomes and shown per target
+  and per period, against drift alone and always-long.
+- **App.** Rewritten: Call · Mūla · Swayam · Record · How it works. It uses native Streamlit and
+  plotly, with one colour per role.
+- **Data.** Unadjusted daily bars since 2008 in a declared universe, with a disk cache and a
+  stale-snapshot fallback. Free-form India and US stocks are still supported.
+
+### Evidence (research/tattva_v3_study.md)
+- **The pre-registered design failed.** `DESIGN.md` specified a pooled, learned design; its IC was
+  −0.022 / −0.006 / −0.018 / −0.047. It is reported, not hidden.
+- **Adopted design.** Selected on 2012 to mid-2019 only. Timing IC is +0.042 / +0.062 / +0.063 /
+  +0.011. The call hit rate is 55.2% / 53.7% / 56.9% / 55.0%, at or above drift alone in every
+  period.
+- **Weak spots.** It is below always-long in the 2012-2021 bull runs, and it has no edge on crypto.
+- **Against the old system.** On the old end-to-end test's 25 targets, 2019-2026, the IC was
+  +0.084 / +0.069 / +0.026, against the old hero's −0.145 / −0.010 / −0.010.
+
+### Removed
+- **The 2.x system:** the recursive cointegration Mūla, the MSF/MMR Swayam, CrossValidator,
+  Intelligence, Precedent and the old UI.
+- **Sixteen NSE sector indices.** yfinance serves no history for them.
+- **"India Sector ETFs" is renamed "Nifty 500".** It was always priced on `^CRSLDX`.
+
+### Verified
+- **Causality.** `tests/test_causality.py`: 6 targets truncated 250 and 600 sessions early match
+  the full run exactly (12 of 12 pass).
+- **Headless app runs.** Gold, Bitcoin, Nifty 50, USD/INR, S&P 500, AAPL and RELIANCE ran with no
+  exceptions. A bad symbol and an unavailable sheet source are handled.
+
+
 ### Removed
 - **The "V2 valuation core" rail selector.** With Mūla as the only valuation
   engine and Swayam as the only breadth engine, there is nothing to choose

@@ -1,5 +1,10 @@
 # Tattva — from-scratch design (v3)
 
+> **Outcome (added after the results, 2026-09-30):** the learned design below failed its own
+> rule 2 (IC negative in every period). The shipped design is a post-hoc, P0-selected revision,
+> reported with the failure in [`research/tattva_v3_study.md`](research/tattva_v3_study.md).
+> This document is kept unchanged below as the pre-registration.
+
 *Written 2026-09-30, before any result from this design was computed. The rules in §6 are fixed here;
 anything changed after results are seen is reported as post-hoc, next to the pre-registered result.*
 

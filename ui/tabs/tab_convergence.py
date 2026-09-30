@@ -59,10 +59,10 @@ TOOLTIPS = {
         "vs. oversold. Below -20 = most stocks cheap (bullish); above +20 = most expensive (bearish)."
     ),
     "swayam_avg": (
-        "Average technical signal across the Swayam bottom-up units — basket constituents, or "
-        "self-ensemble views of the instrument's own price (Swayam self mode). Negative = net "
-        "bullish; positive = net bearish. Moves slowly and confirms (or contradicts) Mūla's "
-        "top-down view."
+        "Swayam's conviction tape on a ±10 scale — the Pragati indicator's read of who controls "
+        "the target's own price (participation-weighted effort that became displacement). "
+        "Negative = sellers in control = oversold, which Tattva reads as bullish; positive = "
+        "buyers in control = overbought = bearish. Confirms (or contradicts) Mūla's top-down view."
     ),
     "agreement": (
         "How often Mūla and Swayam point in the same direction. THE BASELINE IS NOT 50%: "
@@ -178,10 +178,6 @@ def render_convergence_tab(ts_filtered=None):
     nishkarsh_norm = st.session_state.get("nishkarsh_conv_normalized")
     fvo_ts = st.session_state.get("fvo_ts")
     swayam_daily = st.session_state.get("swayam_daily")
-    # Swayam's bottom-up units are basket CONSTITUENTS in basket mode and
-    # self-ensemble VIEWS in Swayam self mode — keep copy accurate for both.
-    _self_mode = st.session_state.get("swayam_mode") == "self"
-    _units = "views" if _self_mode else "constituents"
 
     # ── Per-instrument marker / tier anchors ────────────────────────────────
     # Marker tiers for THIS render. The config values are warm-up priors; once
@@ -381,11 +377,11 @@ def render_convergence_tab(ts_filtered=None):
             has_overlap and len(aligned_swayam_raw)) else (None, None)
         if n_avg is not None:
             render_metric_card("SWAYAM AVG SIGNAL", f"{n_avg:.2f}",
-                               _asof(f"Bottom-up {_units[:-1]} momentum", stale, _fill),
+                               _asof("Conviction tape (−: sellers = oversold)", stale, _fill),
                                "success" if n_avg < UI_SWAYAM_BULLISH else "danger" if n_avg > UI_SWAYAM_BEARISH else "neutral",
                                tooltip=TOOLTIPS["swayam_avg"])
         else:
-            render_metric_card("SWAYAM AVG SIGNAL", "N/A", f"No {_units[:-1]} data", "neutral")
+            render_metric_card("SWAYAM AVG SIGNAL", "N/A", "No conviction read", "neutral")
 
     with col4:
         agreement, stale = _settled(convergence_df["agreement_ratio"].to_numpy(),
@@ -410,7 +406,7 @@ def render_convergence_tab(ts_filtered=None):
     )
 
     # Aligned series already computed once at the top (single source of truth with
-    # the metric cards). Mūla-only targets (no Swayam basket) have no overlap →
+    # the metric cards). Targets where Swayam has not calibrated have no overlap →
     # the cards above still rendered; the plot just can't be drawn.
     if not has_overlap:
         render_empty_state(
@@ -418,12 +414,12 @@ def render_convergence_tab(ts_filtered=None):
             "Mūla and Swayam share no dates for this target, so the consensus overlay "
             "cannot be drawn. The metric cards above are Mūla-only reads and remain valid.",
             eyebrow="Convergence",
-            action_label="Pick a target with a resolvable Swayam view bank.",
+            action_label="Pick a target with enough price history for Swayam to calibrate.",
         )
         return
 
     # Short-history guard: z-scoring needs a stable σ. When the FULL Mūla∩Swayam
-    # overlap is tiny (brand-new sheet target, freshly-listed basket constituents),
+    # overlap is tiny (brand-new sheet target, freshly-listed instrument),
     # σ collapses to its 1e-10 floor and the whole normalized plot flat-lines at 0 —
     # which misreads as a confident "neutral". The cards above already show the raw
     # latest reads honestly; here we suppress the misleading plot and say why.
@@ -440,25 +436,21 @@ def render_convergence_tab(ts_filtered=None):
         )
         return
 
-    # Honesty for the carry-forward: when the bottom-up source's native data ends
-    # before the latest plotted session (its market(s) closed / haven't posted),
-    # say so — those trailing breadth points are carried forward, provisional.
-    # In self mode the "source" is the instrument's own OHLCV (self-ensemble
-    # views), not a constituent basket — keep the copy accurate.
+    # Honesty for the carry-forward: when Swayam's native data (the target's own
+    # OHLCV) ends before the latest plotted session (its market closed / hasn't
+    # posted), say so — those trailing points are carried forward, provisional.
     _nn_last = st.session_state.get("swayam_native_last")
     _plot_last = aligned_dates[-1] if aligned_dates else None
     try:
         if _nn_last is not None and _plot_last is not None \
                 and pd.Timestamp(_nn_last).normalize() < pd.Timestamp(_plot_last).normalize():
-            _src = ("The instrument's own price data" if _self_mode
-                    else "The constituent basket's data")
-            _why = ("the instrument's market is closed or hasn't posted yet" if _self_mode
-                    else "the constituents' markets are closed or haven't posted yet")
+            _src = "The instrument's own price data"
+            _why = "the instrument's market is closed or hasn't posted yet"
             render_info_box(
                 "Breadth carried forward",
                 f"{_src} ends {pd.Timestamp(_nn_last):%d %b %Y}; later sessions "
                 f"(through {pd.Timestamp(_plot_last):%d %b %Y}) carry its last reads forward — {_why}, "
-                f"so bottom-up breadth on those bars is provisional.",
+                f"so Swayam's reads on those bars are provisional.",
                 color="amber",
             )
     except Exception:

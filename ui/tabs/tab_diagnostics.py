@@ -222,51 +222,6 @@ def render_diagnostics_tab(engine, ts_filtered, x_axis, x_title, signal, model_s
 
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 4. HMM TELEMETRY
-    # ═══════════════════════════════════════════════════════════════════════
-    render_section_header(
-        "Regime Detection (HMM)",
-        "How the Hidden Markov Model classifies the market over time. Sustained P > 0.5 = confident. Frequent crossings = uncertainty.",
-        icon="eye",
-        accent="rose",
-    )
-
-    # (Two metric cards previously shown here — "Covariance Shrinkage" and
-    # "Regime Persistence" — displayed the HMM/GARCH INITIAL PRIOR constants
-    # (GARCHState().omega, HMMState().transition_matrix[0,0]), not live
-    # telemetry: "Covariance Shrinkage" was actually the GARCH intercept
-    # omega (unrelated to covariance shrinkage — nothing in this pipeline
-    # regularizes a covariance matrix), and "Regime Persistence" was the
-    # transition matrix's INITIAL value, which each constituent then adapts
-    # online per-instrument (analytics/regime.py's _adapt_transitions) — the
-    # basket-wide adapted value isn't currently returned by run_regime_loop.
-    # Removed rather than left displaying constants mislabeled as measured
-    # state (audit finding E4).
-
-    # app.py stores the aggregated basket time-series under "swayam_daily"
-    # (produced by engines.swayam.aggregate_constituent_timeseries, which
-    # carries avg_hmm_bull/avg_hmm_bear) — "swayam_results" was never written
-    # anywhere, so this chart previously never rendered (audit finding C3).
-    swayam_df = st.session_state.get("swayam_daily", pd.DataFrame())
-    if not swayam_df.empty and "avg_hmm_bull" in swayam_df.columns:
-        fig_hmm = go.Figure()
-        fig_hmm.add_trace(go.Scatter(
-            x=swayam_df.index, y=swayam_df["avg_hmm_bull"],
-            name="P(Bull)", line=dict(color=chart_color("emerald"), width=1.5),
-            fill="tozeroy", fillcolor=chart_rgba("emerald", 0.08),
-        ))
-        fig_hmm.add_trace(go.Scatter(
-            x=swayam_df.index, y=swayam_df["avg_hmm_bear"],
-            name="P(Bear)", line=dict(color=chart_color("rose"), width=1.5),
-            fill="tozeroy", fillcolor=chart_rgba("rose", 0.08),
-        ))
-        fig_hmm.add_hline(y=0.5, line_dash="dot", line_color=grid_rgba(0.08), line_width=0.5)
-
-        fig_hmm.update_layout(**chart_layout(height=300))
-        style_axes(fig_hmm, y_title="State Probability", x_title=x_title, y_range=[0, 1])
-        render_chart_panel(fig_hmm, "diagnostics_hmm_plot", units="probability")
-
-    # ═══════════════════════════════════════════════════════════════════════
     # 4. DATA LAYER HEALTH — cache hit rate + circuit breaker state per source
     # ═══════════════════════════════════════════════════════════════════════
     render_section_header(

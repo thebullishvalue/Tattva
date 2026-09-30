@@ -271,5 +271,4 @@ def begin_force_refresh(window: float = 300.0) -> None:
 def all_caches() -> list[Cache]:
     """Return all module-level cache instances for diagnostics + force-refresh."""
     from data.sheets import sheets_cache       # local imports avoid an import cycle
-    from data.universe import _constituent_cache
-    return [ohlcv_cache, macro_cache, sheets_cache, _constituent_cache]
+    return [ohlcv_cache, macro_cache, sheets_cache, driver_cache]

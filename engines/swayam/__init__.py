@@ -1,29 +1,17 @@
+"""Tattva — SWAYAM: Engine 2, the target read by itself through the Pragati indicator.
+
+स्वयम् — "self". The conviction ladder (Daily · Weekly) × Samanvaya's value on the target's own
+OHLCV, meeting in the 3 × 3 Conviction-Value Grid, with the ▲ capitulation turn and ▼
+distribution read from it. See engines/swayam/engine.py for the design and the measurement
+that replaced the MSF / MMR view bank.
+
+Public surface:
+    SwayamEngine       — fit(ohlcv, drivers, symbol) → .daily (the Convergence contract),
+                         .frame (the full per-bar read), .rungs (the ladder's views), .current()
+    RUNG_NAMES         — the views: ("Daily", "Weekly")
+    CELL_LEAN          — the grid's measured lean per cell
+    CONTRACT_COLUMNS   — the schema Convergence reads
 """
-Tattva — Swayam breadth engine.
-तत्त्व (Tattva) — "Principle / Essence"
+from engines.swayam.engine import CELL_LEAN, CONTRACT_COLUMNS, RUNG_NAMES, SwayamEngine
 
-    kernel.py    per-series MSF + MMR + HMM/GARCH/CUSUM regime  (the analysis
-                 kernel; formerly the Swayam engine, minus its basket
-                 orchestration)
-    ensemble.py  the self-referential view bank built on that kernel, and the
-                 skill-weighted reduction of member votes into breadth
-
-Swayam is the system's only breadth formulation. The basket read it replaced
-required hand-curated proxy constituents per target; see ensemble.py's
-docstring for why that had to go.
-"""
-
-from .ensemble import (SwayamMember, build_swayam_frames, default_swayam_members,
-                       effective_member_count)
-from .kernel import aggregate_views, calculate_mmr, calculate_msf, run_full_analysis
-
-__all__ = [
-    "SwayamMember",
-    "build_swayam_frames",
-    "default_swayam_members",
-    "effective_member_count",
-    "aggregate_views",
-    "calculate_msf",
-    "calculate_mmr",
-    "run_full_analysis",
-]
+__all__ = ["CELL_LEAN", "CONTRACT_COLUMNS", "RUNG_NAMES", "SwayamEngine"]

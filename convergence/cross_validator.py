@@ -77,7 +77,7 @@ class CrossValidator:
     1. **Direction** (30% base): Both systems pointing the same way.
     2. **Breadth** (25% base): Oversold breadth alignment.
     3. **Magnitude** (25% base): Signal strengths are comparable.
-    4. **Regime** (20% base): OU regime aligns with HMM regime.
+    4. **Regime** (20% base): Mūla's regime aligns with Swayam's grid lean.
 
     Dimensions with higher clarity (stronger signals) receive up to
     ±10% additional weight at the expense of weaker dimensions.
@@ -95,10 +95,10 @@ class CrossValidator:
                 inject calibrated weights from a persisted profile. When
                 ``None``, falls back to the static CONV_WEIGHT_* defaults
                 with the heuristic ±10% adaptive shift.
-            expected_constituents: Full size of the Swayam basket for the
-                active universe. Confidence is down-weighted only when a day
-                has *fewer* analyzed instruments than this (a data-coverage
-                penalty), rather than against a hardcoded Nifty-50 count.
+            expected_constituents: Number of Swayam ladder rungs expected to
+                report (daily, weekly). Confidence is down-weighted only when a
+                day has *fewer* rungs reporting than this (a data-coverage
+                penalty).
                 When ``None``, no coverage penalty is applied.
         """
         self.history: list[ConvergenceSignal] = []

@@ -1,19 +1,19 @@
 # TATTVA — तत्त्व
 
-**Unified Convergence Engine** · v2.7.0 · *@thebullishvalue*
+**Unified Convergence Engine** · v3.0.0 · *@thebullishvalue*
 
 > *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality": the underlying
 > truth distilled from the convergence of evidence.
 
 Tattva is a research terminal that produces a single, reproducible directional
 signal for a **target** — a commodity (Gold, Silver, Copper, Brent, Cotton), a
-currency (USD/INR, the Dollar Index), or an equity **index** (Indian broad & sectoral, US benchmarks,
-or an India sector-ETF universe) — by converging two independent engines: a
-top-down macro **forecast** and a bottom-up **regime breadth** read, grading its
-own out-of-sample edge as it goes.
+currency (USD/INR, the Dollar Index), a crypto asset, an equity **index** (Indian
+broad & sectoral, US benchmarks, or an India sector-ETF universe) or any listed
+stock — by converging two independent engines: a top-down cross-asset **fair
+value** and the target's own **conviction** read through the Pragati indicator,
+grading its own out-of-sample edge as it goes.
 
-It runs entirely on free **yfinance** data (plus NSE/Wikipedia for index
-constituents). No API keys, no secrets, no database.
+It runs entirely on free **yfinance** data. No API keys, no secrets, no database.
 
 **Where to start.** [What it does](#what-it-does) is the one-screen version and
 [Quickstart](#quickstart) gets it running. [How the model works](#how-the-model-works)
@@ -32,7 +32,7 @@ terminal:
 | Engine | Question it answers | How |
 |---|---|---|
 | **Mūla** | *Where should this be trading, given the state of the world?* | Recursive **dynamic cointegrating regression** of log price on the *integrated* common factors of ~200 macro instruments, with time-varying coefficients — plus the **error-correction read**: Δp regressed on the lagged level gap identifies the reversion speed κ̂ and the expected gap-closure drift over the horizon, and three forecast families (valuation-led / momentum-led / full) are pooled by discounted log predictive density into a learned valuation-informativeness weight. Publishes a fair-value **level**, the mispricing gap against it, the oscillator (gap in units of its own predictive SD), κ̂, and the drift decomposition. |
-| **SWAYAM** | *Do independent views of this asset agree?* | MSF + MMR oscillators with HMM/GARCH/CUSUM regime detection, run as a 15-view ensemble (timescale × information-set × mechanism) on the target's **own** OHLCV, aggregated into breadth. Views are weighted by their own recursively-estimated skill, not counted equally. |
+| **SWAYAM** | *What does this asset's own tape say — who is in control, and where does price stand?* | The **Pragati indicator** (v9.3 — the engine Sanket screens with and Pragyam sizes from) on the target's **own** OHLCV: a **conviction** tape (the participation-weighted share of each bar's effort that became displacement) read on a daily + weekly ladder, a Samanvaya **value** tape (an RV leg hedged against ~20 macro drivers plus a price-only breadth leg), the two met in a **3 × 3 grid**, and the **▲ capitulation turn** / **▼ distribution** events. Published only once calibrated; never repaints. |
 | **CONVERGENCE** | *Do the two agree, and how strongly?* | Adaptive-weighted, **directional** composite across Direction / Breadth / Magnitude / Regime, smoothed with a Drift-Diffusion filter. |
 | **INTELLIGENCE** | *Which dimensions actually predict, and does it hold up?* | Dimension weights learned **online** from resolved outcomes — exponentially discounted directional skill, scaled by its own significance — plus a read-only expanding-window **walk-forward IC** durability check. Nothing is fitted to the whole sample and nothing is persisted. |
 | **PRECEDENT** | *When the state looked like today, what happened next?* | Covariance-aware **Mahalanobis** analog matching (OAS shrinkage) over Tattva's own state features, under a **Theiler exclusion window** so returned analogs are genuinely distinct episodes → an empirical, non-parametric forward-return base rate across a fixed **1/3/5/10/20/60d** term structure, independent of the model. |
@@ -129,11 +129,12 @@ year runs on the declared value and the estimate takes over only once it is
 better informed than the prior.
 
 What stays declared is *structure* — horizons (what you intend to hold), the
-view bank and discount grid (the hypothesis space to average over), the
-estimability floors — because those are choices about the question, not
-estimates of an answer. Still genuinely hand-set, and the README would rather
-say so than pretend otherwise: the DDM filter constants, the analog blend
-weights, and the Swayam kernel knobs. The research suite is eight studies —
+discount grid (the hypothesis space to average over), the estimability floors —
+because those are choices about the question, not estimates of an answer. Still
+genuinely hand-set, and the README would rather say so than pretend otherwise:
+the DDM filter constants, the analog blend weights, and the Pragati indicator's
+parameters (inherited as-is from its own audit on 380 instruments, not re-tuned
+on Tattva's targets). The research suite is eight studies —
 one per constant that is still swept rather than estimated.
 
 **The engine never looks ahead, and it is asserted.** Every published value is a
@@ -141,9 +142,11 @@ function of data available at its own date, so re-running on more data extends
 the record rather than rewriting it. That is not a claim about intent — it is a
 mechanical property with a mechanical test: `research/test_reproducibility.py`
 runs the system on `data[:T]` and on `data[:T-250]` and requires the two to
-agree **exactly** on every shared date, across the Mūla engine, the Swayam view
-weights, the aggregated breadth, the convergence dimension weights and the
-adaptive thresholds. A component that consulted the future cannot pass it. The
+agree **exactly** on every shared date, across the Mūla engine, the convergence
+dimension weights and the adaptive thresholds; Swayam's own version is
+`research/scripts/tv_causal.py` (8 targets, truncated 250 and 600 bars: maximum
+difference 0, identical grid cells and ▲/▼ events). A component that consulted
+the future cannot pass it. The
 test also fails on all-NaN output, so a component that quietly stopped
 producing anything cannot pass it either.
 
@@ -220,11 +223,13 @@ not N adjacent days of the same episode.
   (bond/rates/equity/risk/real-asset ETFs) + `MACRO_SYMBOLS_YF` (commodities + FX).
 - **Index targets:** `INDEX_TARGETS` in `data/universe.py` (India broad/sectoral, US
   benchmarks, India sector-ETF universe).
-- **Swayam input:** the target's **own** OHLCV, for every target. Swayam asks
-  its breadth question of one price series read many ways — timescale ×
-  information set × mechanism — so no constituent list, proxy basket or
-  cross-section fetch is involved, and a large index costs the same single
-  series as a commodity.
+- **Swayam input:** the target's **own** OHLCV, for every target, plus Samanvaya's
+  ~20 **value drivers** (global yields, the dollar, oil, precious metals, the INR
+  crosses, the home equity indices — `DRIVER_TICKERS` in
+  `engines/pragati/samanvaya.py`), fetched **unadjusted** so a later dividend or
+  split cannot rewrite a published value. No constituent list or proxy basket is
+  involved, and a large index costs the same single series as a commodity. A
+  target with no yfinance OHLCV (the sheet-sourced series) runs Mūla-only.
 
 Every external call is wrapped in a two-tier cache (memory + disk), a per-service
 circuit breaker, retry-with-backoff, a **partial-success re-fetch** (yfinance
@@ -245,7 +250,7 @@ absent, every check degrades to a plain Mon–Fri mask.
 **Everything is per-instrument.** Each instrument carries its own full
 `InstrumentConfig` — routing *and* every tunable knob across ALL layers: the
 Mūla valuation (burn-in / print floor / coefficient-memory grid / lookback),
-Swayam + Swayam breadth, convergence DDM + dimension weights, the
+the Swayam read thresholds, convergence DDM + dimension weights, the
 classification thresholds, and the interpretation/display tiers (markers,
 conviction, breadth, agreement, model-spread) — in the `INSTRUMENT_CONFIGS`
 registry (`core/config.py`). The five catalogue classes (commodity, fx,
@@ -253,7 +258,9 @@ india_index, us_index, etf) are tuned **per instrument** (hand-wired values in
 `_PER_INSTRUMENT_OVERRIDES`, layered on the class default); the India/US **stock**
 classes are tuned at **asset-class** level via `STOCK_CONFIGS`, since free-form
 symbols can't be pre-tuned. Only genuine statistical-definition constants
-(R²/ADF/KPSS/HMM cut-points, chart dimensions) stay global. An instrument with
+(R²/ADF/KPSS/HMM cut-points, chart dimensions) stay global. Swayam itself has
+no per-instrument knobs: the Pragati indicator runs with one parameter set
+(`engines/pragati/core.py::Params`) on every target. An instrument with
 no override runs on its class default, so the registry only has to carry what
 is genuinely instrument-specific: to retune one instrument, add its knob to
 `_PER_INSTRUMENT_OVERRIDES`; to retune a whole class, edit its default in
@@ -265,13 +272,13 @@ is genuinely instrument-specific: to retune one instrument, add its knob to
 | Index targets (India / US / ETF) | `INDEX_TARGETS` in `data/universe.py` |
 | **Per-instrument config (structure, floors, warm-up priors)** | `InstrumentConfig` / `INSTRUMENT_CONFIGS` in `core/config.py` |
 | **Per-asset-class config defaults** | `CLASS_CONFIG_DEFAULTS` (`commodity`, `fx`, `india_index`, `us_index`, `etf`, `stock_india`, `stock_us`) + `STOCK_CONFIGS` in `core/config.py` |
-| Individual-stock targets (free-form symbol, Swayam self-mode) | Sidebar **India Stocks** / **US Stocks** asset class → `data/universe.py::resolve_stock_symbol` + `core/config.py::register_stock_target` |
+| Individual-stock targets (free-form symbol) | Sidebar **India Stocks** / **US Stocks** asset class → `data/universe.py::resolve_stock_symbol` + `core/config.py::register_stock_target` |
 | Mūla valuation + scoring horizons (burn-in / print floor / discount grid / lookback / hold) | fields on each `InstrumentConfig` (`fvo_*`, `forecast_horizon`, `hold_horizons`) |
-| DDM / dimension weights / thresholds / markers / display tiers / analog blend / Swayam grid | fields on each `InstrumentConfig` |
+| DDM / dimension weights / thresholds / markers / display tiers / analog blend | fields on each `InstrumentConfig` |
+| Swayam (Pragati conviction · value · grid · events) | `engines/pragati/` (`Params`, `DRIVER_TICKERS`) + `engines/swayam/engine.py` |
 | Macro predictor universe | `GLOBAL_MACRO_MAP` + `MACRO_SYMBOLS_YF` |
-| Constituent cap | `_DEFAULT_CAP` in `data/universe.py` (`0` = no cap, full index) |
 | Valuation burn-in / print floor / discount grid | `core/config.py` (`FVO_BURN_IN`, `FVO_MIN_PRINTS`, `FVO_VALUATION_DELTAS`, `MIN_DATA_POINTS`) |
-| Asset-class block map for the cross-section | `engines/fvo/blocks.py` |
+| Asset-class block map for the cross-section | `engines/mula/blocks.py` |
 
 In-app: nothing about the model is user-configurable, by design. The valuation
 panel is the whole traded cross-section minus this target's self-replicating
@@ -287,7 +294,7 @@ India symbols are resolved by probing `SYMBOL.NS` (NSE) first, then `SYMBOL.BO`
 (BSE) — an explicit `.NS`/`.BO` suffix skips the probe; US symbols are used as
 typed (`.` → `-`, the yfinance convention — e.g. `BRK.B` → `BRK-B`). A resolved
 symbol is registered as a first-class target (`RELIANCE (NSE)`, `AAPL (US)`, …) —
-Mūla values it and Swayam runs Swayam self-mode on it, with the same
+Mūla values it and Swayam reads it through the Pragati indicator, with the same
 per-target treatment as every other target. Successful resolutions are
 cached 7 days (`~/.cache/tattva/symbol_resolution/`); a not-found symbol is never
 cached, so a transient yfinance outage can't permanently brand it invalid.
@@ -300,25 +307,27 @@ cached, so a transient yfinance outage can't permanently brand it invalid.
 app.py                  Streamlit entrypoint + 5-phase orchestration
 core/                   config — macro universe, structure, floors, priors, and the
                         per-instrument InstrumentConfig registry — + logging
-data/                   yfinance fetchers, index catalogue + constituent
-                        resolution (universe), two-tier cache, circuit breakers,
+data/                   yfinance fetchers (macro universe, target OHLCV, value
+                        drivers), index catalogue + stock symbol resolution
+                        (universe), two-tier cache, circuit breakers,
                         per-exchange trading calendars (calendars.py)
 engines/                mula/ (valuation: recursive cointegrating regression —
                         ECM error-correction layer,
                         causal DLM/DMA primitives, online factor model with a
                         Marchenko-Pastur cut, regime filter, asset-class block
-                        map), swayam/ (breadth: the per-series MSF/MMR/regime
-                        kernel + the skill-weighted self-referential view bank)
+                        map), pragati/ (the Pragati indicator: conviction
+                        core, Samanvaya value, the 3 × 3 grid), swayam/ (the
+                        indicator on the target → the Convergence contract)
 analytics/              adaptive (causal thresholds + online skill weights),
                         OU, Hurst/DFA,
-                        robust-quantile z-scores, HMM/GARCH/CUSUM, breaks,
+                        robust-quantile z-scores, breaks,
                         analogs (Mahalanobis precedent matcher)
 convergence/            cross-validator, conviction (DDM), divergence,
                         normalization, intelligence (online weights + walk-forward)
 ui/                     theme, components, tabs (Convergence/Mūla/Swayam/
                         Precedent/Diagnostics/Data)
-research/               validation harnesses (identity sweep, Mūla ECM + hero
-                        verdict synthetic suite, real-data Swayam study)
+research/               swayam_v3_study.md (the measured case for Swayam v3) +
+                        scripts/ (its measurement, end-to-end and causality runs)
 ```
 
 Re-tuning: `python3 research/run_tuning.py` opens an interactive menu (run the whole
@@ -335,6 +344,9 @@ applied by hand after review.
 ## Interpreting the output
 
 - **Hero card** — normalized convergence signal and the Mūla / Swayam contributions.
+- **Swayam tab** — the grid state, the conviction and value tapes, the push
+  histogram, the ladder rungs and the ▲/▼ event ledger. Negative conviction means
+  sellers are in control, which Tattva reads as oversold — the bullish side.
 - **Mūla tab** — price against the fair-value level the cross-section implies,
   inside its 95% predictive band, with the mispricing gap that drives the signal
   stack below it. Model quality reads left to right as a chain: does the
@@ -357,17 +369,18 @@ reading. Across the universe the (leakage-free) directional edge is
 modest and concentrated at **10–20d** — the precedent base rate is strongest as a
 ~10d confirmer, and is best treated as fading in the recent regime.
 
-**Swayam's honest limitation.** Breadth is read across 15 *views of one price
-series* rather than 15 independent instruments, so the bank is more internally
-correlated than a genuine cross-section would be — expect lumpier breadth swings
-and more synchronized regime flips than a constituent read would show. That is
-the price of not needing a hand-curated proxy, and it is disclosed rather than
-hidden: the Swayam tab surfaces an "effective view count" (an eigenvalue-based
-diagnostic, never fed into the signal itself), and the views are skill-weighted,
-so a timescale that has stopped predicting fades out of the aggregate instead of
-padding the apparent agreement. The trade is deliberate — a self-referential
-bank needs no hand-curated proxy basket, and a proxy is a judgement the data
-never gets to overrule.
+**Swayam's honest limitation.** Swayam is the Pragati indicator on one price
+series, so its "breadth" is the share of two ladder rungs (daily, weekly), not a
+cross-section — it is a conviction read, not a vote. Its measured edge is
+uneven, and the numbers are in `research/swayam_v3_study.md`: on Tattva's 25
+targets at 10 days it lifted the hero headline's IC from −0.145 / −0.010 / −0.010
+to +0.141 / +0.023 / −0.009 (2019-21 / 2022-23 / 2024-26) — a large gain, a
+small gain and parity — while the calibrated composite trails the old pairing in
+2024-26 (+0.061 vs +0.079). The ▲ capitulation turn carries the recent edge
+(+0.19σ / +0.25σ excess in 2022-23 / 2024-26; strongest on indices) and does
+**not** work on crypto (≈ 0), which is disclosed rather than hidden. The ladder
+reads **up** (daily → weekly) and never down, because intraday history rolls off
+yfinance and a ladder built from it would repaint.
 
 ---
 

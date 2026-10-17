@@ -944,7 +944,7 @@ def _gate(value: float, lo: float, hi: float) -> float:
 
 
 #: What a gate reads when its evidence is ABSENT (no Swayam row, too few
-#: distinct analogs): uninformative, neither opening nor shutting the chain.
+#: effective analogs): uninformative, neither opening nor shutting the chain.
 #: The one exception is an UNVALIDATED edge — a call with no scored history
 #: is discounted, because "never measured" is not the same as "measured at
 #: zero" but is not evidence of skill either.
@@ -969,6 +969,20 @@ GATE_TITLES = {
     "mispricing": "Mispricing", "reversion": "Reversion", "cross_section": "Cross-section",
     "convergence": "Convergence", "edge": "Edge", "precedent": "Precedent",
 }
+
+
+def edge_periods(edge: dict | None) -> tuple[int, int]:
+    """``(positive, scored)`` periods of an edge read.
+
+    The denominator is the periods that had enough calls to score
+    (``scored_blocks``), not every period drawn: a short history leaves its
+    first blocks unscored, and dividing by all of them understated durability.
+    """
+    e = edge or {}
+    blocks = [b for b in (e.get("blocks") or [])
+              if b.get("ic") is not None and np.isfinite(b.get("ic"))]
+    scored = int(e.get("scored_blocks", len(blocks)) or 0)
+    return int(e.get("positive_blocks", 0) or 0), scored
 
 
 def edge_tier(ic: float | None) -> tuple[str, str]:
@@ -1087,7 +1101,8 @@ def build_hero_verdict(
              "No leave-one-block-out consistency is available for this session.")
     else:
         _add("cross_section", _gate(xs, 0.3, 0.9),
-             ("the world agrees" if xs >= 0.75 else
+             ("no claim to confirm" if dir_ == 0 else
+              "the world agrees" if xs >= 0.75 else
               "the world is split" if xs >= 0.5 else "the world disagrees"),
              f"Independent slices of the cross-section (each asset-class block left "
              f"out in turn) agree on the gap's sign: consistency {xs:.2f}.")
@@ -1101,7 +1116,8 @@ def build_hero_verdict(
         agree_txt = (f" Across direction, breadth, magnitude and regime the engines agree "
                      f"{agreement:.0%}." if agreement is not None and np.isfinite(agreement) else "")
         _add("convergence", _gate(aligned, -0.3, 0.4),
-             ("Swayam confirms" if aligned > 0.1 else
+             ("no claim to confirm" if dir_ == 0 else
+              "Swayam confirms" if aligned > 0.1 else
               "Swayam contradicts" if aligned < -0.1 else "Swayam split"),
              f"Swayam net breadth {net:+.0%} ({os_:.0f}% of views oversold, "
              f"{ob_:.0f}% overbought).{agree_txt}")
@@ -1117,7 +1133,7 @@ def build_hero_verdict(
     else:
         se = _f(edge, "se")
         n = int((edge or {}).get("n", 0) or 0)
-        pos, nb = (edge or {}).get("positive_blocks"), len((edge or {}).get("blocks") or [])
+        pos, nb = edge_periods(edge)
         _add("edge", _gate(ic, -0.02, 0.15),
              ("edge holds" if ic > 0.05 else "edge marginal" if ic > 0 else "no measured edge"),
              f"Mūla's call has a non-overlapping {h}-d IC of {ic:+.3f}"
@@ -1138,14 +1154,16 @@ def build_hero_verdict(
         else:
             label = ("precedent agrees" if agree > 0.55 else
                      "precedent disagrees" if agree < 0.45 else "precedent split")
+        _raw = int((precedent or {}).get("n", 0) or 0)
         _add("precedent", _gate(agree, 0.35, 0.65), label,
-             f"{p_pos:.0f}% of ≈{p_n:.0f} distinct analogs rose over the next {p_h}d"
-             f" (median {(_f(precedent, 'median', 0.0) or 0.0):+.2f}%).")
+             f"{p_pos:.0f}% of the closest analogs rose over the next {p_h}d "
+             f"(≈{p_n:.0f} effective of {_raw} distinct episodes; median "
+             f"{(_f(precedent, 'median', 0.0) or 0.0):+.2f}%).")
     else:
         why = str((precedent or {}).get("note") or "").strip()
         _add("precedent", _GATE_ABSENT, "no usable precedent",
              (why + " " if why else "")
-             + f"≈{p_n:.0f} distinct analogs (need {min_precedent_n}) — too few to read as a base rate.")
+             + f"≈{p_n:.0f} effective analogs (need {min_precedent_n}) — too few to read as a base rate.")
 
     # ── Conviction: the product, and the constraint that binds it ──────
     conviction = float(np.prod([g["value"] for g in gates]))
@@ -1198,8 +1216,8 @@ def build_hero_verdict(
     tier, chip = edge_tier(ic)
     trust = {"tier": tier, "chip": chip, "oos_ic": ic, "se": _f(edge, "se"),
              "n": int((edge or {}).get("n", 0) or 0),
-             "positive_blocks": (edge or {}).get("positive_blocks"),
-             "n_blocks": len((edge or {}).get("blocks") or [])}
+             "positive_blocks": edge_periods(edge)[0],
+             "n_blocks": edge_periods(edge)[1]}
 
     return {
         "signal": signal,
@@ -1320,11 +1338,11 @@ def edge_summary_text(edge: dict | None, what: str) -> str:
     if not edge or edge.get("ic") is None or not np.isfinite(edge.get("ic", np.nan)):
         return f"Not enough scored history to grade {what} yet."
     se = edge.get("se")
-    nb = len(edge.get("blocks") or [])
+    pos, nb = edge_periods(edge)
     return (f"{what[0].upper() + what[1:]}: non-overlapping {edge.get('horizon', '?')}-day IC "
             f"{edge['ic']:+.3f}" + (f" ± {se:.3f}" if se is not None and np.isfinite(se) else "")
             + f" over {int(edge.get('n', 0) or 0)} calls"
-            + (f"; {edge.get('positive_blocks', 0)} of {nb} periods positive." if nb else "."))
+            + (f"; {pos} of {nb} periods positive." if nb else "."))
 
 
 def render_edge_panel(edge: dict | None, key: str, *, what: str, show_chart: bool = True) -> None:
@@ -1346,8 +1364,11 @@ def render_edge_panel(edge: dict | None, key: str, *, what: str, show_chart: boo
         return
     tier, chip = edge_tier(ic)
     se = edge.get("se")
-    blocks = edge.get("blocks") or []
-    pos = int(edge.get("positive_blocks", 0) or 0)
+    # Only scored periods are drawn: an unscored one has no IC, and drawing it
+    # as an empty bar in the negative colour read as a bad period.
+    blocks = [b for b in (edge.get("blocks") or [])
+              if b.get("ic") is not None and np.isfinite(b.get("ic"))]
+    pos, n_scored = edge_periods(edge)
     tone = {"solid": "success", "modest": "success", "marginal": "warning",
             "no_edge": "danger"}.get(tier, "neutral")
     render_kpi_strip([
@@ -1357,10 +1378,10 @@ def render_edge_panel(edge: dict | None, key: str, *, what: str, show_chart: boo
          "tooltip": ("Rank correlation of the lean with the forward return over the "
                      "horizon, scored on non-overlapping windows. 0 = no skill; the SE "
                      "says how much of the number is sampling noise.")},
-        {"label": "Positive Periods", "value": f"{pos}/{len(blocks)}" if blocks else "—",
+        {"label": "Positive Periods", "value": f"{pos}/{n_scored}" if n_scored else "—",
          "subtext": "Durability across regimes — one good period is not an edge.",
-         "color_class": ("success" if blocks and pos > len(blocks) * 0.6
-                         else "warning" if blocks and pos >= len(blocks) * 0.5 else "danger")},
+         "color_class": ("success" if n_scored and pos > n_scored * 0.6
+                         else "warning" if n_scored and pos >= n_scored * 0.5 else "danger")},
         {"label": "Calls Scored", "value": f"{int(edge.get('n', 0) or 0)}",
          "subtext": f"one per {edge.get('horizon', '?')} sessions, none overlapping",
          "color_class": "neutral"},

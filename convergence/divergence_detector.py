@@ -35,6 +35,7 @@ said nothing.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pandas as pd
@@ -162,6 +163,14 @@ class CrossSystemDivergenceDetector:
         if swayam is None:
             return None
         fvo = mula.get("fvo")
+        # No published valuation (burn-in, a withheld session): there is no
+        # Mūla stance to diverge from. Reading NaN as NEUTRAL turned every
+        # burn-in row with an active Swayam into a "SWAYAM_LEADS" event.
+        try:
+            if fvo is None or not math.isfinite(float(fvo)):
+                return None
+        except (TypeError, ValueError):
+            return None
         ms = mula_stance(fvo)
         ss = swayam_stance(swayam.get("oversold_pct"), swayam.get("overbought_pct"),
                            swayam.get("avg_unified_osc"))

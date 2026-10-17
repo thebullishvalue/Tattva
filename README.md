@@ -281,7 +281,12 @@ non-overlapping 10-day IC (periods positive of 6); one standard error is about
 | Bitcoin | −0.056 (2/6) | −0.023 (2/6) | −0.062 (1/6) |
 | AAPL | +0.088 (5/6) | −0.006 (2/6) | +0.064 (4/6) |
 
-Every figure is within about one standard error of zero. What is consistent is
+These come from one day's fetch. The panel's composition can differ between
+fetches (a rate-limited ticker, a newly admitted instrument), and with ~130
+calls a different panel moves an IC by a few hundredths — a second fetch the
+same day read Gold's Mūla IC at +0.038. So treat the table as the shape of the
+evidence, not as constants. Every figure is within about one standard error of
+zero. What is consistent is
 modest: Swayam's contrarian breadth is positive in five of six periods on gold
 and both equity benchmarks, and nothing works on Bitcoin. These are the numbers
 the Edge gate and every engine page print; read conviction against them, and

@@ -31,7 +31,7 @@ from ui.theme import (chart_layout, style_axes,
                       chart_color, chart_rgba, grid_rgba)
 from ui.components import (render_metric_card, render_section_header, render_chip,
                            render_empty_state, render_chart_panel, render_table_panel,
-                           render_note, edge_tier)
+                           render_note, edge_tier, edge_periods)
 from core.config import UI_CHART_HEIGHT_MEDIUM
 from data.cache import all_caches
 from data.circuit_breaker import all_circuits, CircuitState
@@ -69,17 +69,18 @@ def _render_edges(edges: dict, horizon: int) -> None:
         e = (edges or {}).get(key) or {}
         ic = e.get("ic")
         tier, chip = edge_tier(ic)
-        nb = len(e.get("blocks") or [])
+        pos, nb = edge_periods(e)
         rows.append({
             "Engine": name, "Graded": what,
             "IC": f"{ic:+.3f}" if ic is not None and np.isfinite(ic) else "—",
             "± SE": f"{e['se']:.3f}" if e.get("se") is not None and np.isfinite(e.get("se")) else "—",
             "Calls": int(e.get("n", 0) or 0),
-            "Periods +": f"{e.get('positive_blocks', 0)}/{nb}" if nb else "—",
+            "Periods +": f"{pos}/{nb}" if nb else "—",
             "Read": chip,
         })
         for b in e.get("blocks") or []:
-            bars.append((name, f"{str(b.get('start'))[:7]}", b.get("ic")))
+            if b.get("ic") is not None and np.isfinite(b.get("ic")):
+                bars.append((name, f"{str(b.get('start'))[:7]}", b.get("ic")))
     if not any(r["IC"] != "—" for r in rows):
         render_empty_state(
             "Nothing graded yet",

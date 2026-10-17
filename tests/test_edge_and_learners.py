@@ -99,3 +99,11 @@ def test_no_swayam_row_is_skipped_not_faked():
     assert dd.detect({"fvo": -3.0}, None, "2024-01-02") is None
     ev = dd.detect({"fvo": -1.0}, {"oversold_pct": 0, "overbought_pct": 70, "avg_unified_osc": 5}, "2024-01-03")
     assert ev is not None and ev.divergence_type == "CONTRADICTION"
+
+
+def test_no_divergence_on_a_session_mula_did_not_value():
+    dd = CrossSystemDivergenceDetector()
+    sw = {"oversold_pct": 70, "overbought_pct": 0, "avg_unified_osc": -6}
+    assert dd.detect({"fvo": float("nan")}, sw, "2024-01-02") is None
+    assert dd.detect({"fvo": None}, sw, "2024-01-03") is None
+    assert dd.get_events().empty

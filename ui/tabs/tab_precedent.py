@@ -225,7 +225,7 @@ def render_precedent_tab(
             n_eff = float(s.get("n_eff", n_raw) or 0.0)
             # The SAME usability rule the hero's precedent gate applies, so this
             # page cannot print a confident green base rate the Overview just
-            # called "too few distinct analogs to read".
+            # called "too few effective analogs to read".
             usable = bool(s.get("usable", True)) and n_eff >= _MIN_N
             if not usable and s.get("note"):
                 _notes.append(f"+{h}d: {s['note']}")
@@ -233,8 +233,8 @@ def render_precedent_tab(
                 render_metric_card(
                     label=f"+{h}D Median Return",
                     value=f"{s['median']:+.1f}%",
-                    subtext=(f"{s['positive_pct']:.0f}% rose · ≈{n_eff:.0f} distinct of {n_raw}"
-                             if usable else f"insufficient precedent · ≈{n_eff:.0f} distinct"),
+                    subtext=(f"{s['positive_pct']:.0f}% rose · ≈{n_eff:.0f} effective of {n_raw}"
+                             if usable else f"insufficient precedent · ≈{n_eff:.0f} effective"),
                     color_class=("neutral" if not usable else
                                  "success" if s["median"] > 0 else "danger"),
                 )
@@ -248,8 +248,9 @@ def render_precedent_tab(
             "similar past states — no model is fitted to returns to produce it. The state is "
             "the engines' own reading, so this asks what <strong>this</strong> reading has "
             "historically preceded; it is one gate of the conviction chain, read with Mūla's "
-            "call rather than against it. \u201cDistinct\u201d counts episodes, not days: "
-            "ten adjacent days of one episode are one observation."
+            "call rather than against it. Every analog is a distinct episode (a Theiler "
+            "window keeps adjacent days of one episode out); the \u201ceffective\u201d "
+            "count discounts further for how unevenly the closest of them are weighted."
         ),
         color="info",
     )

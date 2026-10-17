@@ -70,3 +70,19 @@ def test_binding_constraint_is_the_smallest_gate():
     smallest = min(v["gates"], key=lambda g: g["value"])
     assert v["binding"] == smallest["name"]
     assert v["limit"].startswith("Capped by")
+
+
+def test_no_claim_has_nothing_to_confirm():
+    v = _v(mula=dict(MULA, fvo=0.1, pct_mispricing=0.002, xs_consistency=0.4))
+    g = {x["name"]: x["label"] for x in v["gates"]}
+    assert g["cross_section"] == "no claim to confirm"
+    assert g["convergence"] == "no claim to confirm"
+
+
+def test_periods_positive_counts_scored_periods_only():
+    from ui.components import edge_periods
+    e = dict(EDGE, positive_blocks=3, scored_blocks=4,
+             blocks=[{"ic": 0.1}, {"ic": float("nan")}, {"ic": -0.1}, {"ic": 0.2}, {"ic": 0.3}, {"ic": float("nan")}])
+    assert edge_periods(e) == (3, 4)
+    gate = [x for x in _v(edge=e)["gates"] if x["name"] == "edge"][0]
+    assert "3 of 4 periods positive" in gate["detail"]

@@ -94,6 +94,7 @@ from ui.components import (
     render_rail_readout,
     format_conviction,
     window_cutoff,
+    edge_periods,
     GATE_TITLES,
 )
 from ui.tabs.tab_mula import render_mula_tab
@@ -480,9 +481,9 @@ def _render_model_passport_sidebar() -> None:
     ic = edge.get("ic")
     if ic is not None and np.isfinite(ic):
         rows.append(("Mūla edge (IC)", f"{ic:+.3f}", "long" if ic > 0 else "short"))
-        nb = len(edge.get("blocks") or [])
+        _pos, nb = edge_periods(edge)
         if nb:
-            rows.append(("Periods +", f"{edge.get('positive_blocks', 0)}/{nb}", ""))
+            rows.append(("Periods +", f"{_pos}/{nb}", ""))
     render_rail_readout(rows)
 
 
@@ -892,7 +893,12 @@ def main():
                     }]
                     if _rdf is not None:
                         st.session_state["data"] = _rdf
-                _clear_results()
+                # Recompute only when the data actually changed. A pull that
+                # returned nothing leaves the session's frame as it was, and
+                # re-running deterministic engines on it would reproduce the
+                # same numbers after ~30 s of work.
+                if _rdf is not None:
+                    _clear_results()
                 st.rerun()
 
         _render_appearance_control()
@@ -937,9 +943,11 @@ def main():
     def _notice(kind: str, title: str, body: str) -> None:
         _notices.append({"kind": kind, "title": title, "body": body})
 
-    # Notices queued by an action on the PREVIOUS run (a failed Refresh) — the
-    # rerun that action triggers is where they can be seen.
-    for _pn in st.session_state.pop("_pending_notices", None) or []:
+    # Notices queued by an action on a PREVIOUS run (a failed Refresh). Read,
+    # not consumed, here: a run that recomputes ends in st.rerun() and never
+    # renders, so the notice is dropped only once a page has actually shown it
+    # (just before the page renders, below).
+    for _pn in st.session_state.get("_pending_notices") or []:
         _notice(_pn["kind"], _pn["title"], _pn["body"])
 
     # ONE freshness reading, shared by these notices and the command bar's
@@ -1530,6 +1538,9 @@ def main():
         # _swayam_fetch_key as Phase 1; only the target-calendar reindex below
         # (cheap — no yfinance calls) re-runs.
         console.start_phase("SWAYAM ENGINE", 3, 5)
+        # Per-target: reset before this target fills it, so a target with no
+        # Swayam read never bundles the previous target's date.
+        st.session_state["swayam_native_last"] = None
         progress_bar(progress_container, 42, "Running Swayam Engine",
                      "MSF+MMR+Regime · self-referential view bank")
 
@@ -1974,7 +1985,7 @@ def main():
             render_fn()
         except Exception as e:                       # noqa: BLE001 - one page, not the app
             console.warning(f"{name} page failed: {type(e).__name__}: {e}")
-            render_warning_box(title=f"{name} could not be drawn", content=html.escape(str(e)))
+            render_warning_box(title=f"{name} could not be drawn", content=str(e))
 
     # ─── App shell — one real page per analytical surface (st.navigation).
     # Every page below is a THIN wrapper over the run above: none recompute
@@ -2085,6 +2096,7 @@ def main():
             st.Page(_page_data, title="Data", icon=":material/table_chart:"),
         ],
     }
+    st.session_state.pop("_pending_notices", None)     # shown on this render
     st.navigation(pages, position="sidebar").run()
 
     _render_footer()

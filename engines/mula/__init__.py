@@ -2,16 +2,15 @@
 
 मूल — "root". Prices the target against the level the global macro
 cross-section implies: a recursive cointegrating regression of log price on
-the integrated factors and asset-class blocks of ~200 instruments, plus the
-error-correction read (κ̂, expected gap-closure drift) and expert-pooled
-informativeness that turn the mispricing gap into a decision-grade signal.
+the integrated factors and asset-class blocks of ~200 instruments. Its gap is
+read four ways — the oscillator (the claim), the gap's persistence, the
+error-correction read of whether PRICE closes it (``ecm.py``), and the
+agreement of independent slices of the world on its sign.
 
 Public surface:
-    MulaEngine        — the engine app.py runs (pipeline core + ECM layer)
-    FairValueEngine   — the pipeline core without the ECM layer (legacy alias)
+    MulaEngine        — the engine (valuation + error-correction read)
+    FairValueEngine   — its former name, the same class
 """
-from engines.mula.engine import MulaEngine
-from engines.mula.base import FairValueEngine
+from engines.mula.base import FairValueEngine, MulaEngine
 
 __all__ = ["MulaEngine", "FairValueEngine"]
-

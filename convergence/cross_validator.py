@@ -2,16 +2,41 @@
 Tattva — CrossValidator: Cross-referencing Mūla and Swayam outputs.
 तत्त्व (Tattva) — "Principle / Essence"
 
-CONVERGENCE — Adaptive-weighted composite of 4 dimensions: Direction, Breadth, Magnitude, Regime — with DDM.
+CONVERGENCE — how far the two engines agree, dimension by dimension, and which
+way the agreement points.
 
-Computes a convergence score from four adaptive-weighted dimensions:
-direction agreement, breadth confirmation, magnitude alignment, and
-regime consistency.
+Every input is first turned into a LEAN (``core.semantics``): a bullish-positive
+number in [-1, +1] that says which call the reading implies. Mūla's lean is its
+valuation oscillator (cheap = bullish); Swayam's are its net view breadth, its
+average oscillator and its HMM regime split (oversold / low / bearish-regime =
+bullish, the system's contrarian reading). The four dimensions then measure
+agreement between leans, never between raw readings that happen to share a
+name:
+
+1. **Direction** — do the two calls point the same way? Mūla's claim (|FVO| past
+   the claim threshold) against the sign of Swayam's net breadth.
+2. **Breadth** — does Mūla's window breadth (how many of its 1m/3m/1y windows
+   read the gap cheap, minus rich) match Swayam's view breadth (oversold views
+   minus overbought)? Both are NET splits — the old dimension compared only
+   the oversold shares, so a Mūla reading 100% rich against a Swayam reading 0%
+   of anything scored as perfect agreement.
+3. **Magnitude** — are the two leans equally strong?
+4. **Regime** — does Mūla's valuation state agree with Swayam's HMM regime
+   split? Swayam's "bull" state is the high-oscillator state, i.e. stretched
+   up, so under the contrarian reading it is a BEARISH lean; the old code
+   scored "Mūla oversold + Swayam bull" as consistent, which mixed a contrarian
+   reading with a momentum one inside one dimension.
+
+A date without a Swayam row is not scored at all. It used to be scored against
+a stand-in of 50% oversold / 50% overbought / 33-33-34 regime — an impossible
+state (the shares sum to 100%) that then fed the weight learner, the
+walk-forward frame and the divergence detector as if Swayam had said something.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -21,313 +46,215 @@ from core.config import (
     CONV_WEIGHT_BREADTH,
     CONV_WEIGHT_MAGNITUDE,
     CONV_WEIGHT_REGIME,
-    CONV_ADAPTIVE_SHIFT_MAX,
-    CONV_STRONG_BULLISH,
-    CONV_MODERATE_BULLISH,
-    CONV_WEAK_BULLISH,
-    CONV_WEAK_BEARISH,
-    CONV_MODERATE_BEARISH,
-    CONV_STRONG_BEARISH,
 )
+from core.semantics import (
+    breadth_lean,
+    claim_direction,
+    oscillator_lean,
+    state_lean,
+    swayam_regime_lean,
+    valuation_lean,
+)
+
+#: The four agreement dimensions, in the order every frame carries them.
+DIMENSIONS: tuple[str, ...] = ("direction", "breadth", "magnitude", "regime")
+
+#: Prior dimension weights — the starting belief before any outcome resolves.
+PRIOR_WEIGHTS: dict[str, float] = {
+    "direction": CONV_WEIGHT_DIRECTION,
+    "breadth": CONV_WEIGHT_BREADTH,
+    "magnitude": CONV_WEIGHT_MAGNITUDE,
+    "regime": CONV_WEIGHT_REGIME,
+}
+
+#: Net-breadth dead band for Swayam's DIRECTION: a view split within ±10 points
+#: (e.g. 0% oversold vs 0% overbought, the commonest day) is no call, not a
+#: coin-flip sign. Same band as ``core.semantics.lean_word``.
+SWAYAM_DIRECTION_DEAD = 0.10
+#: Regime dead band: an HMM split within ±20 points is no regime call (the
+#: band the old NEUTRAL branch used).
+SWAYAM_REGIME_DEAD = 0.20
+
+
+def normalise_weights(weights: dict[str, float] | None) -> dict[str, float]:
+    """Dimension weights, normalised to sum to 1, from either key style.
+
+    Accepts the bare dimension names (``direction``) the learner publishes and
+    the ``w_``-prefixed names ``InstrumentConfig.weights_seed()`` returns, so a
+    per-instrument prior and a learned weight vector can be passed the same
+    way. Missing keys fall back to the global prior.
+    """
+    w = {}
+    for d in DIMENSIONS:
+        v = PRIOR_WEIGHTS[d]
+        if weights:
+            v = weights.get(d, weights.get(f"w_{d}", v))
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            v = PRIOR_WEIGHTS[d]
+        w[d] = max(v, 0.0) if math.isfinite(v) else PRIOR_WEIGHTS[d]
+    tot = sum(w.values())
+    if tot <= 1e-12:
+        return {d: 1.0 / len(DIMENSIONS) for d in DIMENSIONS}
+    return {d: v / tot for d, v in w.items()}
+
+
+def _sign_agreement(a: int, b: int) -> float:
+    """1 when two calls agree, 0 when they oppose, 0.5 when either abstains."""
+    if a == 0 or b == 0:
+        return 0.5
+    return 1.0 if a == b else 0.0
+
+
+def _dead_sign(x: float, dead: float) -> int:
+    return 0 if abs(x) < dead else (1 if x > 0 else -1)
 
 
 @dataclass
 class ConvergenceSignal:
-    """Cross-system convergence signal for a single date.
+    """Cross-system convergence for a single date.
 
     Attributes
     ----------
     convergence_score : float
-        Composite score in [-100, +100]. Negative = bullish convergence.
-    convergence_zone : str
-        Categorical zone label.
+        Weighted composite in [-100, +100], READING-oriented like every other
+        engine output: negative = the engines agree it is stretched DOWN
+        (bullish), positive = stretched UP (bearish). Magnitude = how strongly
+        they agree times how far the shared lean points.
     agreement_ratio : float
-        Fraction of dimensions that agree [0, 1].
-    lead_lag_indicator : str
-        Which system is leading, or ``ALIGNED`` / ``CONTRADICTION``.
-    confidence : float
-        Composite confidence [0, 1].
-    dimension_scores : dict[str, float]
-        Per-dimension raw scores [0, 1].
-    dimension_weights : dict[str, float]
-        Adaptive weights actually used for this observation.
-    date : str
-        Date string.
+        Weighted mean of the four dimension scores, in [0, 1].
+    consensus_direction : float
+        Bullish-positive mean of the two engines' leans, in [-1, +1].
+    mula_lean, swayam_lean : float
+        The two leans behind it (Mūla valuation; Swayam net breadth).
+    dimension_scores / dimension_weights : dict[str, float]
+        Per-dimension agreement in [0, 1], and the weights applied.
+    swayam_native : bool
+        False when the Swayam row was carried forward onto this date rather
+        than observed on it — kept so learning can skip stale evidence.
     """
 
     convergence_score: float
-    convergence_zone: str
     agreement_ratio: float
-    lead_lag_indicator: str
-    confidence: float
-    dimension_scores: dict[str, float]
-    dimension_weights: dict[str, float]
+    consensus_direction: float
+    mula_lean: float
+    swayam_lean: float
     date: str
-    consensus_direction: float = 0.0  # CONTINUOUS ∈ [-1,+1], bullish-positive:
-    # mean of the engines' signed strengths (-conviction/100 and breadth
-    # spread/100). Was a hard {-1, 0, +1} gate that zeroed the composite on
-    # 60%+ of real days — see compute_convergence's orientation block.
+    dimension_scores: dict[str, float] = field(default_factory=dict)
+    dimension_weights: dict[str, float] = field(default_factory=dict)
+    swayam_native: bool = True
+
+
+def score_dimensions(mula: dict, swayam: dict) -> tuple[dict[str, float], float, float]:
+    """The four dimension scores for one date, plus the two engines' leans.
+
+    Pure function of the two inputs — :class:`CrossValidator` and
+    ``convergence.intelligence`` both rebuild the composite from what this
+    returns, so there is one definition of "agreement".
+    """
+    fvo = mula.get("fvo")
+    m_lean = valuation_lean(fvo)
+    m_call = claim_direction(fvo)
+    w_lean = breadth_lean(mula.get("oversold_breadth"), mula.get("overbought_breadth"))
+    m_state = state_lean(mula.get("regime", ""))
+
+    s_lean = breadth_lean(swayam.get("oversold_pct"), swayam.get("overbought_pct"))
+    s_osc = oscillator_lean(swayam.get("avg_unified_osc"))
+    s_reg = swayam_regime_lean(swayam.get("regime_bull_pct"), swayam.get("regime_bear_pct"))
+
+    dims = {
+        "direction": _sign_agreement(m_call, _dead_sign(s_lean, SWAYAM_DIRECTION_DEAD)),
+        "breadth": float(np.clip(1.0 - abs(w_lean - s_lean) / 2.0, 0.0, 1.0)),
+        "magnitude": float(np.clip(1.0 - abs(abs(m_lean) - abs(s_osc)), 0.0, 1.0)),
+        "regime": _sign_agreement(m_state, _dead_sign(s_reg, SWAYAM_REGIME_DEAD)),
+    }
+    return dims, m_lean, s_lean
+
+
+def composite_score(dims: dict[str, float], weights: dict[str, float],
+                    consensus_direction: float) -> tuple[float, float]:
+    """``(convergence_score, agreement_ratio)`` for given dims and weights.
+
+    ``agreement`` is the weighted mean dimension score; the score orients it:
+    ``-consensus_direction × agreement × 100``. Agreement on its own has no
+    direction (it is as high at a top as at a bottom), which is why the sign
+    has to come from the engines' leans and not from the dimensions.
+    """
+    agreement = float(sum(weights[d] * dims[d] for d in DIMENSIONS))
+    return -consensus_direction * agreement * 100.0, agreement
 
 
 class CrossValidator:
-    """Cross-references Mūla and Swayam outputs per trading date.
+    """Cross-references Mūla and Swayam per trading date.
 
-    Computes an adaptive-weighted composite of four convergence dimensions:
-
-    1. **Direction** (30% base): Both systems pointing the same way.
-    2. **Breadth** (25% base): Oversold breadth alignment.
-    3. **Magnitude** (25% base): Signal strengths are comparable.
-    4. **Regime** (20% base): OU regime aligns with HMM regime.
-
-    Dimensions with higher clarity (stronger signals) receive up to
-    ±10% additional weight at the expense of weaker dimensions.
+    ``active_weights`` are the dimension weights to apply (either key style,
+    see :func:`normalise_weights`); ``None`` means the prior. There is no
+    heuristic re-weighting inside: the weights that matter are learned forward
+    by ``convergence.intelligence.apply_online_weights``, which rebuilds the
+    composite from the stored dimension scores.
     """
 
-    def __init__(
-        self,
-        active_weights: dict[str, float] | None = None,
-        expected_constituents: int | None = None,
-    ) -> None:
-        """Args:
-            active_weights: Optional override for the base dimension weights.
-                Must be a dict with keys ``direction``, ``breadth``,
-                ``magnitude``, ``regime``. Used by the online learner to
-                inject calibrated weights from a persisted profile. When
-                ``None``, falls back to the static CONV_WEIGHT_* defaults
-                with the heuristic ±10% adaptive shift.
-            expected_constituents: Full size of the Swayam basket for the
-                active universe. Confidence is down-weighted only when a day
-                has *fewer* analyzed instruments than this (a data-coverage
-                penalty), rather than against a hardcoded Nifty-50 count.
-                When ``None``, no coverage penalty is applied.
-        """
+    def __init__(self, active_weights: dict[str, float] | None = None) -> None:
         self.history: list[ConvergenceSignal] = []
-        self.active_weights = active_weights
-        self.expected_constituents = expected_constituents
+        self.weights = normalise_weights(active_weights)
 
     def compute_convergence(
         self,
-        fvo_signal: dict[str, object],
-        swayam_day_stats: dict[str, object],
+        mula: dict[str, object],
+        swayam: dict[str, object] | None,
         date: str,
-    ) -> ConvergenceSignal:
-        """Compute convergence score for a single date.
+    ) -> ConvergenceSignal | None:
+        """Score one date, or return ``None`` when there is nothing to score.
 
         Parameters
         ----------
-        fvo_signal : dict
-            Output from ``FairValueEngine.get_current_signal()``.
-        swayam_day_stats : dict
-            Aggregated Swayam stats for the date.
+        mula : dict
+            ``{"fvo", "oversold_breadth", "overbought_breadth", "regime"}`` —
+            the Mūla oscillator (σ), its window-breadth split (0-100 each) and
+            its valuation-state word.
+        swayam : dict | None
+            ``{"oversold_pct", "overbought_pct", "avg_unified_osc",
+            "regime_bull_pct", "regime_bear_pct"}`` and optionally ``"native"``
+            (False when carried forward). ``None`` = no Swayam row: the date is
+            skipped, not scored against a placeholder.
         date : str
-            Date string for this observation.
+            ``YYYY-MM-DD``.
         """
-        # ── Dimension 1: Direction Agreement ────────────────────────────
-        # Mūla: conviction < 0 = bullish (oversold), > 0 = bearish
-        # Swayam: oversold_pct > overbought_pct = bullish bias
-        fvo_direction = -np.sign(float(fvo_signal.get("conviction_score", 0)))
-        swayam_os = float(swayam_day_stats.get("oversold_pct", 50))
-        swayam_ob = float(swayam_day_stats.get("overbought_pct", 50))
-        swayam_direction = np.sign(swayam_os - swayam_ob)
+        if swayam is None:
+            return None
+        fvo = mula.get("fvo")
+        try:
+            if fvo is None or not math.isfinite(float(fvo)):
+                return None          # no published valuation on this date
+        except (TypeError, ValueError):
+            return None
 
-        if fvo_direction == swayam_direction and fvo_direction != 0:
-            direction_score = 1.0
-        elif fvo_direction == 0 or swayam_direction == 0:
-            direction_score = 0.5
-        else:
-            direction_score = 0.0
-
-        # ── Dimension 2: Breadth Confirmation ───────────────────────────
-        fvo_os_breadth = float(fvo_signal.get("oversold_breadth", 50))
-        breadth_agreement = 1.0 - abs(fvo_os_breadth - swayam_os) / 100.0
-        breadth_score = max(0.0, min(1.0, breadth_agreement))
-
-        # ── Dimension 3: Magnitude Alignment ────────────────────────────
-        fvo_mag = abs(float(fvo_signal.get("conviction_score", 0)))
-        swayam_mag = abs(float(swayam_day_stats.get("avg_unified_osc", 0)))
-        fvo_mag_norm = min(fvo_mag / 100.0, 1.0)
-        swayam_mag_norm = min(swayam_mag / 10.0, 1.0)
-        magnitude_alignment = 1.0 - abs(fvo_mag_norm - swayam_mag_norm)
-        magnitude_score = max(0.0, min(1.0, magnitude_alignment))
-
-        # ── Dimension 4: Regime Consistency ─────────────────────────────
-        fvo_regime = str(fvo_signal.get("regime", "NEUTRAL"))
-        swayam_bull_pct = float(swayam_day_stats.get("regime_bull_pct", 0))
-        swayam_bear_pct = float(swayam_day_stats.get("regime_bear_pct", 0))
-
-        fvo_bullish = "OVERSOLD" in fvo_regime
-        fvo_bearish = "OVERBOUGHT" in fvo_regime
-        swayam_bullish = swayam_bull_pct > swayam_bear_pct
-        swayam_bearish = swayam_bear_pct > swayam_bull_pct
-
-        if fvo_bullish and swayam_bullish:
-            regime_score = 1.0
-        elif fvo_bearish and swayam_bearish:
-            regime_score = 1.0
-        elif fvo_regime == "NEUTRAL" and abs(swayam_bull_pct - swayam_bear_pct) < 20:
-            regime_score = 0.8
-        else:
-            regime_score = 0.2
-
-        # ── Weighting ───────────────────────────────────────────────────
-        # Two paths:
-        #   (a) learned weights supplied → use them verbatim (from the
-        #       persisted profile verbatim. Skip the adaptive shift heuristic
-        #       (the calibration already learned the optimum from data).
-        #   (b) Factory defaults → apply the ±10% adaptive shift heuristic
-        #       on top of the CONV_WEIGHT_* base allocation.
-        if self.active_weights is not None:
-            # Calibrated path: trust the profile.
-            base_weights = {
-                "direction": float(self.active_weights.get("w_direction", CONV_WEIGHT_DIRECTION)),
-                "breadth":   float(self.active_weights.get("w_breadth",   CONV_WEIGHT_BREADTH)),
-                "magnitude": float(self.active_weights.get("w_magnitude", CONV_WEIGHT_MAGNITUDE)),
-                "regime":    float(self.active_weights.get("w_regime",    CONV_WEIGHT_REGIME)),
-            }
-            total_w = sum(base_weights.values()) or 1.0
-            adaptive_weights = {k: v / total_w for k, v in base_weights.items()}
-        else:
-            # Default path: heuristic adaptive shift.
-            base_weights = {
-                "direction": CONV_WEIGHT_DIRECTION,
-                "breadth": CONV_WEIGHT_BREADTH,
-                "magnitude": CONV_WEIGHT_MAGNITUDE,
-                "regime": CONV_WEIGHT_REGIME,
-            }
-            clarities = {
-                "direction": abs(float(fvo_direction)) * 0.5 + abs(float(swayam_direction)) * 0.5 + 0.001,
-                "breadth": abs(fvo_os_breadth - 50) / 50.0 + abs(swayam_os - 50) / 50.0 + 0.001,
-                "magnitude": (fvo_mag_norm + swayam_mag_norm) / 2.0 + 0.001,
-                "regime": abs(swayam_bull_pct - swayam_bear_pct) / 100.0 + 0.001,
-            }
-            avg_clarity = np.mean(list(clarities.values()))
-            adaptive_weights = {}
-            for key in base_weights:
-                clarity_ratio = clarities[key] / avg_clarity
-                shift = CONV_ADAPTIVE_SHIFT_MAX * (clarity_ratio - 1.0)
-                adaptive_weights[key] = float(np.clip(base_weights[key] + shift, 0.10, 0.40))
-            total_w = sum(adaptive_weights.values())
-            adaptive_weights = {k: v / total_w for k, v in adaptive_weights.items()}
-
-        # Composite convergence score [-100, +100]
-        composite = (
-            adaptive_weights["direction"] * (direction_score * 2 - 1)
-            + adaptive_weights["breadth"] * (2 * breadth_score - 1)
-            + adaptive_weights["magnitude"] * (2 * magnitude_score - 1)
-            + adaptive_weights["regime"] * (2 * regime_score - 1)
-        )
-        # ── Orient the score directionally (CONTINUOUS consensus) ────────
-        # `composite` measures AGREEMENT strength (the four dims are agreement
-        # scores, not bull/bear), so on its own it has no direction — a high
-        # value could be agreement on a top or a bottom. Direction comes from
-        # the engines' own SIGNED strengths, combined continuously:
-        #   fvo_bull = -conviction/100          (DDM-bounded, ∈ [-1, +1])
-        #   swayam_bull  = (oversold% − overbought%)/100  (breadth spread)
-        #   consensus_direction = their mean, ∈ [-1, +1] (bullish-positive)
-        #
-        # A previous revision used a HARD gate here: consensus = sign(fvo)
-        # only when sign(fvo) == sign(swayam) != 0, else EXACTLY 0 — and
-        # swayam's sign is 0 on every breadth tie (0% oversold vs 0%
-        # overbought is a common day). Measured on real data (Gold, 810 scored
-        # days, 2026-07 diagnosis) that gate hard-zeroed the ENTIRE composite
-        # on 60.7% of days, and the surviving days jumped to |composite| ≈
-        # 0.84 median — an on/off spike train, not a conviction signal: the
-        # product signal read exactly 0.00 most days, its DDM trend
-        # flatlined, and the calibration objective of the day was ranking
-        # mostly-tied zeros. The continuous form degrades gracefully instead:
-        # disagreement PARTIALLY CANCELS (small |score| — the DIVERGENT
-        # zone's actual meaning) rather than snapping to 0, ties contribute 0
-        # from that engine without silencing the other, and full alignment
-        # still produces the strongest readings. Sign convention preserved:
-        # negative convergence_score = bullish.
-        fvo_bull = float(np.clip(
-            -float(fvo_signal.get("conviction_score", 0)) / 100.0, -1.0, 1.0))
-        swayam_bull = float(np.clip((swayam_os - swayam_ob) / 100.0, -1.0, 1.0))
-        consensus_direction = (fvo_bull + swayam_bull) / 2.0
-        agreement_strength = (composite + 1.0) / 2.0  # [-1,1] agreement → [0,1]
-        convergence_score = -consensus_direction * agreement_strength * 100.0
-
-        # Agreement ratio
-        # When learned weights are supplied, the agreement
-        # metric uses those weights too — so the user-visible AGREEMENT
-        # percentage stays semantically consistent with the calibrated
-        # convergence score. When no calibration is active, fall back to
-        # the plain 4-way mean (the historical definition).
-        if self.active_weights is not None:
-            agreement_ratio = (
-                adaptive_weights["direction"] * direction_score
-                + adaptive_weights["breadth"]   * breadth_score
-                + adaptive_weights["magnitude"] * magnitude_score
-                + adaptive_weights["regime"]    * regime_score
-            )
-        else:
-            agreement_ratio = (direction_score + breadth_score + magnitude_score + regime_score) / 4.0
-
-        # Lead-lag indicator. NOTE: fvo_direction/swayam_direction are
-        # np.sign(...) outputs, i.e. always in {-1, 0, +1} — comparing their
-        # absolute values (both in {0, 1}) against a 1.5x margin is
-        # degenerate: "abs(x) > abs(y)*1.5" can only ever be true when
-        # abs(y)==0 and abs(x)==1, so FVO_LEADS previously could only
-        # fire when Swayam's breadth was EXACTLY split 50/50 (never in
-        # practice), never from Mūla's conviction genuinely dominating
-        # Swayam's (audit finding E5). Compare the actual normalized
-        # MAGNITUDES instead (fvo_mag_norm/swayam_mag_norm, both in
-        # [0, 1], already computed for the magnitude dimension above).
-        if fvo_direction != swayam_direction and fvo_mag_norm > swayam_mag_norm * 1.5:
-            lead_lag = "FVO_LEADS"
-        elif fvo_direction != swayam_direction and swayam_mag_norm > fvo_mag_norm * 1.5:
-            lead_lag = "SWAYAM_LEADS"
-        elif fvo_direction == swayam_direction:
-            lead_lag = "ALIGNED"
-        else:
-            lead_lag = "CONTRADICTION"
-
-        # Confidence — agreement scaled by data coverage (analyzed vs full
-        # basket). With no expected size, apply no coverage penalty.
-        n_analyzed = float(swayam_day_stats.get("num_constituents", 0))
-        if self.expected_constituents and self.expected_constituents > 0:
-            coverage = min(1.0, n_analyzed / float(self.expected_constituents))
-        else:
-            coverage = 1.0
-        confidence = agreement_ratio * coverage
-
-        # Zone classification
-        if convergence_score <= CONV_STRONG_BULLISH:
-            zone = "STRONG_CONVERGENCE_BULLISH"
-        elif convergence_score <= CONV_MODERATE_BULLISH:
-            zone = "MODERATE_BULLISH"
-        elif convergence_score <= CONV_WEAK_BULLISH:
-            zone = "WEAK_BULLISH"
-        elif convergence_score <= CONV_WEAK_BEARISH:
-            zone = "DIVERGENT"
-        elif convergence_score <= CONV_MODERATE_BEARISH:
-            zone = "WEAK_BEARISH"
-        elif convergence_score <= CONV_STRONG_BEARISH:
-            zone = "MODERATE_BEARISH"
-        else:
-            zone = "STRONG_CONVERGENCE_BEARISH"
+        dims, m_lean, s_lean = score_dimensions(mula, swayam)
+        cd = (m_lean + s_lean) / 2.0
+        score, agreement = composite_score(dims, self.weights, cd)
 
         result = ConvergenceSignal(
-            convergence_score=round(float(convergence_score), 2),
-            convergence_zone=zone,
-            agreement_ratio=round(float(agreement_ratio), 3),
-            lead_lag_indicator=lead_lag,
-            confidence=round(float(confidence), 3),
-            dimension_scores={
-                "direction": round(float(direction_score), 3),
-                "breadth": round(float(breadth_score), 3),
-                "magnitude": round(float(magnitude_score), 3),
-                "regime": round(float(regime_score), 3),
-            },
-            dimension_weights={k: round(v, 3) for k, v in adaptive_weights.items()},
+            convergence_score=round(float(score), 4),
+            agreement_ratio=round(float(agreement), 4),
+            consensus_direction=float(cd),
+            mula_lean=float(m_lean),
+            swayam_lean=float(s_lean),
             date=date,
-            consensus_direction=consensus_direction,
+            dimension_scores={k: round(float(v), 4) for k, v in dims.items()},
+            dimension_weights={k: round(float(v), 4) for k, v in self.weights.items()},
+            swayam_native=bool(swayam.get("native", True)),
         )
         self.history.append(result)
         return result
 
     def get_convergence_series(self) -> pd.DataFrame:
-        """Return convergence history as a DataFrame indexed by date."""
+        """Convergence history as a DataFrame indexed by date string.
+
+        Columns: ``convergence_score``, ``agreement_ratio``,
+        ``consensus_direction``, ``mula_lean``, ``swayam_lean``,
+        ``swayam_native``, ``dim_<d>`` and ``w_<d>`` for each dimension.
+        """
         if not self.history:
             return pd.DataFrame()
         rows: list[dict[str, object]] = []
@@ -336,11 +263,11 @@ class CrossValidator:
                 {
                     "date": h.date,
                     "convergence_score": h.convergence_score,
-                    "convergence_zone": h.convergence_zone,
                     "agreement_ratio": h.agreement_ratio,
-                    "lead_lag_indicator": h.lead_lag_indicator,
-                    "confidence": h.confidence,
                     "consensus_direction": h.consensus_direction,
+                    "mula_lean": h.mula_lean,
+                    "swayam_lean": h.swayam_lean,
+                    "swayam_native": h.swayam_native,
                     **{f"dim_{k}": v for k, v in h.dimension_scores.items()},
                     **{f"w_{k}": v for k, v in h.dimension_weights.items()},
                 }

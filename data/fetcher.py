@@ -5,14 +5,23 @@ Tattva — Unified data fetcher: yfinance macro / commodity / OHLCV universe.
 Each external call is wrapped with:
   1. **Two-tier cache** (memory + disk, TTL + versioned keys) — `data/cache.py`
   2. **Circuit breaker** (CLOSED → OPEN → HALF_OPEN per service) — `data/circuit_breaker.py`
-  3. **Retry-with-backoff** (1s → 2s → 4s) for transient (whole-batch) failures
+  3. **Retry-with-backoff** (1s → 2s → 4s) for transient (whole-batch) failures.
+     An answer of "no data for that symbol" is a :class:`NoDataError` — not
+     retried, not counted against the service (see ``data/circuit_breaker.py``).
   4. **Partial-success completion** — a batch is ONE yfinance call, but yfinance
      rate-limits a few tickers per batch, so it can come back incomplete. Rather
-     than caching the incomplete result: constituent OHLCV does one targeted
-     LIVE re-fetch of just the missing symbols; the macro universe backfills the
-     missing columns from the last-good snapshot (_backfill_missing_columns).
+     than caching the incomplete result: OHLCV does one targeted LIVE re-fetch
+     of just the missing symbols; the macro universe backfills the missing
+     columns from the last-good snapshot (_backfill_missing_columns), and says
+     which on the frame itself (``attrs["stale_backfills"]``).
   5. **Stale-fallback** — if a fetch fails AND the circuit is open, the last-good
-     snapshot is returned so the UI keeps working through API outages.
+     snapshot is returned so the UI keeps working through API outages, and the
+     frame says so (``attrs["source"] == "stale-snapshot"``).
+
+What the shared model matrix CONTAINS is decided by configuration, never by a
+session: it is the macro universe plus ``core.config.CATALOGUE_TARGETS``, the
+catalogue frozen at import. Free-form stock symbols a user types are fetched one
+at a time (``fetch_stock_target_series``) and never enter this frame.
 
 Macro data is sourced from Sanket's Global Macro bond-ETF universe via yfinance
 (replaces the broken Stooq direct-yield endpoints, which started returning HTML
@@ -21,8 +30,10 @@ error pages instead of CSV in late 2025).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import pickle
+import threading
 
 import numpy as np
 import pandas as pd
@@ -32,19 +43,90 @@ from core.config import (
     GLOBAL_MACRO_MAP,
     MACRO_SYMBOLS_YF,
     INDEX_TARGETS_MAP,
-    ALL_TARGETS,
+    CATALOGUE_TARGETS,
 )
-from data.cache import ohlcv_cache, macro_cache, _current_session_key
+from data.cache import ohlcv_cache, macro_cache
 from data.circuit_breaker import (
     yfinance_circuit,
     CircuitBreakerError,
+    NoDataError,
     RetryWithBackoff,
 )
 
 log = logging.getLogger(__name__)
 
 
-# ─── Constituent OHLCV (yfinance) ────────────────────────────────────────────
+#: Tickers naming a SOURCE rather than a yfinance symbol (Jeera's NCDEX sheet,
+#: the Nifty PE sheet); each has its own fetch path, and sending one to
+#: yf.download is a guaranteed 404 that used to count against the yfinance
+#: circuit on every run of those targets.
+_NON_YF_TICKER_SUFFIXES = (".NCDEX", ".SHEET")
+
+
+def is_yfinance_ticker(ticker: str | None) -> bool:
+    """Can this ticker be sent to yfinance at all? False for source sentinels."""
+    return bool(ticker) and not str(ticker).upper().endswith(_NON_YF_TICKER_SUFFIXES)
+
+
+# ─── Telling "no such symbol" from "service down" ────────────────────────────
+# yf.download never raises for a bad ticker. It swallows the per-symbol error,
+# logs it on the "yfinance" logger, and returns an empty frame — and it does
+# exactly the same for a rate limit. The only place the difference survives is
+# the log line, so the call is made with a capturing handler attached and an
+# empty answer is classified by what yfinance said about it. Unexplained
+# emptiness is treated as a service failure, which is the conservative reading:
+# it was the only reading before this existed.
+
+_NO_DATA_MARKERS = ("possibly delisted", "no price data found", "quote not found",
+                    "no timezone found", "no data found", "http error 404")
+_SERVICE_MARKERS = ("too many requests", "rate limit", "http error 429",
+                    "timed out", "timeout", "connection", "ssl", "curl:",
+                    "http error 5")
+
+
+class _YFLogCapture(logging.Handler):
+    """Collect yfinance's ERROR records raised by THIS thread's call.
+
+    Records from other threads are kept too — yf.download with threads=True
+    logs its summary from the calling thread but per-ticker errors from its
+    pool — so a concurrent session's rate limit can leak into this capture.
+    That errs toward "service failure", the same direction as the default.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.messages: list[str] = []
+        self._lock_ = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:  # noqa: D401
+        try:
+            msg = record.getMessage().lower()
+        except Exception:  # noqa: BLE001
+            return
+        with self._lock_:
+            self.messages.append(msg)
+
+
+def _download_classified(**kwargs) -> pd.DataFrame:
+    """``yf.download(**kwargs)``; an empty result raises NoDataError or ValueError."""
+    cap = _YFLogCapture()
+    yf_log = logging.getLogger("yfinance")
+    yf_log.addHandler(cap)
+    try:
+        raw = yf.download(**kwargs)
+    finally:
+        yf_log.removeHandler(cap)
+    if raw is not None and not (hasattr(raw, "empty") and raw.empty):
+        return raw
+    said = " | ".join(cap.messages)
+    if any(m in said for m in _SERVICE_MARKERS):
+        raise ValueError(f"yfinance service failure: {said[:200]}")
+    if any(m in said for m in _NO_DATA_MARKERS):
+        raise NoDataError(f"no data: {said[:200]}")
+    raise ValueError("Empty yfinance response")
+
+
+# ─── OHLCV (yfinance) ────────────────────────────────────────────────────────
 
 @RetryWithBackoff(max_retries=2, initial_delay=1.5, backoff_factor=2.0)
 def _yfinance_batch_download(
@@ -54,43 +136,62 @@ def _yfinance_batch_download(
 ) -> pd.DataFrame:
     """Single raw yfinance batch call — wrapped with retry.
 
-    ``auto_adjust=False`` — UNADJUSTED prices, deliberately. See the note on
-    the macro batch below: adjusted history is rewritten backwards on every
-    corporate action, which is incompatible with this system's non-repainting
-    guarantee.
+    ``auto_adjust=False`` — not dividend-adjusted, deliberately. See the note
+    on the macro batch below: dividend-adjusted history is rewritten backwards
+    on every distribution, which is incompatible with this system's
+    non-repainting guarantee.
     """
-    raw = yf.download(
-        list(symbols_tuple),
+    return _download_classified(
+        tickers=list(symbols_tuple),
         start=start_yf,
         end=end_yf,
         progress=False,
         auto_adjust=False,
         group_by="ticker",
     )
-    if raw is None or (hasattr(raw, "empty") and raw.empty):
-        raise ValueError("Empty yfinance batch response")
-    return raw
 
 
-def fetch_constituent_ohlcv(
+def _ohlcv_key(symbols, start_date, end_date) -> tuple[tuple[str, ...], str, str]:
+    """(sorted symbols, start, end+1d) — one key convention for every OHLCV read."""
+    start_yf = str(pd.Timestamp(start_date).date())
+    end_yf = str(pd.Timestamp(end_date).date() + pd.Timedelta(days=1))
+    return tuple(sorted(symbols)), start_yf, end_yf
+
+
+def fetch_ohlcv(
     symbols: list[str],
     start_date: pd.Timestamp | str,
     end_date: pd.Timestamp | str,
+    force: bool = False,
 ) -> dict[str, pd.DataFrame]:
-    """Batch-download OHLCV for an index/basket's constituents via yfinance."""
-    start_yf = str(pd.Timestamp(start_date).date())
-    end_yf = str(pd.Timestamp(end_date).date() + pd.Timedelta(days=1))
-    # Sorted tuple → deterministic cache key regardless of input order.
-    sym_key = tuple(sorted(symbols))
+    """Batch-download OHLCV for a set of yfinance symbols → ``{symbol: frame}``.
 
-    cached = ohlcv_cache.get(sym_key, start_yf, end_yf)
-    if cached is not None:
-        return cached
+    Used for a target's own OHLCV (Swayam's input), the catalogue targets the
+    macro batch does not carry, and single free-form stock prices. ``force``
+    skips the fresh-cache read for this call only (a user Refresh); the result
+    is still cached, and a failed live pull still falls back to the last-good
+    snapshot. Source sentinels (sheet / NCDEX tickers) are dropped before any
+    network call — they have no OHLCV on yfinance.
+    """
+    symbols = [s for s in symbols if is_yfinance_ticker(s)]
+    if not symbols:
+        return {}
+    sym_key, start_yf, end_yf = _ohlcv_key(symbols, start_date, end_date)
+
+    if not force:
+        cached = ohlcv_cache.get(sym_key, start_yf, end_yf)
+        if cached is not None:
+            return cached
 
     try:
         raw = yfinance_circuit.call(
             _yfinance_batch_download, sym_key, start_yf, end_yf
         )
+    except NoDataError as e:
+        # An answer, not an outage: yfinance has nothing for these symbols.
+        log.info("yfinance has no data for %s: %s", list(sym_key)[:5], e)
+        stale = ohlcv_cache.get_stale(sym_key, start_yf, end_yf)
+        return stale if stale is not None else {}
     except CircuitBreakerError as e:
         stale = ohlcv_cache.get_stale(sym_key, start_yf, end_yf)
         if stale is not None:
@@ -106,7 +207,7 @@ def fetch_constituent_ohlcv(
     result = _parse_ohlcv_batch(raw, symbols)
 
     # Partial success: yfinance rate-limits a handful of tickers per batch, so a
-    # 100-name basket can come back with 60. Do ONE targeted re-fetch of JUST the
+    # multi-symbol batch can come back short. Do ONE targeted re-fetch of JUST the
     # missing symbols (goes through the same circuit + backoff) to complete the set,
     # rather than caching an incomplete result that would be reused as-is. Only when
     # SOME tickers succeeded (a total-empty batch is an outage, not per-ticker limits
@@ -129,6 +230,53 @@ def fetch_constituent_ohlcv(
     if result:
         ohlcv_cache.put(sym_key, start_yf, end_yf, value=result)
     return result
+
+
+def probe_symbol(
+    ticker: str,
+    start_date: pd.Timestamp | str,
+    end_date: pd.Timestamp | str,
+) -> tuple[pd.Series | None, str]:
+    """Does ``ticker`` exist on yfinance? → ``(close_series | None, outcome)``.
+
+    ``outcome`` is ``"ok"`` (usable series, cached under the same key
+    :func:`fetch_ohlcv` reads, so the analysis that follows is a cache hit),
+    ``"not_found"`` (yfinance answered and has nothing usable), or
+    ``"unavailable"`` (rate limit, timeout, circuit open — the question was
+    never answered). Symbol resolution needs that third outcome: a symbol that
+    could not be checked must not be reported, or remembered, as invalid.
+    """
+    if not is_yfinance_ticker(ticker):
+        return None, "not_found"
+    sym_key, start_yf, end_yf = _ohlcv_key([ticker], start_date, end_date)
+    result = ohlcv_cache.get(sym_key, start_yf, end_yf)
+    if result is None:
+        try:
+            raw = yfinance_circuit.call(
+                _yfinance_batch_download, sym_key, start_yf, end_yf
+            )
+        except NoDataError:
+            return None, "not_found"
+        except Exception as e:  # noqa: BLE001 - circuit open / service failure
+            log.warning("Symbol probe %s could not reach yfinance: %s", ticker, e)
+            return None, "unavailable"
+        result = _parse_ohlcv_batch(raw, [ticker])
+        if result:
+            ohlcv_cache.put(sym_key, start_yf, end_yf, value=result)
+    s = _close_series(result.get(ticker))
+    return (s, "ok") if s is not None else (None, "not_found")
+
+
+def _close_series(odf: pd.DataFrame | None) -> pd.Series | None:
+    """A usable Close series from one symbol's OHLCV frame, or None (<20 rows)."""
+    if odf is None or odf.empty or "Close" not in odf.columns:
+        return None
+    s = pd.to_numeric(odf["Close"], errors="coerce").dropna()
+    if len(s) < 20:
+        return None
+    if getattr(s.index, "tz", None) is not None:
+        s.index = s.index.tz_localize(None)
+    return s.sort_index()
 
 
 def _parse_ohlcv_batch(raw, symbols: list[str]) -> dict[str, pd.DataFrame]:
@@ -176,31 +324,6 @@ def _load_macro_snapshots_newest_first() -> list[pd.DataFrame]:
     return snaps
 
 
-# Registry of the most recent backfill's per-column staleness —
-# {ticker: last_native_date} for columns filled from a snapshot that was
-# itself older than STALE_BACKFILL_DAYS behind the current frame. Read by
-# app.py's freshness section (see B1 in the audit) to surface a warning
-# instead of silently ffilling a possibly weeks-old value across the whole
-# frame with no user-visible signal beyond a log line nobody sees on
-# Streamlit.
-#
-# Keyed by Streamlit session id (mirrors data.cache._FORCE_UNTIL /
-# _current_session_key): Streamlit serves every concurrent session from ONE
-# process, so a plain module-level dict let one session's backfill notice
-# bleed into every other concurrent session's freshness banner (or get
-# clobbered by a concurrent fetch) — the same single-process/multi-session
-# hazard already fixed for the force-refresh window. Falls back to one shared
-# key outside a Streamlit run context (research/ scripts), identical to the
-# old global-dict behaviour there since there's only ever one "session".
-# Cleared/repopulated FOR THE CALLING SESSION on every call to
-# _backfill_missing_columns.
-STALE_BACKFILLS: dict[str, dict[str, str]] = {}
-
-
-def _current_stale_backfills() -> dict[str, str]:
-    """The calling session's stale-backfill registry (read-only view for callers)."""
-    return STALE_BACKFILLS.get(_current_session_key(), {})
-
 # How many trading days a backfilled column's true last-native observation is
 # allowed to lag the frame's end before it's dropped instead of filled. A
 # stale snapshot ffilled across N weeks of rows would flatten that
@@ -228,24 +351,22 @@ def _backfill_missing_columns(combined: pd.DataFrame, tickers: tuple[str, ...]) 
     days behind the frame's end is dropped rather than filled — flat
     momentum ffilled across weeks would distort that predictor's PCA loading
     silently. Columns backfilled from a snapshot within the threshold are
-    still recorded in STALE_BACKFILLS (with their true last-native date) so
-    the UI can surface which predictors were carried from a snapshot at all.
+    recorded ON THE FRAME — ``combined.attrs["stale_backfills"] = {ticker:
+    last_native_date}`` — so the UI can say which predictors were carried from
+    a snapshot at all.
+
+    On the frame, not in a registry beside it. The registry this replaced was
+    keyed by Streamlit session and filled only on a LIVE fetch, while the frame
+    itself is cached process-wide: a second session served the same rebuilt
+    frame from cache got no warning, and a later live fetch overwrote the
+    notice with a different pull than the one the engines had used. Metadata
+    that travels with the data cannot describe the wrong data. (pandas keeps
+    ``attrs`` through pickling, so the disk cache preserves it too.)
     """
     if combined.empty:
         return combined
-    session_key = _current_session_key()
     registry: dict[str, str] = {}
-    STALE_BACKFILLS.pop(session_key, None)   # re-insert at the end (freshest)
-    STALE_BACKFILLS[session_key] = registry
-    # Size-bounded eviction of the OLDEST sessions' registries (dict preserves
-    # insertion order) so this doesn't grow unbounded over a long-running
-    # server. Deliberately NOT "delete every other session's entry": that
-    # would let one session's fetch wipe another live session's freshness
-    # banner mid-flight — the exact cross-session interference the
-    # per-session keying exists to prevent (verification finding V3).
-    _MAX_SESSIONS = 50
-    while len(STALE_BACKFILLS) > _MAX_SESSIONS:
-        STALE_BACKFILLS.pop(next(iter(STALE_BACKFILLS)))
+    combined.attrs["stale_backfills"] = registry
     missing = [t for t in tickers if t not in combined.columns or combined[t].isna().all()]
     if not missing:
         return combined
@@ -330,17 +451,32 @@ def _backfill_missing_columns(combined: pd.DataFrame, tickers: tuple[str, ...]) 
     return combined
 
 
+def _macro_tickers() -> tuple[str, ...]:
+    """The macro batch's ticker set: predictors + index price levels."""
+    return tuple(sorted(
+        set(GLOBAL_MACRO_MAP.values())
+        | set(MACRO_SYMBOLS_YF.values())
+        | set(INDEX_TARGETS_MAP.values())  # index price levels (Mūla targets)
+    ))
+
+
+def _universe_tag(tickers: tuple[str, ...]) -> str:
+    """Short digest of the ticker set, baked into the macro cache key.
+
+    The key used to be ``(start, end)`` alone, so a deploy that added an
+    instrument to the universe kept serving that day's cached frames — which
+    silently lacked the new column — until the TTL ran out.
+    """
+    return hashlib.sha1("|".join(tickers).encode("utf-8")).hexdigest()[:8]
+
+
 def _fetch_macro_live_uncached(start_str: str, end_str: str) -> pd.DataFrame:
     """Single yfinance batch for the full macro universe (Sanket-style).
 
     Combines Sanket's Global Macro bond ETFs (proxy for global yield dynamics)
     with the existing commodity + FX symbols. One batch call, one circuit hit.
     """
-    tickers = tuple(sorted(
-        set(GLOBAL_MACRO_MAP.values())
-        | set(MACRO_SYMBOLS_YF.values())
-        | set(INDEX_TARGETS_MAP.values())  # index price levels (FVO targets)
-    ))
+    tickers = _macro_tickers()
     if not tickers:
         return pd.DataFrame()
 
@@ -386,7 +522,7 @@ def _yfinance_batch_download_macro(
 ) -> pd.DataFrame:
     """Macro yfinance batch fetch — separated to allow distinct retry budget.
 
-    Uses ``auto_adjust=False`` (immutable history — see below) and
+    Uses ``auto_adjust=False`` (no dividend rewriting — see below) and
     ``threads=True`` (matching Sanket's
     ``fetch_batch_data``) so the macro universe is pulled in parallel by
     yfinance's internal pool.
@@ -409,34 +545,53 @@ def _yfinance_batch_download_macro(
     # proves the engine does not look ahead but cannot see the INPUT change
     # underneath it.
     #
-    # Unadjusted closes are immutable once printed. The cost is that a dividend
-    # shows as a real price drop in the ETF predictors; for a valuation on the
-    # LEVEL of log price that is defensible (the traded level is what it is),
-    # and the index / futures / FX targets carry no adjustment at all.
-    raw = yf.download(
-        list(tickers_tuple),
+    # With auto_adjust=False a printed close is not rewritten by distributions.
+    # It is not quite immutable: Yahoo's `Close` is still SPLIT-adjusted, so a
+    # split rescales an instrument's past — rare, and the right behaviour (a
+    # split is not a price move). The cost is that a dividend shows as a real
+    # price drop in the ETF predictors; for a valuation on the LEVEL of log
+    # price that is defensible (the traded level is what it is), and the
+    # index / futures / FX targets carry no adjustment at all.
+    raw = _download_classified(
+        tickers=list(tickers_tuple),
         start=start,
         end=end,
         progress=False,
         auto_adjust=False,
         threads=True,
     )
-    if raw is None or (hasattr(raw, "empty") and raw.empty):
-        raise ValueError("Empty yfinance macro response")
     return raw
+
+
+def _with_source(frame: pd.DataFrame, source: str) -> pd.DataFrame:
+    """A shallow copy of ``frame`` whose ``attrs["source"]`` says where it came
+    from — without writing that into the cached object every caller shares."""
+    out = frame.copy(deep=False)
+    out.attrs = {**frame.attrs, "source": source}
+    return out
 
 
 def fetch_macro_live(
     start_date: pd.Timestamp | str,
     end_date: pd.Timestamp | str,
+    force: bool = False,
 ) -> pd.DataFrame:
-    """Fetch macro indicators with cache + rate-limit + circuit + stale fallback."""
+    """Fetch macro indicators with cache + rate-limit + circuit + stale fallback.
+
+    ``force`` skips the fresh-cache read for this call only (a user Refresh).
+    The returned frame's ``attrs["source"]`` is ``"live"``, ``"cache"`` or
+    ``"stale-snapshot"`` — the last meaning a live pull was wanted and failed,
+    which a forced refresh must be able to say rather than quietly hand back
+    yesterday's data.
+    """
     start_str = str(pd.Timestamp(start_date).date())
     end_str = str(pd.Timestamp(end_date).date() + pd.Timedelta(days=1))
+    tag = _universe_tag(_macro_tickers())
 
-    cached = macro_cache.get(start_str, end_str)
-    if cached is not None:
-        return cached
+    if not force:
+        cached = macro_cache.get(start_str, end_str, tag)
+        if cached is not None:
+            return _with_source(cached, "cache")
 
     try:
         combined = _fetch_macro_live_uncached(start_str, end_str)
@@ -445,14 +600,14 @@ def fetch_macro_live(
         combined = pd.DataFrame()
 
     if not combined.empty:
-        macro_cache.put(start_str, end_str, value=combined)
-        return combined
+        macro_cache.put(start_str, end_str, tag, value=combined)
+        return _with_source(combined, "live")
 
     # Nothing came back this run — try a stale snapshot before returning empty.
-    stale = macro_cache.get_stale(start_str, end_str)
+    stale = macro_cache.get_stale(start_str, end_str, tag)
     if stale is not None:
         log.warning("Macro fetch empty; serving last-good snapshot")
-        return stale
+        return _with_source(stale, "stale-snapshot")
     return combined
 
 
@@ -462,22 +617,36 @@ def fetch_macro_live(
 def fetch_commodity_dataset(
     start_date: pd.Timestamp | str,
     end_date: pd.Timestamp | str,
+    force: bool = False,
 ) -> tuple[pd.DataFrame | None, str | None]:
-    """Build the FVO model matrix from the full yfinance macro universe.
+    """Build the shared model matrix from the full yfinance macro universe.
 
     Wraps :func:`fetch_macro_live`, restricts the Close frame to the combined
     ``GLOBAL_MACRO_MAP`` (bond/rates/equity/risk/real-asset ETFs) +
     ``MACRO_SYMBOLS_YF`` (commodities + FX) universe, renames yfinance tickers
     to friendly names (Gold / Silver / Copper / US 10-Year Yield / VIX / …),
-    and exposes the DatetimeIndex as a ``DATE`` column. The result is the model
-    matrix the Streamlit app feeds the walk-forward engine: numeric predictor
-    columns + a date column.
+    adds the catalogue targets the batch does not carry, and exposes the
+    DatetimeIndex as a ``DATE`` column. Both engines read this one frame.
+
+    ``force=True`` re-pulls live for this call (a user Refresh): the macro
+    batch, the catalogue-target OHLCV and the sheet series each skip their
+    fresh-cache read once. Nothing else is affected — the next ordinary call is
+    a cache hit on what this one fetched.
+
+    ``df.attrs`` carries what the frame cannot show in its cells:
+      * ``source``           — "live" / "cache" / "stale-snapshot" (the macro batch)
+      * ``stale_backfills``  — {friendly name: "YYYY-MM-DD"} predictors rebuilt
+                               from a prior snapshot this fetch (a rebuilt column
+                               is a DIFFERENT series, not just a staler one)
+      * ``panel_columns`` / ``panel_fingerprint`` — the composition digest
 
     Returns ``(df, None)`` on success or ``(None, error_message)`` on failure.
     """
-    macro_df = fetch_macro_live(start_date, end_date)
+    macro_df = fetch_macro_live(start_date, end_date, force=force)
     if macro_df is None or macro_df.empty:
         return None, "No macro/commodity data returned from yfinance."
+    _source = str(macro_df.attrs.get("source", "live"))
+    _backfilled = dict(macro_df.attrs.get("stale_backfills") or {})
 
     # ticker → friendly name (inverse of the combined friendly → ticker maps).
     name_to_ticker = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF, **INDEX_TARGETS_MAP}
@@ -487,17 +656,18 @@ def fetch_commodity_dataset(
         return None, "Macro/commodity symbols missing from yfinance response."
 
     renamed = macro_df[present].rename(columns=ticker_to_name)
+    _backfilled = {ticker_to_name.get(t, t): d for t, d in _backfilled.items()}
 
     # Drop columns yfinance returned empty / near-empty: failed or delisted
     # tickers (e.g. a renamed ETF) come back as all-NaN. Such a column survives the
     # app's causal ffill() still all-NaN and would wipe every row at the subsequent
     # dropna() step. Require ≥20% real coverage; always retain the target columns
-    # regardless (so they stay selectable). NOTE: a retained-but-sparse TARGET (e.g.
-    # ^CNXSC / Nifty Smallcap 100) still leaks into the predictor set when it is not
-    # the active target — the app's per-feature history guard drops it there.
+    # regardless (so they stay selectable). NOTE: a retained-but-sparse TARGET
+    # still reaches the predictor set when it is not the active target — the app's
+    # per-feature history guard drops it there.
     coverage = renamed.notna().mean()
     keep = [c for c in renamed.columns if coverage[c] >= 0.20]
-    for tgt in ALL_TARGETS:  # always retain every target column (commodity/FX/index)
+    for tgt in CATALOGUE_TARGETS:  # always retain every catalogue target column
         if tgt in renamed.columns and tgt not in keep:
             keep.append(tgt)
     if not keep:
@@ -527,7 +697,7 @@ def fetch_commodity_dataset(
     # (union the sheet's dates in) would re-create partial rows — India fresh, US
     # ff-filled — i.e. the very thing the partial-session gate flags. So the spine
     # stays; true per-market alignment would need exchange calendars (future work).
-    for _name, _series in _fetch_exogenous_targets(df.index).items():
+    for _name, _series in _fetch_exogenous_targets(df.index, force=force).items():
         df[_name] = _series
 
     # Catalogue targets that are yfinance symbols but NOT members of the macro
@@ -539,7 +709,8 @@ def fetch_commodity_dataset(
     # different universe — which is how the suite reported "36/45 targets" and
     # the Swayam study died on `KeyError: ['Aluminium']` while the app itself
     # ran that target perfectly well through its own per-target injection.
-    for _name, _series in _fetch_catalogue_targets(df.index, df.columns).items():
+    for _name, _series in _fetch_catalogue_targets(
+            df.index, df.columns, start_date, end_date, force=force).items():
         df[_name] = _series
 
     # ── Panel fingerprint ────────────────────────────────────────────────
@@ -554,17 +725,20 @@ def fetch_commodity_dataset(
     # the same fingerprint provably used the same cross-section; a changed
     # fingerprint says the difference came from the data, not the code, before
     # anyone spends an afternoon on the engine.
-    df.attrs["panel_columns"] = sorted(df.columns)
-    df.attrs["panel_fingerprint"] = _panel_fingerprint(df)
+    _columns = sorted(df.columns)
+    _fingerprint = _panel_fingerprint(df)
 
     df.insert(0, "DATE", pd.to_datetime(df.index))
     df = df.reset_index(drop=True)
+    # Set last, explicitly, rather than trusting pandas to carry attrs through
+    # the renames, joins and resets above.
+    df.attrs = {
+        "source": _source,
+        "stale_backfills": {k: v for k, v in _backfilled.items() if k in df.columns},
+        "panel_columns": _columns,
+        "panel_fingerprint": _fingerprint,
+    }
     return df, None
-
-
-#: Tickers naming a SOURCE rather than a yfinance symbol; each has its own
-#: fetch path above, and sending one to yf.download is a guaranteed 404.
-_NON_YF_TICKER_SUFFIXES = (".NCDEX", ".SHEET")
 
 
 def _panel_fingerprint(df: "pd.DataFrame", *, content: bool = True) -> str:
@@ -611,7 +785,13 @@ def _panel_fingerprint(df: "pd.DataFrame", *, content: bool = True) -> str:
     return h.hexdigest()[:12]
 
 
-def _fetch_catalogue_targets(index: pd.Index, have: pd.Index) -> dict[str, pd.Series]:
+def _fetch_catalogue_targets(
+    index: pd.Index,
+    have: pd.Index,
+    start_date: pd.Timestamp | str,
+    end_date: pd.Timestamp | str,
+    force: bool = False,
+) -> dict[str, pd.Series]:
     """Price columns for catalogue targets the macro universe does not carry.
 
     Aligned to the macro index and forward-filled, exactly as the exogenous
@@ -619,16 +799,25 @@ def _fetch_catalogue_targets(index: pd.Index, have: pd.Index) -> dict[str, pd.Se
     means the same thing regardless of which map it came from. A ticker that
     fails to fetch is simply omitted, leaving the existing "target column
     missing" guard to report it, rather than breaking the whole dataset.
+
+    Iterates ``CATALOGUE_TARGETS`` — the catalogue frozen at import — never
+    ``ALL_TARGETS``, which grows with every free-form symbol any session types.
+    Iterating the live dict pulled one user's stock into every later user's
+    panel, where it became a predictor of Gold and moved every published fair
+    value (the panel fingerprint changed with it).
+
+    Fetched over the caller's ``(start_date, end_date)`` rather than the
+    frame's first and last row, so the key matches the app's own OHLCV fetch
+    for the same target over the same window: one download, not two.
     """
-    from core.config import ALL_TARGETS
-    missing = [(n, t) for n, t in ALL_TARGETS.items()
-               if n not in have and t and not t.endswith(_NON_YF_TICKER_SUFFIXES)]
+    missing = [(n, t) for n, t in CATALOGUE_TARGETS.items()
+               if n not in have and is_yfinance_ticker(t)]
     if not missing:
         return {}
     out: dict[str, pd.Series] = {}
     try:
-        got = fetch_constituent_ohlcv([t for _, t in missing],
-                                      index.min(), index.max()) or {}
+        got = fetch_ohlcv([t for _, t in missing], start_date, end_date,
+                          force=force) or {}
     except Exception as e:  # noqa: BLE001
         log.warning("Catalogue target fetch skipped: %s", e)
         return {}
@@ -643,17 +832,17 @@ def _fetch_catalogue_targets(index: pd.Index, have: pd.Index) -> dict[str, pd.Se
     return out
 
 
-def _fetch_exogenous_targets(index: pd.Index) -> dict[str, pd.Series]:
+def _fetch_exogenous_targets(index: pd.Index, force: bool = False) -> dict[str, pd.Series]:
     """Fetch non-yfinance target series and align them to the macro ``index``.
 
     Returns a ``{column_name: aligned_series}`` map. Resilient: any source that
-    fails (live + cache + committed snapshot all unavailable) is skipped.
+    fails (live and cache both unavailable) is skipped.
     """
     out: dict[str, pd.Series] = {}
     from data.sheets import SHEET_SOURCES, fetch_sheet_series
     for _name in SHEET_SOURCES:
         try:
-            s = fetch_sheet_series(_name, index.min(), index.max())
+            s = fetch_sheet_series(_name, index.min(), index.max(), force=force)
             if s is not None and not s.empty:
                 out[_name] = s.reindex(index).ffill()
         except Exception as e:  # noqa: BLE001
@@ -665,29 +854,21 @@ def fetch_stock_target_series(
     ticker: str,
     start_date: pd.Timestamp | str,
     end_date: pd.Timestamp | str,
+    force: bool = False,
 ) -> pd.Series | None:
-    """Close series for a single stock-target ticker (Swayam targets).
+    """Close series for a single free-form stock target.
 
     Individual-stock targets (config.is_stock_target) are deliberately
-    NOT part of the macro batch universe (see fetch_commodity_dataset's
-    ``_fetch_macro_live_uncached`` call — a dynamically varying per-target
-    ticker set would break that batch's ``(start, end)``-keyed cache). Their
-    price column is injected separately via this single-ticker fetch.
+    NOT part of the shared model matrix: the matrix's composition is fixed by
+    configuration (see the module docstring), and a stock column in it would be
+    one more predictor for every other target. The caller joins this series to
+    a private copy of the matrix for the run that needs it.
 
-    Reuses fetch_constituent_ohlcv (two-tier cache + circuit breaker + stale
-    fallback) — a later Swayam OHLCV fetch of the SAME ticker is then
-    a cache hit, so this costs no extra network call overall.
+    Reuses fetch_ohlcv (two-tier cache + circuit breaker + stale fallback) — a
+    later Swayam OHLCV fetch of the SAME ticker is then a cache hit, so this
+    costs no extra network call overall.
 
-    Returns ``None`` if nothing usable came back (also doubles as the
-    "does this candidate ticker exist" probe used by symbol resolution).
+    Returns ``None`` if nothing usable came back.
     """
-    ohlcv_map = fetch_constituent_ohlcv([ticker], start_date, end_date) or {}
-    odf = ohlcv_map.get(ticker)
-    if odf is None or odf.empty or "Close" not in odf.columns:
-        return None
-    s = pd.to_numeric(odf["Close"], errors="coerce").dropna()
-    if len(s) < 20:
-        return None
-    if getattr(s.index, "tz", None) is not None:
-        s.index = s.index.tz_localize(None)
-    return s.sort_index()
+    ohlcv_map = fetch_ohlcv([ticker], start_date, end_date, force=force) or {}
+    return _close_series(ohlcv_map.get(ticker))

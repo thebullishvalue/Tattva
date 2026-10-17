@@ -1,7 +1,7 @@
 # LICENSE
 
 **TATTVA (तत्त्व) — Unified Convergence Engine**
-**Version 2.7.0**
+**Version 2.8.0**
 
 ---
 
@@ -62,9 +62,19 @@ In no event shall @thebullishvalue or its affiliates be liable for:
 
 This software implements mathematical methods from published academic research:
 
-- Andrews, D.W.K. (1993). *Exactly Median-Unbiased Estimation of First-Order Autoregressive/Unit Root Models.* Econometrica.
-- Bai, J. & Perron, P. (2003). *Computation and Analysis of Multiple Structural Change Models.* J. Applied Econometrics.
-- Peng, C.K. *et al.* (1994). *Mosaic Organization of DNA Nucleotides.* Physical Review E.
+- Bierens, H.J. & Martins, L.F. (2010). *Time-Varying Cointegration.* Econometric Theory.
+- Engle, R.F. & Granger, C.W.J. (1987). *Co-integration and Error Correction: Representation, Estimation, and Testing.* Econometrica.
+- West, M. & Harrison, J. (1997). *Bayesian Forecasting and Dynamic Models* (2nd ed.). Springer.
+- Raftery, A.E., Kárný, M. & Ettler, P. (2010). *Online Prediction Under Model Uncertainty via Dynamic Model Averaging.* Technometrics.
+- Geweke, J. & Amisano, G. (2011). *Optimal Prediction Pools.* Journal of Econometrics.
+- Marčenko, V.A. & Pastur, L.A. (1967). *Distribution of Eigenvalues for Some Sets of Random Matrices.* Mathematics of the USSR-Sbornik.
+- Gibbs, I. & Candès, E. (2021). *Adaptive Conformal Inference Under Distribution Shift.* NeurIPS.
+- Dickey, D.A. & Fuller, W.A. (1979). *Distribution of the Estimators for Autoregressive Time Series with a Unit Root.* JASA.
+- Kwiatkowski, D., Phillips, P.C.B., Schmidt, P. & Shin, Y. (1992). *Testing the Null Hypothesis of Stationarity Against the Alternative of a Unit Root.* Journal of Econometrics.
+- Chen, Y., Wiesel, A., Eldar, Y.C. & Hero, A.O. (2010). *Shrinkage Algorithms for MMSE Covariance Estimation.* IEEE Transactions on Signal Processing.
+- Theiler, J. (1986). *Spurious Dimension from Correlation Algorithms Applied to Limited Time-Series Data.* Physical Review A.
+- Bollerslev, T. (1986). *Generalized Autoregressive Conditional Heteroskedasticity.* Journal of Econometrics.
+- Page, E.S. (1954). *Continuous Inspection Schemes.* Biometrika.
 - Ratcliff, R. & McKoon, G. (2008). *The Diffusion Decision Model.* Neural Computation.
 
 These references are cited for attribution purposes only and do not constitute

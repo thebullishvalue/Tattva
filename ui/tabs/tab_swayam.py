@@ -1,5 +1,5 @@
 """
-Tattva — Swayam tab: self-referential breadth, regime composition, per-view detail.
+Tattva — Swayam tab: what the instrument's own price says about itself.
 तत्त्व (Tattva) — "Principle / Essence"
 
 UI — the Swayam view bank: MSF + MMR + regime, read across timescales,
@@ -7,15 +7,22 @@ information sets and mechanisms on the target's OWN price.
 
 Reading order — the house convention every analysis tab follows:
 
-  1 TRUST     can this reading be believed?      Effective view count
-  2 ANCHOR    what is the underlying claim?      Breadth snapshot cards
-  3 SIGNAL    what does it say to do?            Zone distribution → counts
-  4 STATE     how does that sit historically?    HMM regime probabilities
-  5 DETAIL    the evidence behind it             Signal counts → per-view drill-down
+  1 ANSWER    what does Swayam say?              Net breadth · effective views · edge
+  2 ANCHOR    how has that moved?                Breadth over time
+  3 TRUST     has it been worth anything?        Walk-forward edge · view weights
+  4 STATE     the regime underneath it           HMM state probabilities · average signal
+  5 DETAIL    the evidence behind it             Per-view drill-down
 
-Trust leads because breadth across 15 views of ONE price is more internally
-correlated than a genuine cross-section, and the effective-view count is what
-tells you how much independent evidence is actually behind the number.
+The unit everywhere is a VIEW — one timescale × information-set × mechanism
+read of a single price series — never an instrument, a constituent or a
+stock. Fifteen views of one price are more correlated than fifteen
+instruments would be, which is why the effective view count sits in the
+answer row: it is how much independent evidence the breadth number carries.
+
+Sign convention, as everywhere in Tattva (core/semantics.py): the oscillator
+reads positive when the views see the instrument stretched UP; the call that
+implies is contrarian, so OVERSOLD views are bullish and net breadth is
+reported bullish-positive (oversold share minus overbought share).
 """
 
 from __future__ import annotations
@@ -23,394 +30,314 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from analytics.adaptive import tier_now
-
 from ui.theme import (chart_layout, style_axes,
                       chart_color, chart_rgba, grid_rgba)
-from ui.components import (render_metric_card, render_section_header, render_empty_state,
-                           render_chart_panel, render_table_panel)
+from ui.components import (render_kpi_strip, render_section_header, render_empty_state,
+                           render_chart_panel, render_table_panel, render_edge_panel,
+                           window_cutoff)
 from core.config import (
-    get_instrument_config, InstrumentConfig, # per-instrument breadth tier
+    get_instrument_config, InstrumentConfig,
     UI_CHART_HEIGHT_MEDIUM,
     UI_CHART_HEIGHT_LARGE,
 )
 
-# (Tab-local colour aliases stood here as module-level constants. They were
-# evaluated ONCE at import, when there is no session to read a theme from,
-# so every chart drawn through them was frozen to whichever theme happened
-# to be active at first import — the same import-time binding that made the
-# original COLOR_* constants unable to follow Paper mode. Colours are
-# resolved at the call site now, per render.
-
 # ── Tooltip definitions ────────────────────────────────────────────────────
-# Tooltips describe the view bank: every reading here counts Swayam views
-# (timescale x information-set x mechanism reads of the target's OWN OHLCV).
-# A second wording set existed for the basket read, which counted constituent
-# instruments; it went with that engine.
 TOOLTIPS = {
+    "net_breadth": (
+        "Share of Swayam views reading the instrument oversold, minus the share reading it "
+        "overbought, skill-weighted. Positive = its own price looks depressed (a bullish lean "
+        "under Tattva's contrarian read); negative = stretched up."
+    ),
     "oversold_pct": (
-        "Share of Swayam views (timescale/information-set/mechanism reads of the target's OWN "
-        "OHLCV) whose MSF and MMR oscillators are in the oversold zone. Above 60% often precedes "
-        "short-term bounce opportunities."
+        "Share of Swayam views (timescale × information-set × mechanism reads of the target's "
+        "OWN price) whose unified oscillator is in the oversold zone, weighted by each view's "
+        "own realised skill."
     ),
     "overbought_pct": (
-        "Share of Swayam views whose MSF and MMR oscillators are in the overbought zone. "
-        "Above 60% signals elevated pullback risk."
+        "Share of Swayam views whose unified oscillator is in the overbought zone, "
+        "skill-weighted."
     ),
     "avg_signal": (
-        "Mean of the unified oscillator (MSF + MMR) across all Swayam views. "
-        "Below -2 = broad bullish pressure; above +2 = broad bearish pressure; near zero = mixed."
+        "Skill-weighted mean of the unified oscillator (MSF + MMR) across the views, ±10. "
+        "Coloured against this instrument's own p75 of the reading — the same cut-point the "
+        "Convergence page uses for it."
     ),
-    "buy_signals": (
-        "Count of views where the unified oscillator crossed from oversold into neutral, "
-        "triggering a regime-change buy signal. More = broader multi-scale reversal agreement."
-    ),
-    "sell_signals": (
-        "Count of views where the unified oscillator crossed from overbought into neutral, "
-        "triggering a regime-change sell signal. More = broader multi-scale distribution agreement."
-    ),
-    "trading_days": (
-        "Number of trading days in the Swayam lookback window. "
-        "Longer histories produce more stable regime estimates and HMM calibration."
+    "n_eff": (
+        "How many genuinely independent views the bank amounts to: the eigenvalue "
+        "participation ratio of the views' correlation over the full history. Fifteen views "
+        "of one price are never fifteen independent opinions; this is how many they are worth."
     ),
 }
+
+
+def _avg_tier(full: pd.DataFrame) -> float:
+    """The Avg_Signal display cut-point — causal p75 of the instrument's own history.
+
+    One rule for one reading: the Convergence page colours the same series
+    with the same tier, so the two pages cannot call one value bullish and
+    neutral at once (the Swayam page used to hard-code ±2).
+    """
+    try:
+        prior = get_instrument_config(st.session_state.get("active_target", "")).ui_swayam_avg_threshold
+    except KeyError:
+        prior = InstrumentConfig().ui_swayam_avg_threshold
+    if full is None or "Avg_Signal" not in getattr(full, "columns", ()):
+        return float(prior)
+    return tier_now(pd.to_numeric(full["Avg_Signal"], errors="coerce").to_numpy(dtype=float),
+                    float(prior), q=0.75)
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  CHART BUILDERS
 # ═══════════════════════════════════════════════════════════════════════
 
-def _render_hmm_regime_chart(df_n, dates):
-    """Section: HMM State Probabilities — bull/bear regime classification."""
-    fig_hmm = go.Figure()
+def _render_breadth_chart(df_n, dates):
+    """Net breadth (top) over the oversold / overbought split it is made of."""
+    os_ = df_n["Oversold_Pct"].to_numpy(dtype=float)
+    ob_ = df_n["Overbought_Pct"].to_numpy(dtype=float)
+    net = os_ - ob_
+    fig = make_subplots(rows=2, cols=1, row_heights=[0.45, 0.55], shared_xaxes=True,
+                        vertical_spacing=0.07)
+    fig.add_trace(go.Scatter(x=dates, y=np.clip(net, 0, None), fill="tozeroy",
+                             fillcolor=chart_rgba("emerald", 0.12), line=dict(width=0),
+                             showlegend=False, hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=np.clip(net, None, 0), fill="tozeroy",
+                             fillcolor=chart_rgba("rose", 0.12), line=dict(width=0),
+                             showlegend=False, hoverinfo="skip"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=net, mode="lines", name="Net breadth",
+                             line=dict(color=chart_color("cyan"), width=1.4),
+                             hovertemplate="%{y:+.0f} pts<extra>Net breadth</extra>"), row=1, col=1)
+    fig.add_hline(y=0, line_color=grid_rgba(0.10), line_width=0.6, row=1, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=os_, mode="lines", name="Views oversold",
+                             fill="tozeroy", fillcolor=chart_rgba("emerald", 0.12),
+                             line=dict(color=chart_color("emerald"), width=1.2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=ob_, mode="lines", name="Views overbought",
+                             fill="tozeroy", fillcolor=chart_rgba("rose", 0.12),
+                             line=dict(color=chart_color("rose"), width=1.2)), row=2, col=1)
+    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_LARGE + 40))
+    style_axes(fig, y_title="Net (pts)", y_range=[-100, 100], row=1, col=1)
+    style_axes(fig, y_title="% of views", y_range=[0, 100], row=2, col=1)
+    render_chart_panel(fig, "swayam_breadth", units="% of views", window=True)
+
+
+def _render_view_weights(weights: dict | None, n_eff: float | None):
+    """Which views the breadth number is actually listening to, today."""
+    if not weights:
+        render_empty_state(
+            "No view weights yet",
+            "Each view is weighted by its own realised skill once enough of its calls have "
+            "resolved; until then every view counts equally.",
+            eyebrow="Swayam",
+        )
+        return
+    from engines.swayam.ensemble import SWAYAM_MEMBER_ORDER
+    keys = [k for k in SWAYAM_MEMBER_ORDER if k in weights] + \
+           sorted(k for k in weights if k not in SWAYAM_MEMBER_ORDER)
+    vals = [float(weights[k]) for k in keys]
+    fig = go.Figure(go.Bar(
+        x=keys, y=vals,
+        marker=dict(color=[chart_color("cyan") if v >= 1.0 else chart_rgba("cyan", 0.45) for v in vals]),
+        hovertemplate="%{x}: %{y:.2f}× equal weight<extra></extra>",
+    ))
+    fig.add_hline(y=1.0, line_dash="dot", line_color=grid_rgba(0.25), line_width=0.6)
+    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM - 60, show_legend=False))
+    style_axes(fig, y_title="× equal weight")
+    render_chart_panel(
+        fig, "swayam_view_weights", units="today's skill weight per view", windowed=False,
+        footer=(f"Dotted line = equal weight. The bank behaves like ≈{n_eff:.1f} independent "
+                f"views out of {len(keys)}." if n_eff else "Dotted line = equal weight."),
+    )
+
+
+def _render_regime_chart(df_n, dates):
+    """HMM state probabilities, named for what the states are.
+
+    Each view's HMM has a high-oscillator state and a low-oscillator state.
+    They used to be labelled Bull and Bear, which reads as a call — and under
+    Tattva's contrarian read the "bull" state (views persistently stretched
+    UP) is the bearish one. Named for what they measure instead.
+    """
+    fig = go.Figure()
     if "avg_hmm_bull" in df_n.columns:
-        fig_hmm.add_trace(go.Scatter(
-            x=dates, y=df_n["avg_hmm_bull"].values,
-            mode="lines", name="P(Bull)",
-            line=dict(color=chart_color("emerald"), width=1.5),
-            fill="tozeroy", fillcolor=chart_rgba("emerald", 0.08),
-        ))
+        fig.add_trace(go.Scatter(x=dates, y=df_n["avg_hmm_bull"].values, mode="lines",
+                                 name="P(stretched up)", line=dict(color=chart_color("rose"), width=1.4),
+                                 fill="tozeroy", fillcolor=chart_rgba("rose", 0.08)))
     if "avg_hmm_bear" in df_n.columns:
-        fig_hmm.add_trace(go.Scatter(
-            x=dates, y=df_n["avg_hmm_bear"].values,
-            mode="lines", name="P(Bear)",
-            line=dict(color=chart_color("rose"), width=1.5),
-            fill="tozeroy", fillcolor=chart_rgba("rose", 0.08),
-        ))
-    if "avg_hmm_bull" in df_n.columns and "avg_hmm_bear" in df_n.columns:
-        neutral_vals = 1.0 - df_n["avg_hmm_bull"].values - df_n["avg_hmm_bear"].values
-        fig_hmm.add_trace(go.Scatter(
-            x=dates, y=neutral_vals,
-            mode="lines", name="P(Neutral)",
-            line=dict(color=chart_rgba("slate", 0.4), width=1, dash="dot"),
-        ))
-    fig_hmm.add_hline(y=0.5, line_dash="dot", line_color=grid_rgba(0.08), line_width=0.5)
-
-    fig_hmm.update_layout(**chart_layout(height=300))
-    style_axes(fig_hmm, y_title="Probability", y_range=[0, 1])
-    render_chart_panel(fig_hmm, "swayam_hmm_regime", units="probability", window=True)
+        fig.add_trace(go.Scatter(x=dates, y=df_n["avg_hmm_bear"].values, mode="lines",
+                                 name="P(stretched down)", line=dict(color=chart_color("emerald"), width=1.4),
+                                 fill="tozeroy", fillcolor=chart_rgba("emerald", 0.08)))
+    if {"avg_hmm_bull", "avg_hmm_bear"} <= set(df_n.columns):
+        fig.add_trace(go.Scatter(x=dates, y=1.0 - df_n["avg_hmm_bull"].values - df_n["avg_hmm_bear"].values,
+                                 mode="lines", name="P(neutral)",
+                                 line=dict(color=chart_rgba("slate", 0.5), width=1, dash="dot")))
+    fig.add_hline(y=0.5, line_dash="dot", line_color=grid_rgba(0.08), line_width=0.5)
+    fig.update_layout(**chart_layout(height=300))
+    style_axes(fig, y_title="Probability", y_range=[0, 1])
+    render_chart_panel(fig, "swayam_hmm_regime", units="probability")
 
 
-def _render_zone_distribution_chart(df_n, dates):
-    """Section: Zone Distribution Over Time — oversold/overbought share."""
-    fig_zones = go.Figure()
-    fig_zones.add_trace(go.Scatter(
-        x=dates, y=df_n["Oversold_Pct"].values,
-        mode="lines", name="Oversold %",
-        fill="tozeroy", fillcolor=chart_rgba("emerald", 0.12),
-        line=dict(color=chart_color("emerald"), width=1.5),
-    ))
-    fig_zones.add_trace(go.Scatter(
-        x=dates, y=df_n["Overbought_Pct"].values,
-        mode="lines", name="Overbought %",
-        fill="tozeroy", fillcolor=chart_rgba("rose", 0.12),
-        line=dict(color=chart_color("rose"), width=1.5),
-    ))
-    ymax = max(df_n["Oversold_Pct"].max(), df_n["Overbought_Pct"].max()) * 1.15
-
-    fig_zones.update_layout(**chart_layout(height=UI_CHART_HEIGHT_LARGE))
-    style_axes(fig_zones, y_title="% of Constituents", y_range=[0, ymax])
-    render_chart_panel(fig_zones, "swayam_os_ob", units="% of views")
-
-
-def _render_raw_zone_counts_chart(df_n, dates):
-    """Section: Raw Zone Counts — absolute count of views per zone."""
-    fig_counts = go.Figure()
-    fig_counts.add_trace(go.Bar(
-        x=dates, y=df_n["Oversold"].values, name="Oversold",
-        marker=dict(color=chart_rgba("emerald", 0.85)),
-    ))
-    fig_counts.add_trace(go.Bar(
-        x=dates, y=df_n["Overbought"].values, name="Overbought",
-        marker=dict(color=chart_rgba("rose", 0.85)),
-    ))
-
-    fig_counts.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM), barmode="group")
-    style_axes(fig_counts, y_title="Count")
-    render_chart_panel(fig_counts, "swayam_counts", units="count")
-
-
-def _render_signal_counts_chart(df_n, dates):
-    """Section: Signal Counts Over Time — regime-change buy/sell triggers."""
-    fig_signals = go.Figure()
-    fig_signals.add_trace(go.Scatter(
-        x=dates, y=df_n["Buy_Signals"].values,
-        mode="lines+markers", name="Buy Signals",
-        line=dict(color=chart_color("emerald"), width=1.5),
-        marker=dict(size=3, color=chart_color("emerald")),
-    ))
-    fig_signals.add_trace(go.Scatter(
-        x=dates, y=df_n["Sell_Signals"].values,
-        mode="lines+markers", name="Sell Signals",
-        line=dict(color=chart_color("rose"), width=1.5),
-        marker=dict(size=3, color=chart_color("rose")),
-    ))
-
-    fig_signals.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM))
-    style_axes(fig_signals, y_title="Signal Count")
-    render_chart_panel(fig_signals, "swayam_signal_counts", units="count")
-
-
-def _render_avg_unified_signal_chart(df_n, dates):
-    """Section: Average Unified Signal — cross-sectional oscillator mean."""
-    avg_vals = df_n["Avg_Signal"].values
-    colors = [chart_color("emerald") if v < -2 else chart_color("rose") if v > 2 else chart_rgba("slate", 0.75) for v in avg_vals]
-
-    fig_n = go.Figure()
-    fig_n.add_trace(go.Scatter(
-        x=dates, y=np.clip(avg_vals, 0, None),
-        fill="tozeroy", fillcolor=chart_rgba("rose", 0.05),
-        line=dict(width=0), showlegend=False, hoverinfo="skip",
-    ))
-    fig_n.add_trace(go.Scatter(
-        x=dates, y=np.clip(avg_vals, None, 0),
-        fill="tozeroy", fillcolor=chart_rgba("emerald", 0.05),
-        line=dict(width=0), showlegend=False, hoverinfo="skip",
-    ))
-    fig_n.add_trace(go.Scatter(
-        x=dates, y=avg_vals,
-        mode="lines+markers", name="Avg Signal",
-        line=dict(color=chart_rgba("slate", 0.4), width=1.5),
-        marker=dict(size=3, color=colors),
-    ))
-    fig_n.add_hline(y=2, line_color=chart_rgba("rose", 0.2), line_width=0.5, line_dash="dot")
-    fig_n.add_hline(y=-2, line_color=chart_rgba("emerald", 0.2), line_width=0.5, line_dash="dot")
-    fig_n.add_hline(y=0, line_color=grid_rgba(0.06), line_width=0.5)
-
-    fig_n.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM))
-    style_axes(fig_n, y_title="Avg Signal", y_range=[-6, 6])
-    render_chart_panel(fig_n, "swayam_avg_signal", units="oscillator")
+def _render_avg_signal_chart(df_n, dates, tier):
+    """The views' average oscillator, against this instrument's own p75."""
+    v = df_n["Avg_Signal"].to_numpy(dtype=float)
+    colors = [chart_color("emerald") if x < -tier else chart_color("rose") if x > tier
+              else chart_rgba("slate", 0.6) for x in v]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=dates, y=np.clip(v, 0, None), fill="tozeroy",
+                             fillcolor=chart_rgba("rose", 0.05), line=dict(width=0),
+                             showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=dates, y=np.clip(v, None, 0), fill="tozeroy",
+                             fillcolor=chart_rgba("emerald", 0.05), line=dict(width=0),
+                             showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=dates, y=v, mode="lines+markers", name="Average signal",
+                             line=dict(color=chart_color("cyan"), width=1.3),
+                             marker=dict(size=3, color=colors)))
+    for y, nm in ((tier, "rose"), (-tier, "emerald")):
+        fig.add_hline(y=y, line_color=chart_rgba(nm, 0.25), line_width=0.5, line_dash="dot")
+    fig.add_hline(y=0, line_color=grid_rgba(0.06), line_width=0.5)
+    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM, show_legend=False))
+    style_axes(fig, y_title="Avg oscillator")
+    render_chart_panel(fig, "swayam_avg_signal", units=f"oscillator · tier ±{tier:.2f}")
 
 
 def _render_individual_views(swayam_view_dfs):
-    """Section: Individual Views — per-view oscillator and regime.
-
-    The drop-down lists views in member-bank order so timescale groups stay
-    adjacent (L10·FULL next to L10·PRICE) rather than being scattered by an
-    alphabetical sort. Any view not in the declared bank sorts after it.
-    """
-    if swayam_view_dfs:
-        from engines.swayam.ensemble import SWAYAM_MEMBER_ORDER
-        keys = [k for k in SWAYAM_MEMBER_ORDER if k in swayam_view_dfs]
-        keys += sorted(k for k in swayam_view_dfs if k not in SWAYAM_MEMBER_ORDER)
-        # In a filter strip, like every other panel-scoped control.
-        with st.container(key="filterbar"):
-            sym = st.selectbox("View", keys, key="swayam_sym_select")
-        if sym and sym in swayam_view_dfs:
-            cdf = swayam_view_dfs[sym].iloc[-100:].copy()
-            if isinstance(cdf.columns, pd.MultiIndex):
-                cdf.columns = [c[0] for c in cdf.columns]
-            # Surface the full regime-intelligence stack per view: MSF/MMR
-            # oscillators + the HMM/GARCH(Vol_Regime)/CUSUM(Change_Point) outputs that
-            # the engine computes but the aggregate view doesn't expose.
-            cols_show = [c for c in [
-                "Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition",
-                "Regime", "Vol_Regime", "Change_Point", "Confidence",
-            ] if c in cdf.columns]
-            _shown = cdf[cols_show] if cols_show else cdf
-            # Oscillators are signed [-10,+10] — colour them emerald/rose by sign,
-            # matching Pragyam's per-signal columns.
-            render_table_panel(
-                _shown, "swayam-view-drilldown", units="last 60 sessions",
-                index_label="Date", max_rows=60, max_height=520,
-                sign_color_cols={"MSF_Osc", "MMR_Osc", "Unified_Osc"},
-            )
+    """Per-view oscillators and regime, in member-bank order."""
+    if not swayam_view_dfs:
+        return
+    from engines.swayam.ensemble import SWAYAM_MEMBER_ORDER
+    keys = [k for k in SWAYAM_MEMBER_ORDER if k in swayam_view_dfs]
+    keys += sorted(k for k in swayam_view_dfs if k not in SWAYAM_MEMBER_ORDER)
+    with st.container(key="filterbar"):
+        sym = st.selectbox("View", keys, key="swayam_sym_select")
+    if sym and sym in swayam_view_dfs:
+        cdf = swayam_view_dfs[sym].iloc[-60:].copy()
+        if isinstance(cdf.columns, pd.MultiIndex):
+            cdf.columns = [c[0] for c in cdf.columns]
+        cols_show = [c for c in ["Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition",
+                                 "Regime", "Vol_Regime", "Change_Point", "Confidence"]
+                     if c in cdf.columns]
+        render_table_panel(
+            cdf[cols_show] if cols_show else cdf, "swayam-view-drilldown",
+            units="last 60 sessions", windowed=False, index_label="Date", max_rows=60, max_height=520,
+            sign_color_cols={"MSF_Osc", "MMR_Osc", "Unified_Osc"},
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  MAIN RENDER FUNCTION
 # ═══════════════════════════════════════════════════════════════════════
 
-def render_swayam_tab(selected_tf: str | None = None) -> None:
-    """Swayam tab — self-referential breadth with cyan system identity.
-
-    Analytical flow:
-      1. Metric Cards        — "What's the current snapshot?"
-      2. HMM Regime          — "What's the hidden regime probability?"
-      3. Zone Distribution   — "How many stocks are oversold vs overbought?"
-      4. Raw Zone Counts     — "Absolute counts per zone."
-      5. Signal Counts       — "Where are the regime-change triggers?"
-      6. Avg Unified Signal  — "What's the broad oscillator consensus?"
-      7. Individual Stocks   — "What does each stock look like?"
-    """
-
-    # System identity background
+def render_swayam_tab(selected_tf: str | None = None, edge: dict | None = None,
+                      horizon: int = 10) -> None:
+    """Swayam tab — self-referential breadth, its record, and its views."""
     swayam_daily = st.session_state.get("swayam_daily")
-    swayam_view_dfs = st.session_state.get("swayam_view_dfs", {})
-    tooltips = TOOLTIPS
-
+    swayam_view_dfs = st.session_state.get("swayam_view_dfs", {}) or {}
     if swayam_daily is None or swayam_daily.empty:
         render_empty_state(
-            "No Swayam breadth data available",
-            "The self-referential view bank hasn't produced a breadth read for this target yet.",
+            "No Swayam breadth for this target",
+            "Swayam reads the target's own OHLCV, and none was available for it this run "
+            "(sheet-sourced targets have no OHLCV feed).",
             eyebrow="Swayam",
-            action_label="Run analysis in the sidebar, then return to this page.",
         )
         return
 
-    # Correlation disclosure (SWAYAM_PLAN.md §6.4): the basket source line
-    # becomes the swayam src_msg naturally (set in app.py); append the
-    # honest correlation caveat — self-ensemble views share one price
-    # series, so this reads breadth across independent CAUSAL ANGLES on the
-    # target, not independent cross-sectional names.
-    # ── Normalize columns ───────────────────────────────────────────────
-    df_n = swayam_daily[~swayam_daily.index.duplicated(keep="last")].copy()
-    col_map = {}
-    for c in df_n.columns:
-        cl = c.lower().replace("-", "_")
-        if cl in ("oversold_pct",):          col_map[c] = "Oversold_Pct"
-        elif cl in ("overbought_pct",):      col_map[c] = "Overbought_Pct"
-        elif cl in ("neutral_pct",):         col_map[c] = "Neutral_Pct"
-        elif cl in ("buy_signals", "buy_signal_count"): col_map[c] = "Buy_Signals"
-        elif cl in ("sell_signals", "sell_signal_count"): col_map[c] = "Sell_Signals"
-        elif cl in ("avg_signal", "avg_unified_osc"):   col_map[c] = "Avg_Signal"
-        elif cl in ("oversold",):            col_map[c] = "Oversold"
-        elif cl in ("overbought",):          col_map[c] = "Overbought"
-        elif cl in ("neutral",):             col_map[c] = "Neutral"
-        elif cl in ("total_analyzed", "num_constituents"): col_map[c] = "Total_Analyzed"
-        elif cl in ("avg_hmm_bull",):        col_map[c] = "avg_hmm_bull"
-        elif cl in ("avg_hmm_bear",):        col_map[c] = "avg_hmm_bear"
-    df_n = df_n.rename(columns=col_map)
-
-    for col, default in [
-        ("Oversold_Pct", 0), ("Overbought_Pct", 0), ("Neutral_Pct", 0),
-        ("Buy_Signals", 0), ("Sell_Signals", 0), ("Avg_Signal", 0),
-        ("Oversold", 0), ("Overbought", 0), ("Neutral", 0),
-        ("Total_Analyzed", 0), ("avg_hmm_bull", 0.33), ("avg_hmm_bear", 0.33),
-    ]:
-        if col not in df_n.columns:
-            df_n[col] = default
-
-    # ── Apply the global timeframe selector (3M/6M/1Y/2Y/ALL) ───────────────
-    if selected_tf and selected_tf != "ALL":
-        try:
-            _idx = pd.to_datetime(df_n.index)
-            offsets = {
-                "3M": pd.DateOffset(months=3), "6M": pd.DateOffset(months=6),
-                "1Y": pd.DateOffset(years=1), "2Y": pd.DateOffset(years=2),
-            }
-            _cutoff = _idx.max() - offsets.get(selected_tf, pd.DateOffset(years=1))
-            df_n = df_n[_idx >= _cutoff]
-        except Exception:
-            pass
-
+    full = swayam_daily[~swayam_daily.index.duplicated(keep="last")].copy()
+    for col, default in (("Oversold_Pct", 0.0), ("Overbought_Pct", 0.0), ("Avg_Signal", 0.0)):
+        if col not in full.columns:
+            full[col] = default
+    df_n = full
+    _cut = window_cutoff(pd.to_datetime(full.index).max(), selected_tf)
+    if _cut is not None:
+        df_n = full[pd.to_datetime(full.index) >= _cut]
     dates = list(df_n.index)
 
-    # The noun for "what's being counted". Kept as locals because the schema
-    # is shared with the removed basket read, which counted instruments.
-    _unit, _unit_of, _plural = "views", "of views", "views"
+    last = full.iloc[-1]
+    os_, ob_ = float(last["Oversold_Pct"]), float(last["Overbought_Pct"])
+    net = os_ - ob_
+    avg = float(last["Avg_Signal"])
+    tier = _avg_tier(full)
+    n_views = len(swayam_view_dfs) or int(last.get("Total_Analyzed", 0) or 0)
+    n_eff = st.session_state.get("swayam_n_eff")
+    ic = (edge or {}).get("ic")
 
-    # ── Phase 1: STATE — metric cards ──────────────────────────────────
-    try:   # per-instrument breadth-alert tier (shadow module global)
-        _prior_bh = get_instrument_config(st.session_state.get("active_target", "")).ui_breadth_high
-        # Causal p90 of this instrument's own oversold-breadth history — a
-        # 15-view bank on a quiet name simply does not reach the pooled 60%.
-        _os = (df_n["Oversold_Pct"].to_numpy(dtype=float)
-               if "Oversold_Pct" in df_n.columns else None)
-        UI_BREADTH_HIGH = (tier_now(_os, _prior_bh, q=0.90) if _os is not None and len(_os)
-                           else _prior_bh)
-    except KeyError:
-        UI_BREADTH_HIGH = InstrumentConfig().ui_breadth_high
-    c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
-    with c1:
-        v = df_n["Oversold_Pct"].iloc[-1]
-        render_metric_card("OVERSOLD INSTRUMENTS", f"{v:.0f}%", _unit_of, "success" if v > UI_BREADTH_HIGH else "neutral",
-                           tooltip=tooltips["oversold_pct"])
-    with c2:
-        v = df_n["Overbought_Pct"].iloc[-1]
-        render_metric_card("OVERBOUGHT INSTRUMENTS", f"{v:.0f}%", _unit_of, "danger" if v > UI_BREADTH_HIGH else "neutral",
-                           tooltip=tooltips["overbought_pct"])
-    with c3:
-        v = df_n["Avg_Signal"].iloc[-1]
-        render_metric_card("AVG UNIFIED SIGNAL", f"{v:.2f}", "<-2 bullish · >+2 bearish", "success" if v < -2 else "danger" if v > 2 else "neutral",
-                           tooltip=tooltips["avg_signal"])
-    with c4:
-        v = int(df_n["Buy_Signals"].iloc[-1])
-        render_metric_card("BUY SIGNALS", str(v), "Oversold-to-neutral crosses", "success" if v > 0 else "neutral",
-                           tooltip=tooltips["buy_signals"])
-    with c5:
-        v = int(df_n["Sell_Signals"].iloc[-1])
-        render_metric_card("SELL SIGNALS", str(v), "Overbought-to-neutral crosses", "danger" if v > 0 else "neutral",
-                           tooltip=tooltips["sell_signals"])
-    with c6:
-        render_metric_card("LOOKBACK WINDOW", str(len(df_n)), "Trading days", "info",
-                           tooltip=tooltips["trading_days"])
-
-
-    # ── Phase 2: REGIME ────────────────────────────────────────────────
+    stance = ("depressed — its own views lean oversold" if net > 10 else
+              "stretched up — its own views lean overbought" if net < -10 else
+              "balanced — its own views are split")
     render_section_header(
-        "HMM State Probabilities",
-        f"{_unit.capitalize()}-average probability of a bull vs bear regime (mean of per-{_plural[:-1]} HMM states). P > 0.5 = regime confidence. Frequent crossings = uncertainty.",
-        icon="eye",
-        accent="violet",
+        "Swayam — The Instrument's Own Read",
+        f"Net breadth {net:+.0f} pts: {os_:.0f}% of {n_views} views read the instrument "
+        f"oversold and {ob_:.0f}% overbought, so its own price looks {stance}.",
+        icon="activity", accent="cyan",
     )
-    _render_hmm_regime_chart(df_n, dates)
-
-
-    # ── Phase 3: COMPOSITION ───────────────────────────────────────────
-    render_section_header(
-        "Zone Distribution Over Time",
-        f"Daily share of {_plural} oversold vs overbought. Rising oversold = accumulation setup. Rising overbought = distribution risk.",
-        icon="layers",
-        accent="emerald",
-    )
-    _render_zone_distribution_chart(df_n, dates)
-
+    render_kpi_strip([
+        {"label": "Net Breadth", "value": f"{net:+.0f} pts",
+         "subtext": "oversold − overbought · bullish-positive",
+         "color_class": "success" if net > 10 else "danger" if net < -10 else "neutral",
+         "tooltip": TOOLTIPS["net_breadth"]},
+        {"label": "Views Oversold", "value": f"{os_:.0f}%", "subtext": f"of {n_views} views",
+         "color_class": "success" if os_ >= 50 else "neutral", "tooltip": TOOLTIPS["oversold_pct"]},
+        {"label": "Views Overbought", "value": f"{ob_:.0f}%", "subtext": f"of {n_views} views",
+         "color_class": "danger" if ob_ >= 50 else "neutral", "tooltip": TOOLTIPS["overbought_pct"]},
+        {"label": "Average Signal", "value": f"{avg:+.2f}",
+         "subtext": f"tier ±{tier:.2f} (own p75)",
+         "color_class": "success" if avg < -tier else "danger" if avg > tier else "neutral",
+         "tooltip": TOOLTIPS["avg_signal"]},
+        {"label": "Effective Views", "value": f"≈{n_eff:.1f}" if n_eff else "—",
+         "subtext": f"independent evidence in {n_views} views", "color_class": "info",
+         "tooltip": TOOLTIPS["n_eff"]},
+        {"label": "Walk-Forward IC", "value": f"{ic:+.3f}" if ic is not None else "—",
+         "subtext": f"net breadth, non-overlapping {horizon}d" if ic is not None else "not yet graded",
+         "color_class": ("success" if ic is not None and ic >= 0.05 else
+                         "warning" if ic is not None and ic > 0 else
+                         "danger" if ic is not None else "neutral")},
+    ], max_cols=6, key="swayam-read")
 
     render_section_header(
-        "Raw Zone Counts",
-        f"Raw count of {_plural} per regime zone.",
-        icon="bar-chart",
-        accent="cyan",
+        "Breadth Over Time",
+        "Top: net breadth, bullish-positive. Bottom: the share of views oversold and overbought "
+        "it is made of.",
+        icon="layers", accent="cyan",
     )
-    _render_raw_zone_counts_chart(df_n, dates)
-
-
-    # ── Phase 4: SIGNALS ───────────────────────────────────────────────
-    render_section_header(
-        "Signal Counts Over Time",
-        f"Daily regime-change signal count. Clusters across {_plural} often precede target reversals.",
-        icon="zap",
-        accent="rose",
-    )
-    _render_signal_counts_chart(df_n, dates)
-
+    _render_breadth_chart(df_n, dates)
 
     render_section_header(
-        "Average Unified Signal",
-        "Cross-sectional mean of all oscillators. Sustained moves beyond ±2 = broad participation. Whipsaws near zero = no consensus.",
-        icon="activity",
+        "Walk-Forward Edge",
+        f"When Swayam's net breadth leaned one way, did the instrument move that way over the "
+        f"next {horizon} sessions? Scored exactly as Mūla's call is.",
+        icon="trending", accent="cyan",
     )
-    _render_avg_unified_signal_chart(df_n, dates)
+    render_edge_panel(edge, "swayam", what="Swayam's net breadth")
 
+    render_section_header(
+        "Which Views Carry Weight",
+        "Each view is weighted by its own realised skill, learned causally; a timescale that "
+        "has stopped predicting this instrument fades instead of padding the breadth.",
+        icon="bar-chart", accent="cyan",
+    )
+    _render_view_weights(st.session_state.get("swayam_view_weights"), n_eff)
 
-    # ── Phase 5: DRILL-DOWN ────────────────────────────────────────────
+    render_section_header(
+        "Regime",
+        "Views-average probability of each view's HMM state. Sustained P > 0.5 = a confident "
+        "regime; frequent crossings = none.",
+        icon="eye", accent="cyan",
+    )
+    _render_regime_chart(df_n, dates)
+
+    render_section_header(
+        "Average Signal",
+        "The views' mean oscillator. Beyond this instrument's own p75 (dotted) = broad "
+        "participation; whipsaws near zero = no consensus.",
+        icon="activity", accent="cyan",
+    )
+    _render_avg_signal_chart(df_n, dates, tier)
+
     render_section_header(
         "Individual Views",
-        "Per-view MSF, MMR, unified signal, and regime. Verify the bank's "
-        "breadth read is backed by individual causal angles on the target.",
+        "Per-view MSF, MMR, unified signal and regime — the readings the breadth is counted from.",
         icon="database",
     )
     _render_individual_views(swayam_view_dfs)

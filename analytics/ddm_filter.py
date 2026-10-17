@@ -33,7 +33,14 @@ def drift_diffusion_filter(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """1D Drift-Diffusion filter with mean-reverting variance.
 
-    State equation: ``state_t = (1-λ)×state_{t-1} + λ×drift_t``
+    State equation: ``state_t = (1-λ)×state_{t-1} + drift_scale×obs_t``
+
+    A leaky integrator: new evidence enters at ``drift_scale`` and old evidence
+    decays at ``λ``, so a constant input settles at ``obs × drift_scale / λ``
+    (the steady-state gain — 1.87 for the Mūla defaults, which is why the
+    config pairs the two as "drift = leak × gain"). An earlier docstring wrote
+    the state update as an exponential average, ``(1-λ)·state + λ·drift``,
+    which has unit gain; the code has never done that.
 
     Variance equation: ``var_t = (1-λ)×var_{t-1} + λ×σ²_LR + 0.5×|drift_t|``
 

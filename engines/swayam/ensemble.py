@@ -52,8 +52,9 @@ from engines.swayam.kernel import run_full_analysis
 class SwayamMember:
     """One causal view in the self-ensemble.
 
-    ``name`` is used everywhere a constituent symbol is used today (dict
-    key, drill-down selector) — so it must be unique within a member set.
+    ``name`` keys the view everywhere it appears (the frame dict, the skill
+    weights, the Swayam page's drill-down selector) — so it must be unique
+    within a member set.
     """
 
     name: str
@@ -128,8 +129,7 @@ def default_swayam_members(
 
 
 # Default grid instance — config wires SWAYAM_LENGTHS/ROC_FRAC through
-# this factory so the research sweep (research/swayam_study.py) can
-# vary the grid without touching this module.
+# this factory, so a different grid is a config change, never an edit here.
 SWAYAM_MEMBERS: tuple[SwayamMember, ...] = default_swayam_members()
 
 # Canonical display order for the Swayam tab's "Select View" drop-down
@@ -156,9 +156,8 @@ def build_swayam_frames(
 ) -> dict[str, pd.DataFrame]:
     """Run run_full_analysis once per member on the SAME target OHLCV frame.
 
-    Returns ``{member.name: result_df}`` — the exact shape Phase 3 builds
-    for basket constituents, ready for
-    ``swayam.aggregate_views`` unchanged.
+    Returns ``{member.name: result_df}``, ready for
+    ``swayam.aggregate_views``.
 
     ``macro_cols`` MUST already be leakage-filtered by the caller (drop the
     target's own column + its excluded-predictor near-replicas — see
@@ -168,8 +167,8 @@ def build_swayam_frames(
     if target_ohlcv is None or target_ohlcv.empty:
         return {}
 
-    # Join macro data once, exactly as the basket-mode Phase-3 loop does
-    # (ffill macro cols onto the target's calendar).
+    # Join the macro driver pool once (ffilled onto the target's calendar);
+    # every macro-anchored member reads the same joined frame.
     base = target_ohlcv.copy()
     has_macro_source = macro_df is not None and not macro_df.empty and bool(macro_cols)
     if has_macro_source:
@@ -204,8 +203,7 @@ def build_swayam_frames(
             )
             frames[member.name] = result_df
         except Exception:
-            # A single bad member must not kill the ensemble — mirrors the
-            # basket-mode per-constituent try/except in app.py.
+            # A single bad member must not kill the ensemble.
             continue
         if progress_cb is not None:
             progress_cb(i + 1, total, member.name)
@@ -221,9 +219,10 @@ def effective_member_count(frames: dict[str, pd.DataFrame]) -> float:
 
     N_eff = (sum of eigenvalues)^2 / (sum of squared eigenvalues) of the
     correlation matrix of member ``Unified`` oscillators — full-sample,
-    DIAGNOSTIC ONLY. Never fed into the causal signal path, calibration, or
-    ``expected_constituents``; it exists purely to disclose to the user that
-    self-ensemble members are correlated by construction (see this module's docstring) — far more than an independent-name basket.
+    DIAGNOSTIC ONLY (a full-history statistic, so say "over the full history"
+    wherever it is shown). Never fed into the causal signal path or the
+    learners; it exists to disclose that views of ONE price are correlated by
+    construction, so fifteen views are worth far fewer than fifteen votes.
 
     Returns ``0.0`` for fewer than 2 usable members.
     """

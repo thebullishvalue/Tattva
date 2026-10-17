@@ -1,109 +1,141 @@
 """
-Tattva — Data tab: Merged data table + CSV export with search and filtering.
+Tattva — Data tab: every published series, one row per session, exportable.
 तत्त्व (Tattva) — "Principle / Essence"
 
-UI — Raw data inspection: unified dataset viewer with export capability.
+UI — the record behind every page, in the units every page shows it in: the
+mispricing as a percentage and in σ (never a log gap rounded to one decimal,
+which printed 0.0 on every row), model spread in basis points, the valuation
+state word, Swayam's net breadth and the convergence readings joined on the
+same date. The export is the same joined frame at full precision, so "the
+evidence, exportable" is literally true rather than true of one engine.
+
+There is one date filter: the chart window, in the table's own header, as on
+every other page. The second "Date Range" selector that used to sit beside it
+filtered the already-windowed frame again, in calendar days of its own.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
+
+import numpy as np
 import pandas as pd
 import streamlit as st
-from datetime import datetime
 
 from ui.components import (render_section_header, render_table_panel,
                            render_note, provisional_note)
 
 
+def _by_date(frame: pd.DataFrame | None) -> pd.DataFrame:
+    """A frame re-indexed on normalized dates (empty when absent)."""
+    if frame is None or getattr(frame, "empty", True):
+        return pd.DataFrame()
+    f = frame[~frame.index.duplicated(keep="last")].copy()
+    f.index = pd.to_datetime(f.index, errors="coerce").normalize()
+    return f[~f.index.isna()]
+
+
+def build_record(ts: pd.DataFrame) -> pd.DataFrame:
+    """The joined, full-precision record: Mūla + Swayam + Convergence per session."""
+    if ts is None or ts.empty:
+        return pd.DataFrame()
+    m = ts.copy()
+    if "Date" in m.columns:
+        m.index = pd.to_datetime(m["Date"], errors="coerce").dt.normalize()
+    cols = {
+        "Price": "Price", "FairValue": "Fair value", "FairValueLo": "Fair value lo (95%)",
+        "FairValueHi": "Fair value hi (95%)", "PctMispricing": "Gap %", "FVO": "Oscillator σ",
+        "Regime": "Valuation", "ModelSpread": "Model spread bps", "XSConsistency": "Cross-section",
+        "MRProb": "P(price reverts)", "MulaKappa": "κ̂ (price-side)",
+        "MulaDriftPct": "Expected move %", "MulaSdPct": "Expected move SD %",
+        "OversoldBreadth": "Windows cheap %", "OverboughtBreadth": "Windows rich %",
+        "ConvictionBounded": "Window agreement", "Provisional": "Provisional", "Valid": "Valued",
+    }
+    out = pd.DataFrame(index=m.index)
+    for src, name in cols.items():
+        if src in m.columns:
+            out[name] = m[src]
+    if "Gap %" in out.columns:
+        out["Gap %"] = pd.to_numeric(out["Gap %"], errors="coerce") * 100.0
+    if "Model spread bps" in out.columns:
+        out["Model spread bps"] = pd.to_numeric(out["Model spread bps"], errors="coerce") * 1e4
+
+    sw = _by_date(st.session_state.get("swayam_daily"))
+    if not sw.empty:
+        if {"Oversold_Pct", "Overbought_Pct"} <= set(sw.columns):
+            out["Swayam net breadth"] = (sw["Oversold_Pct"] - sw["Overbought_Pct"]).reindex(out.index)
+            out["Swayam oversold %"] = sw["Oversold_Pct"].reindex(out.index)
+            out["Swayam overbought %"] = sw["Overbought_Pct"].reindex(out.index)
+        if "Avg_Signal" in sw.columns:
+            out["Swayam avg signal"] = sw["Avg_Signal"].reindex(out.index)
+
+    cv = _by_date(st.session_state.get("convergence_df"))
+    if not cv.empty:
+        for src, name in (("agreement_ratio", "Agreement"),
+                          ("convergence_score", "Weighted composite")):
+            if src in cv.columns:
+                out[name] = cv[src].reindex(out.index)
+    cons = st.session_state.get("hero_series")
+    if cons is not None and len(cons):
+        c = cons.copy()
+        c.index = pd.to_datetime(c.index, errors="coerce").normalize()
+        out["Consensus"] = c[~c.index.duplicated(keep="last")].reindex(out.index)
+    out.index.name = "Date"
+    return out
+
+
 def render_data_tab(ts_filtered, ts, active_target):
-    """Data Table: Time series data with search, column visibility, and export."""
+    """The record: windowed on screen, full in the export."""
+    record = build_record(ts)
+    if record.empty:
+        render_note("No published record for this run.")
+        return
+    shown = record
+    if ts_filtered is not None and not ts_filtered.empty and "Date" in ts_filtered.columns:
+        first = pd.to_datetime(ts_filtered["Date"], errors="coerce").min()
+        if pd.notna(first):
+            shown = record[record.index >= first.normalize()]
 
     render_section_header(
-        f"Time Series Data ({len(ts_filtered)} observations)",
-        icon="database",
-        accent="cyan",
+        "The Record",
+        f"Every published series for {active_target}, one row per session, in the units the "
+        f"pages show them in. Readings keep their native sign — positive = stretched up (gap, "
+        f"oscillator, Swayam signal, consensus, composite) — except Swayam net breadth, which "
+        f"is oversold minus overbought and so reads positive when the views lean bullish.",
+        icon="database", accent="cyan",
     )
-
     _pn = provisional_note(st.session_state.get("fvo_ts"))
     if _pn:
         render_note(_pn)
 
-    display_cols = [
-        "Date", "Actual", "FairValue", "Residual", "ModelSpread", "AvgZ",
-        "OversoldBreadth", "OverboughtBreadth", "ConvictionScore", "Regime",
-        "BullishDiv", "BearishDiv",
-    ]
-    display_cols = [c for c in display_cols if c in ts_filtered.columns]
-    display_df = ts_filtered[display_cols].copy()
-
-    rounding = {
-        "AvgZ": 3, "ModelSpread": 3, "FairValue": 2,
-        "Residual": 1, "ConvictionScore": 1, "OversoldBreadth": 1, "OverboughtBreadth": 1,
-    }
-    for col, decimals in rounding.items():
-        if col in display_df.columns:
-            display_df[col] = display_df[col].round(decimals)
-
-    if "BullishDiv" in display_df.columns:
-        display_df["BullishDiv"] = display_df["BullishDiv"].apply(lambda x: "●" if x else "○")
-    if "BearishDiv" in display_df.columns:
-        display_df["BearishDiv"] = display_df["BearishDiv"].apply(lambda x: "●" if x else "○")
-
-    # ── Filter bar ──────────────────────────────────────────────────────
-    # Grouped into the same strip the chart-window control uses, rather than
-    # two bare widgets floating above the table. Filters that scope a panel
-    # belong to that panel visually, not to the page.
     with st.container(key="filterbar"):
-        search_col1, search_col2 = st.columns([1, 4], gap="small",
-                                              vertical_alignment="bottom")
-        with search_col1:
-            date_range_option = st.selectbox(
-                "Date Range", ["All", "Last 30", "Last 90", "Last 180", "Last 365"],
-                key="data_date_range")
-        with search_col2:
-            search_term = st.text_input(
-                "Search", placeholder="Filter by regime or value…", key="data_search")
-
-    # Apply date range filter
-    filtered_df = display_df.copy()
-    if date_range_option != "All" and "Date" in filtered_df.columns:
-        try:
-            max_date = pd.to_datetime(filtered_df["Date"]).max()
-            offsets = {"Last 30": 30, "Last 90": 90, "Last 180": 180, "Last 365": 365}
-            cutoff = max_date - pd.Timedelta(days=offsets[date_range_option])
-            filtered_df["Date"] = pd.to_datetime(filtered_df["Date"])
-            filtered_df = filtered_df[filtered_df["Date"] >= cutoff]
-        except Exception:
-            pass
-
-    # Apply text search
+        search_term = st.text_input("Search", placeholder="Filter by valuation word or value…",
+                                    key="data_search")
+    view = shown.iloc[::-1].copy()                 # newest first
+    for col in view.columns:
+        if pd.api.types.is_float_dtype(view[col]):
+            view[col] = view[col].round(4 if col in ("κ̂ (price-side)",) else 2)
     if search_term:
-        mask = filtered_df.astype(str).apply(
-            lambda col: col.str.contains(search_term, case=False, na=False),
-        ).any(axis=1)
-        filtered_df = filtered_df[mask]
+        mask = view.astype(str).apply(
+            lambda c: c.str.contains(search_term, case=False, na=False)).any(axis=1)
+        view = view[mask]
 
-    # HTML table renders every row into the DOM (unlike st.dataframe's
-    # virtualized scroll), so cap the on-screen rows to the most recent 300 —
-    # the full set is still exportable via the CSV button below.
+    # HTML tables render every row into the DOM, so the screen is capped; the
+    # export below carries every row at full precision.
     _CAP = 300
-    _cap_note = (f"Showing the most recent {_CAP:,} of {len(filtered_df):,} rows — "
-                 f"export below for the full set." if len(filtered_df) > _CAP else "")
     render_table_panel(
-        filtered_df, "data-timeseries",
-        units=f"{len(filtered_df):,} rows × {len(filtered_df.columns)} cols",
-        max_rows=_CAP, max_height=560, footer=_cap_note, window=True,
+        view, "data-record", index_label="Date",
+        units=f"{len(view):,} sessions × {len(view.columns)} series",
+        max_rows=_CAP, max_height=560, window=True,
+        footer=(f"Showing the newest {_CAP:,} of {len(view):,} — the export has all of them."
+                if len(view) > _CAP else ""),
+        sign_color_cols={"Gap %", "Oscillator σ", "Expected move %", "Swayam net breadth"},
     )
 
-    # ── Export ──────────────────────────────────────────────────────────
-    csv_data = ts.to_csv(index=False).encode("utf-8")
-    # Label is plain text. It carried a "\u2913" glyph — a Unicode arrow standing
-    # in for an icon, from no icon set, drawn at whatever weight the system
-    # font happened to give it. Buttons here are uppercase mono words.
+    csv_data = record.reset_index().to_csv(index=False).encode("utf-8")
     st.download_button(
-        "Download Full CSV",
-        csv_data,
-        f"tattva_{active_target}_{datetime.now().strftime('%Y%m%d')}.csv",
-        "text/csv",
+        "Download the record (CSV)", csv_data,
+        f"tattva_{active_target}_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv",
     )
-    render_note(f"Full unfiltered series · {len(ts):,} rows · CSV")
+    render_note(f"Full history · {len(record):,} sessions · Mūla, Swayam and Convergence "
+                f"joined on date at full precision.")

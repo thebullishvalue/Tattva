@@ -1,24 +1,26 @@
 """
-Tattva — Analog (Similar-Period) matcher.
+Tattva — Analog (Similar-Period) matcher: the Precedent base rate.
 तत्त्व (Tattva) — "Principle / Essence"
 
-ANALYTICS — Covariance-aware historical analog matching, ported from Arthagati's
-``find_similar_periods`` (Mahalanobis + trajectory cosine + recency). The matcher
-itself is unchanged; only its INPUTS are adapted to Tattva:
+ANALYTICS — covariance-aware historical analog matching (Mahalanobis under OAS
+shrinkage, a Gaussian kernel on distance, a Theiler exclusion window), ported
+from Arthagati's ``find_similar_periods`` and adapted to Tattva's state:
 
-  • Feature vector is built from the quantities Tattva already computes per day
-    (``engine.ts_data``) — robust-quantile extension (AvgZ), net internal breadth,
-    target momentum, realized volatility, breadth and the valuation
-    oscillator — instead of
-    Arthagati's mood features.
-  • Forward-return horizons are the FIXED precedent term structure
-    (core.config.PRECEDENT_HORIZONS = 1/3/5/10/20/60d) — a complete span the
-    Precedent tab shows end-to-end, independent of the sidebar lens. (Callers
-    pass the horizon set explicitly; the default below mirrors that constant.)
+  • The state vector is what the SYSTEM measures each day (``engine.ts_data``):
+    the valuation oscillator, Mūla's window breadth, stress, valuation
+    confidence and the error-correction read, plus the target's own momentum
+    and realised volatility.
+  • Forward-return horizons are the fixed precedent term structure
+    (``core.config.PRECEDENT_HORIZONS`` = 1/3/5/10/20/60d).
 
-It answers an empirical, non-parametric question that complements the model
-forecast: "when the target's state looked statistically like today, what did the
-target do next?" — a base rate, descriptive not predictive.
+It answers an empirical, non-parametric question: "when the system's state
+looked statistically like today, what did the target do next?" It is a base
+rate CONDITIONED ON THE SYSTEM'S OWN STATE — it matches on Mūla's outputs, so
+it is not independent of the model, and should not be described as such. What
+it adds is a different method: no functional form, no fitted coefficients,
+only what history did from comparable states. The live read and the
+walk-forward that grades it run through one matcher (:func:`_match`), so the
+skill shown on the Precedent page is the skill of the estimator the hero reads.
 """
 
 from __future__ import annotations
@@ -28,14 +30,10 @@ import pandas as pd
 from scipy.stats import chi2
 
 
-# ── Blend weights (ported verbatim from Arthagati) ───────────────────────────
-# Blend re-tuned for Tattva (2026-06-20, research/analog_tuning_study.py + research/analog_confirm.py:
-# 13 targets, non-overlapping OOS IC full + recent-half). The ported Arthagati blend
-# (.55/.35/.10) was actively HURTING: trajectory adds ~nothing and recency degrades
-# the recent regime. PURE Mahalanobis state-matching is the clear winner — it
-# recovers the decayed recent edge (10d recent IC −0.010 → +0.079; 20d −0.083 →
-# +0.095) while holding full-sample IC. So trajectory + recency are dropped (weight
-# 0 → their computation is skipped entirely, also a live speedup).
+# (Arthagati's blend of Mahalanobis, trajectory-cosine and recency scoring was
+# re-tuned for Tattva on 2026-06-20 — 13 targets, non-overlapping OOS IC — and
+# PURE Mahalanobis state-matching won: trajectory added nothing and recency
+# degraded the recent regime. The other two terms are gone, not zero-weighted.)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -141,8 +139,8 @@ def select_analogs_theiler(
 
 # (``_rolling_hurst`` lived here. It fed a "Hurst" matching feature that was
 # effectively constant on a price series — see _build_feature_frame — and had no
-# other caller. The DFA estimator itself remains in analytics.hurst, where its
-# short-memory bias is documented.)
+# other caller. The DFA estimator went with it in 2.8.0: it read 0.99 on every
+# target and fed nothing else.)
 
 
 def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFrame, list[str]]:
@@ -152,7 +150,10 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
     tracks what the engines publish (availability-guarded throughout):
       • Momentum     — trailing ``mom_window``-day log-return of the target Price
       • Realized Vol — rolling σ of daily log-returns over ``mom_window``
-      • NetBreadth   — OversoldBreadth − OverboughtBreadth (Swayam agreement)
+      • NetBreadth   — Mūla's WINDOW breadth: the share of its lookback
+                       windows reading the gap cheap minus the share reading it
+                       rich (``OversoldBreadth − OverboughtBreadth``). Not
+                       Swayam's view breadth — that is not in ``ts_data``
       • FVO          — the valuation oscillator: how rich or cheap the target is
                        versus the level the global cross-section implies, in units
                        of the engine's own predictive SD
@@ -160,9 +161,9 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
                        [0,1]. The same mispricing in a crisis and in a calm tape
                        are not the same state, and nothing else here carries that
       • Confidence   — the engine's own gate on whether the valuation is worth
-                       acting on (mean-reversion evidence x cross-sectional
-                       agreement). Distinguishes a -2 sigma gap the cross-section
-                       agrees about from one it is split on
+                       acting on (price-side reversion evidence x cross-sectional
+                       agreement, geometric mean). Distinguishes a -2 sigma gap
+                       the cross-section agrees about from one it is split on
 
     FVO is the addition that matters. The matcher previously read only price
     dynamics and breadth, so it would happily call two dates analogous while the
@@ -178,14 +179,13 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
 
       • GapPercentile — r = +0.94 with FVO. The same information twice, which
         does not add a dimension so much as double-weight an existing one.
-      • MRProb        — sd 0.006 around a mean of 1.00. After thousands of
-        sessions the gap's stationarity is a settled question, so the column is
-        a constant; a constant contributes nothing to a distance except a
-        near-singular covariance direction.
+      • MRProb        — already inside Confidence (with cross-sectional
+        agreement); matching it separately would spend a dimension on half of
+        a feature that is already there.
       • ExplainedVar / KFactors — cv 0.10 and 13 distinct values. Properties of
         the factor model's internal state, not of the market's.
-      • Rolling DFA Hurst — dropped outright. ``analytics.hurst.hurst_dfa``
-        saturates near its 0.99 clip for anything close to a random walk, so
+      • Rolling DFA Hurst — dropped outright. The DFA estimator
+        saturated near its 0.99 clip for anything close to a random walk, so
         across a price series it was very nearly a constant too.
       • AvgZ — dropped from MATCHING by the tuning study (10d recent IC
         -0.010 → +0.034 without it), but still carried for display.
@@ -198,6 +198,20 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
 
     df = ts.reset_index(drop=True).copy()
     price = pd.to_numeric(df["Price"], errors="coerce").to_numpy(dtype=np.float64)
+    # What the engine PUBLISHED on each row. ``Valid`` is False through the
+    # burn-in AND on a forming (provisional) session, but the provisional one
+    # is published — it is the row the hero's claim is made from — so the
+    # feature masks below keep it, while the candidate POOL (``ValidRow``)
+    # keeps only settled rows. Masking the provisional row too used to blank
+    # today's FVO, stress and confidence, which the matcher then filled with
+    # 0.0: on any intraday run, Precedent matched a "fairly valued, calmest
+    # ever" state that did not exist.
+    if "Valid" in df.columns:
+        published = df["Valid"].astype(bool).to_numpy()
+        if "Provisional" in df.columns:
+            published = published | df["Provisional"].fillna(False).astype(bool).to_numpy()
+    else:
+        published = np.ones(len(df), dtype=bool)
     log_ret = pd.Series(np.log(np.where(price > 0, price, np.nan))).diff()
 
     feat = pd.DataFrame(index=df.index)
@@ -214,16 +228,13 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
         # there so the analog historical pool excludes the warm-up (median-fill
         # in find_similar_periods then treats it as missing, matching every
         # other NaN-guarded consumer of this engine output).
-        if "Valid" in df.columns:
-            feat.loc[~df["Valid"].astype(bool), "NetBreadth"] = np.nan
+        feat.loc[~published, "NetBreadth"] = np.nan
     # The FVO oscillator — the valuation state. Masked to published rows for
     # the same reason NetBreadth is: the engine's burn-in carries no valuation,
     # and a fabricated 0.0 there would read as "fairly valued" rather than as
     # "not yet valued".
     if "FVO" in df.columns:
-        _fvo = pd.to_numeric(df["FVO"], errors="coerce")
-        if "Valid" in df.columns:
-            _fvo = _fvo.where(df["Valid"].astype(bool))
+        _fvo = pd.to_numeric(df["FVO"], errors="coerce").where(published)
         feat["FVO"] = _fvo.to_numpy(dtype=np.float64)
 
     # Regime context + valuation trustworthiness. Both are already [0,1] and
@@ -232,26 +243,28 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
     # "calm, and certain about it".
     for _src, _dst in (("Stress", "Stress"), ("Confidence", "Confidence")):
         if _src in df.columns:
-            _c = pd.to_numeric(df[_src], errors="coerce")
-            if "Valid" in df.columns:
-                _c = _c.where(df["Valid"].astype(bool))
+            _c = pd.to_numeric(df[_src], errors="coerce").where(published)
             feat[_dst] = _c.to_numpy(dtype=np.float64)
 
     # ── V2 engine state (MŪLA), availability-guarded ───────────────────
     # Appended only when the columns exist (i.e. the run used the MŪLA
     # valuation core), so a legacy ts_data produces the exact legacy set.
-    #   ExpertW   — MŪLA's pooled weight on valuation-containing designs:
-    #               distinguishes "2σ rich AND the ECM agrees it pays to fade"
-    #               from "2σ rich while momentum owns this tape"
-    #   GapSpeed  — the ECM reversion speed κ̂: fast-κ gaps are states whose
-    #               analogs resolve quickly; slow-κ ones are not the same
-    #               state even at identical FVO
-    for _src, _dst in (("WValuation", "ExpertW"), ("MulaKappa", "GapSpeed")):
-        if _src in df.columns:
-            _c = pd.to_numeric(df[_src], errors="coerce")
-            if "Valid" in df.columns:
-                _c = _c.where(df["Valid"].astype(bool))
-            feat[_dst] = _c.to_numpy(dtype=np.float64)
+    #   ExpertW   — MŪLA's pooled weight on every valuation-containing
+    #               design (WValuation + WFull — the same "valuation-led"
+    #               total the hero's reversion gate reads): distinguishes "2σ
+    #               rich AND the ECM agrees it pays to fade" from "2σ rich
+    #               while momentum owns this tape"
+    #   GapSpeed  — the ECM's price-side reversion speed κ̂: fast-κ gaps are
+    #               states whose analogs resolve quickly; slow-κ ones are not
+    #               the same state even at identical FVO
+    if "WValuation" in df.columns:
+        _ew = pd.to_numeric(df["WValuation"], errors="coerce")
+        if "WFull" in df.columns:
+            _ew = _ew + pd.to_numeric(df["WFull"], errors="coerce").fillna(0.0)
+        feat["ExpertW"] = _ew.where(published).to_numpy(dtype=np.float64)
+    if "MulaKappa" in df.columns:
+        feat["GapSpeed"] = (pd.to_numeric(df["MulaKappa"], errors="coerce")
+                            .where(published).to_numpy(dtype=np.float64))
 
     feature_cols = [c for c in ("Momentum", "RealizedVol", "NetBreadth", "FVO",
                                 "Stress", "Confidence", "ExpertW", "GapSpeed")
@@ -272,6 +285,7 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
         feat["AvgZ"] = pd.to_numeric(df["AvgZ"], errors="coerce").to_numpy(dtype=np.float64)
     if "Valid" in df.columns:
         feat["ValidRow"] = df["Valid"].astype(bool).to_numpy()
+    feat["Published"] = published
     return feat, feature_cols
 
 
@@ -279,7 +293,13 @@ def _build_feature_frame(ts: pd.DataFrame, mom_window: int) -> tuple[pd.DataFram
 #: Kish ESS, not a raw count — ten analogs of which one carries most of the
 #: weight is not ten observations, and reporting "70% positive, n=10" for it
 #: would be the single most misleading thing this module could say.
-MIN_EFFECTIVE_N = 4.0
+#:
+#: ONE number for every reader. The hero's precedent gate used to require 8
+#: effective analogs while this module called 4 "usable", so the Precedent page
+#: could print a full-colour base rate the hero had just called "too few to
+#: read". 8 — below it, a "% positive" is a handful of coin flips. The hero
+#: imports this constant and reads ``usable`` rather than re-deciding.
+MIN_EFFECTIVE_N = 8.0
 
 #: Kernel bandwidth as a fraction of the pool's own median distance. Weights
 #: fall to ~0.6 at the median distance and ~0.1 at twice it, so "similar"
@@ -310,6 +330,78 @@ KERNEL_BANDWIDTH = 0.5
 UNPRECEDENTED_P = 0.999
 
 
+def _match(
+    pool_F: np.ndarray,
+    current: np.ndarray,
+    pool_pos: np.ndarray,
+    *,
+    gap: int,
+    top_n: int,
+    bandwidth: float = KERNEL_BANDWIDTH,
+) -> dict | None:
+    """The one analog estimator: distance, kernel weights, Theiler selection.
+
+    ``pool_F`` is the candidate states (rows) × features, ``current`` the state
+    to match, ``pool_pos`` each candidate's TEMPORAL row position (the Theiler
+    window is applied in time, not in array offsets). Missing values are filled
+    with the POOL's own column medians — the candidate's and the current
+    state's alike; filling the current state with 0.0 instead (as the live
+    matcher did) put a reading that never existed at the centre of the match.
+
+    Returns ``{"accepted", "weights", "distance", "median_distance",
+    "nearest", "unprecedented"}`` (``accepted`` = offsets into the pool,
+    best-first) or ``None`` when no finite distance exists. Used by both
+    :func:`find_similar_periods` (the live base rate) and
+    :func:`analog_prediction_series` (its walk-forward), so the skill the
+    Precedent page reports is the skill of the estimator the hero reads.
+    """
+    Fp = np.array(pool_F, dtype=np.float64, copy=True)
+    cur = np.array(current, dtype=np.float64, copy=True)
+    for j in range(Fp.shape[1]):
+        col = Fp[:, j]
+        ok = np.isfinite(col)
+        med = float(np.median(col[ok])) if ok.any() else 0.0
+        col[~ok] = med
+        if not np.isfinite(cur[j]):
+            cur[j] = med
+    cov = np.cov(Fp, rowvar=False)
+    if cov.ndim < 2:
+        cov = np.array([[max(float(cov), 1e-6)]])
+    dist = mahalanobis_distance_batch(Fp, cur, cov)
+    dist = np.where(np.isfinite(dist), dist, np.inf)
+    finite = dist[np.isfinite(dist)]
+    if not len(finite):
+        return None
+    med_d = float(np.median(finite))
+    h = max(float(bandwidth) * med_d, 1e-9)
+    weights = np.exp(-0.5 * (dist / h) ** 2)
+    weights = np.where(np.isfinite(weights), weights, 0.0)
+    # Is even the closest historical state implausibly far? Calibrated against
+    # chi2(df = n features): the verdict is about today's position in the
+    # historical DISTRIBUTION, not relative to its own distance spread.
+    nearest = float(np.min(dist))
+    crit = float(chi2.ppf(UNPRECEDENTED_P, df=max(1, Fp.shape[1])))
+    accepted = select_analogs_theiler(weights, int(top_n), int(gap), positions=pool_pos)
+    return {"accepted": accepted, "weights": weights, "distance": dist,
+            "median_distance": med_d, "nearest": nearest,
+            "unprecedented": bool(nearest ** 2 > crit)}
+
+
+def _current_position(feat: pd.DataFrame) -> int:
+    """Row of the state to match: the newest one the engine PUBLISHED.
+
+    That is the row the hero's claim is made from. When the newest session is
+    withheld (an incomplete fetch on a closed session), its valuation features
+    are NaN, and matching it would be matching a state the system declined to
+    publish — so the base rate is read for the same session the claim is.
+    """
+    if "Published" in feat.columns and "FVO" in feat.columns:
+        ok = feat["Published"].to_numpy(dtype=bool) & np.isfinite(feat["FVO"].to_numpy(dtype=np.float64))
+        if ok.any():
+            return int(np.flatnonzero(ok)[-1])
+    return len(feat) - 1
+
+
 def find_similar_periods(
     ts: pd.DataFrame,
     target_col: str,
@@ -338,16 +430,12 @@ def find_similar_periods(
     near-equally weighted by construction, so n_eff would read ~10 no matter
     how thin the real evidence was. The caller slices for the cards.
 
-    Candidates are drawn from genuinely-valued history only (burn-in rows
-    excluded), exclude the tail whose forward window has not closed, and are
-    selected under a Theiler window so each is a distinct episode rather than
-    ten adjacent days of one.
-
-    What was dropped: the trajectory-cosine and recency-decay scoring terms.
-    Both had shipped at weight 0.0 since the analog re-tune — ~50 lines of
-    arithmetic multiplied by zero on every call — and a blend weight that is
-    always zero is not a tuning knob, it is a deleted feature that still costs
-    a code path.
+    Candidates are drawn from settled, genuinely-valued history only (burn-in
+    and provisional rows excluded), exclude the tail whose forward window has
+    not closed, and are selected under a Theiler window so each is a distinct
+    episode rather than ten adjacent days of one. The state matched is the
+    newest PUBLISHED session (see :func:`_current_position`); every analog
+    carries its date as ``_asof``.
     """
     feat, feature_cols = _build_feature_frame(ts, mom_window)
     if feat.empty or len(feature_cols) < 2:
@@ -355,68 +443,40 @@ def find_similar_periods(
 
     n = len(feat)
     purge = int(max(hold_horizons)) if hold_horizons else 20
-    # Exclude the tail: those rows have no realized forward path yet.
+    # Exclude the tail: those rows have no realized forward path yet. The
+    # frame keeps its RangeIndex labels, so `historical.index` remains the
+    # TEMPORAL row position — the forward-return lookups and the Theiler gap
+    # below both rely on that.
     historical = feat.iloc[:n - purge].copy()
-    # Exclude the engine's burn-in rows from the candidate pool (ValidRow
-    # False): their breadth and valuation columns are genuinely missing, and
-    # matching against a median-filled fabrication is not a state match. The
-    # frame keeps its original RangeIndex labels, so `historical.index` remains
-    # the TEMPORAL row position — the forward-return lookups and the Theiler
-    # gap below both rely on that.
     if "ValidRow" in historical.columns:
         historical = historical[historical["ValidRow"]]
     if len(historical) < 30:
         return []
 
-    latest = feat.iloc[-1]
-    current_vec = latest[feature_cols].to_numpy(dtype=np.float64)
-    # .copy() is load-bearing: on Streamlit Cloud DataFrame.to_numpy() can return
-    # a READ-ONLY view (consolidated/cached buffers), and the median-fill below
-    # writes in place → "assignment destination is read-only" without it.
-    hist_matrix = historical[feature_cols].to_numpy(dtype=np.float64).copy()
-    for col in range(hist_matrix.shape[1]):
-        col_data = hist_matrix[:, col]
-        valid = np.isfinite(col_data)
-        median_val = np.median(col_data[valid]) if valid.any() else 0.0
-        hist_matrix[~valid, col] = median_val
-    current_vec = np.where(np.isfinite(current_vec), current_vec, 0.0)
-
-    # ── Covariance-aware distance ───────────────────────────────────────
-    cov_matrix = np.cov(hist_matrix, rowvar=False)
-    if cov_matrix.ndim < 2:
-        cov_matrix = np.array([[max(float(cov_matrix), 1e-6)]])
-    dist = mahalanobis_distance_batch(hist_matrix, current_vec, cov_matrix)
-    dist = np.where(np.isfinite(dist), dist, np.inf)
-
-    # ── Kernel weights, scaled to the pool's own distance distribution ──
-    finite = dist[np.isfinite(dist)]
-    if not len(finite):
+    cur_pos = _current_position(feat)
+    gap = max(int(mom_window), purge)
+    m = _match(historical[feature_cols].to_numpy(dtype=np.float64),
+               feat.iloc[cur_pos][feature_cols].to_numpy(dtype=np.float64),
+               historical.index.to_numpy(), gap=gap, top_n=top_n, bandwidth=bandwidth)
+    if m is None:
         return []
-    med_d = float(np.median(finite))
-    h = max(bandwidth * med_d, 1e-9)
-    weights = np.exp(-0.5 * (dist / h) ** 2)
-    weights = np.where(np.isfinite(weights), weights, 0.0)
-
-    # Is even the closest historical state implausibly far? Calibrated against
-    # chi2(df = n features), so the verdict is about today's position in the
-    # historical DISTRIBUTION rather than relative to its own distance spread.
-    nearest = float(np.min(dist))
-    _crit = float(chi2.ppf(UNPRECEDENTED_P, df=max(1, len(feature_cols))))
-    unprecedented = bool(nearest ** 2 > _crit)
-
-    historical = historical.copy()
-    historical["similarity"] = weights
-    historical["distance"] = dist
-
-    # ── Theiler exclusion: distinct EPISODES, not adjacent days ─────────
-    gap = max(int(mom_window), int(max(hold_horizons)) if hold_horizons else 20)
-    positions = historical.index.to_numpy()
-    accepted = select_analogs_theiler(weights, top_n, gap, positions=positions)
+    historical["similarity"] = m["weights"]
+    historical["distance"] = m["distance"]
 
     price_all = feat["Price"].to_numpy(dtype=np.float64)
+    asof = feat["Date"].iloc[cur_pos]
     results: list[dict] = []
-    for j in accepted:
-        row = historical.iloc[j] if not isinstance(j, (np.integer, int)) else historical.iloc[int(j)]
+
+    def _num(r, key, default=0.0):
+        v = r.get(key)
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return default
+        return v if np.isfinite(v) else default
+
+    for j in m["accepted"]:
+        row = historical.iloc[int(j)]
         pos = int(historical.index[int(j)])
         fwd: dict[int, float | None] = {}
         for hh in hold_horizons:
@@ -426,15 +486,6 @@ def find_similar_periods(
                 fwd[hh] = float((price_all[tgt] / price_all[pos] - 1.0) * 100.0)
             else:
                 fwd[hh] = None
-
-        def _num(r, key, default=0.0):
-            v = r.get(key)
-            try:
-                v = float(v)
-            except (TypeError, ValueError):
-                return default
-            return v if np.isfinite(v) else default
-
         d = row["Date"]
         price_at = float(row["Price"]) if row["Price"] and row["Price"] > 0 else None
         results.append({
@@ -453,9 +504,11 @@ def find_similar_periods(
             "fwd": {int(hh): fwd[int(hh)] for hh in hold_horizons},
             # Pool-level context, identical on every returned analog — carried
             # here so summarize_forward needs no second pass over the pool.
-            "_pool_median_distance": med_d,
-            "_unprecedented": unprecedented,
-            "_nearest_distance": nearest,
+            "_pool_median_distance": m["median_distance"],
+            "_unprecedented": m["unprecedented"],
+            "_nearest_distance": m["nearest"],
+            "_asof": (pd.Timestamp(asof).strftime("%Y-%m-%d")
+                      if not isinstance(asof, (int, np.integer)) else str(asof)),
         })
     return results
 
@@ -534,101 +587,90 @@ def analog_prediction_series(
     hold_horizon: int,
     *,
     mom_window: int = 20,
-    top_n: int = 10,
+    top_n: int = 40,
     step: int | None = None,
+    gap: int | None = None,
+    bandwidth: float = KERNEL_BANDWIDTH,
 ) -> pd.DataFrame:
-    """Historical analog predictions over time — what the matcher would have
-    predicted at each past as-of date, using only information available then.
+    """What the matcher would have said at each past as-of date, using only
+    what was known then — the walk-forward of the LIVE estimator.
 
     At each as-of position ``t`` (strided every ``step`` rows, default =
     ``hold_horizon`` so consecutive evaluations are NON-overlapping):
-      • Candidate pool = rows with position ``p <= t - hold_horizon`` — the
-        analog's forward outcome window ``[p, p+H]`` has fully COMPLETED by
-        ``t``, so the prediction never peeks at an unrealized outcome
-        (mirrors research/hero_study.py's convention).
-      • Engine warm-up rows (``ValidRow`` False — fabricated NetBreadth) are
-        excluded from both the pool and the as-of grid, matching
-        ``find_similar_periods``.
-      • NaN cleaning uses POOL-ONLY column medians per as-of date — a
-        full-sample median would leak future distribution shape into past
-        cleaning (the look-ahead class audit finding F14 removed elsewhere).
-      • Scoring/selection = the SHIPPED config: pure Mahalanobis (ANALOG_W_*
-        1/0/0) under the same Theiler exclusion gap as the live matcher.
+      • the candidate pool is settled rows with ``p + H <= t`` — every
+        analog's forward window has closed by ``t``, so no prediction peeks at
+        an unrealized outcome;
+      • matching is :func:`_match` — the same kernel weights, Theiler window
+        and pool-median imputation as :func:`find_similar_periods`, which this
+        used to differ from on four counts (a linear ``1 - d/dmax``
+        similarity, top 10 instead of 40, an unweighted median, a per-horizon
+        Theiler gap). The skill printed beside a base rate has to be the skill
+        of that base rate's estimator;
+      • ``gap`` defaults to ``max(mom_window, H)``; pass the live matcher's
+        ``max(mom_window, max(precedent horizons))`` to reproduce it exactly
+        (:func:`analog_skill_by_horizon` does).
 
-    Returns a DataFrame with columns:
-      ``Date``      — the as-of date,
-      ``Predicted`` — analog-median +``hold_horizon``d forward return (%),
-      ``Realized``  — the target's actual +``hold_horizon``d return from that
-                      date (%; NaN for the last as-of dates whose window
-                      hasn't completed — the live predictions).
-    The final row is always the LATEST valid as-of date (appended off-stride
-    if needed) so the series ends at the same prediction the Precedent tab's
-    live cards show. Empty DataFrame when there is insufficient history.
+    Columns: ``Date``; ``Predicted`` — the kernel-weighted median +H return
+    (%); ``PositivePct`` — the kernel-weighted share of analogs that rose (the
+    number the hero's precedent gate reads); ``Realized`` — the actual +H
+    return (%; NaN while its window is open). The final row is always the
+    latest published as-of date, appended off-stride if needed, so the series
+    ends at the prediction the Precedent page shows.
     """
     feat, feature_cols = _build_feature_frame(ts, mom_window)
     if feat.empty or len(feature_cols) < 2:
-        return pd.DataFrame(columns=["Date", "Predicted", "Realized"])
+        return pd.DataFrame(columns=["Date", "Predicted", "PositivePct", "Realized"])
 
     H = int(hold_horizon)
     step = int(step) if step else H
+    gap = int(gap) if gap else max(int(mom_window), H, 1)
     n = len(feat)
     F_all = feat[feature_cols].to_numpy(dtype=np.float64)
     price = feat["Price"].to_numpy(dtype=np.float64)
     dates = feat["Date"].to_numpy()
     valid_row = (feat["ValidRow"].to_numpy(dtype=bool)
                  if "ValidRow" in feat.columns else np.ones(n, dtype=bool))
-    gap = max(int(mom_window), H, 1)
+    published = (feat["Published"].to_numpy(dtype=bool)
+                 if "Published" in feat.columns else valid_row)
 
     start = max(mom_window + 30, H + 30)
     as_of_grid = list(range(start, n, step))
-    if as_of_grid and as_of_grid[-1] != n - 1:
-        as_of_grid.append(n - 1)   # always include the latest as-of date
+    last = _current_position(feat)
+    if last >= start and (not as_of_grid or as_of_grid[-1] != last):
+        as_of_grid = [t for t in as_of_grid if t < last] + [last]
 
     rows: list[dict] = []
     for t in as_of_grid:
-        if not valid_row[t]:
-            continue                       # as-of state itself is warm-up fabrication
+        if not published[t]:
+            continue                       # nothing was published for this state
         pool_end = t + 1 - H               # outcomes completed by t (p + H <= t)
         if pool_end < 30:
             continue
         pool_pos = np.flatnonzero(valid_row[:pool_end])
         if len(pool_pos) < 30:
             continue
-
-        Fp = F_all[pool_pos].copy()
-        cur = F_all[t].copy()
-        # Pool-only median fill (causal cleaning).
-        for j in range(Fp.shape[1]):
-            col = Fp[:, j]
-            ok = np.isfinite(col)
-            med = float(np.median(col[ok])) if ok.any() else 0.0
-            Fp[~ok, j] = med
-            if not np.isfinite(cur[j]):
-                cur[j] = med
-
-        cov = np.cov(Fp, rowvar=False)
-        if cov.ndim < 2:
-            cov = np.array([[max(float(cov), 1e-6)]])
-        dist = mahalanobis_distance_batch(Fp, cur, cov)
-        dmax = dist.max() if dist.max() > 0 else 1.0
-        sim = 1.0 - dist / dmax
-
-        accepted = select_analogs_theiler(sim, top_n, gap, positions=pool_pos)
-        sel = pool_pos[accepted]
-        fwd = [(price[p + H] / price[p] - 1) * 100.0
-               for p in sel if price[p] > 0]          # p + H <= t < n always
-        if not fwd:
+        m = _match(F_all[pool_pos], F_all[t], pool_pos, gap=gap, top_n=top_n,
+                   bandwidth=bandwidth)
+        if m is None:
             continue
-
+        sel = m["accepted"]
+        pos = pool_pos[sel]
+        w = m["weights"][sel]
+        ok = (price[pos] > 0) & (w > 0)
+        if not ok.any():
+            continue
+        fwd = (price[pos[ok] + H] / price[pos[ok]] - 1.0) * 100.0   # p + H <= t < n
+        wk = w[ok]
         realized = ((price[t + H] / price[t] - 1) * 100.0
                     if (t + H < n and price[t] > 0) else np.nan)
         rows.append({
             "Date": pd.Timestamp(dates[t]) if not isinstance(dates[t], (int, np.integer)) else dates[t],
-            "Predicted": float(np.median(fwd)),
+            "Predicted": _weighted_quantile(fwd, wk, 0.50),
+            "PositivePct": float(wk[fwd > 0].sum() / wk.sum() * 100.0),
             "Realized": float(realized) if np.isfinite(realized) else np.nan,
         })
 
-    return pd.DataFrame(rows, columns=["Date", "Predicted", "Realized"])
+    return pd.DataFrame(rows, columns=["Date", "Predicted", "PositivePct", "Realized"])
 
 
 def analog_skill_by_horizon(
@@ -637,71 +679,67 @@ def analog_skill_by_horizon(
     hold_horizons: tuple[int, ...],
     *,
     mom_window: int = 20,
-    top_n: int = 10,
+    top_n: int = 40,
     min_windows: int = 10,
 ) -> dict[int, dict]:
     """Walk-forward analog SKILL at every hold horizon — the term structure the
-    Precedent tab plots so the read isn't pinned to a single lens horizon.
+    Precedent page plots, so the read isn't pinned to a single horizon.
 
-    For each ``H`` in ``hold_horizons`` runs :func:`analog_prediction_series`
-    (the same causal, non-overlapping, pool-only-cleaned walk-forward the
-    single-horizon plot uses) and scores its COMPLETED windows:
+    For each ``H`` runs :func:`analog_prediction_series` with the LIVE
+    matcher's Theiler gap (``max(mom_window, max(hold_horizons))``) and scores
+    its completed, non-overlapping windows:
 
-      ``ic``   — Spearman rank IC of analog-predicted vs realized +H returns,
-      ``hit``  — directional hit-rate (% of windows where sign matched), in [0,100],
-      ``n``    — number of completed (realized) non-overlapping windows,
-      ``pval`` — two-sided Spearman p-value (``nan`` when ``n < min_windows``),
-      ``df``   — the full predicted/realized frame (for the detail timeseries).
+      ``ic``     — Spearman rank IC of the predicted median vs realized +H,
+      ``ic_pos`` — the same for ``PositivePct − 50`` (the precedent gate's
+                   directional read),
+      ``hit``    — directional hit rate of the median, in [0, 100],
+      ``base`` / ``edge`` — the majority-direction rate on the same windows,
+                   and ``hit − base``,
+      ``n``      — completed windows; ``pval`` — two-sided p of ``ic``;
+      ``df``     — the predicted/realized frame.
 
-    ``ic``/``hit``/``pval`` are ``nan`` until at least ``min_windows`` completed
-    windows exist, so a horizon with too little realized history reads as "no
-    estimate" rather than a noise number. Keyed by horizon; horizons that yield
-    an empty walk-forward are omitted.
+    Statistics are ``nan`` until ``min_windows`` windows have completed, so a
+    horizon with too little realized history reads as "no estimate".
+    Horizons that yield an empty walk-forward are omitted.
     """
     from scipy.stats import spearmanr as _spearmanr
 
     out: dict[int, dict] = {}
+    gap = max(int(mom_window), int(max(hold_horizons)) if hold_horizons else 20)
     for h in hold_horizons:
         H = int(h)
         df = analog_prediction_series(
-            ts, target_col, H, mom_window=mom_window, top_n=top_n,
+            ts, target_col, H, mom_window=mom_window, top_n=top_n, gap=gap,
         )
         if df.empty:
             continue
         pred = df["Predicted"].to_numpy(dtype=np.float64)
+        ppos = df["PositivePct"].to_numpy(dtype=np.float64) - 50.0
         real = df["Realized"].to_numpy(dtype=np.float64)
         done = np.isfinite(real) & np.isfinite(pred)
         n_done = int(done.sum())
-        ic = hit = pval = float("nan")
+        ic = ic_pos = hit = pval = float("nan")
         base = edge = float("nan")
         if n_done >= int(min_windows):
             _ic, _pv = _spearmanr(pred[done], real[done])
             ic = float(_ic) if np.isfinite(_ic) else float("nan")
             pval = float(_pv) if np.isfinite(_pv) else float("nan")
+            _icp, _ = _spearmanr(ppos[done], real[done])
+            ic_pos = float(_icp) if np.isfinite(_icp) else float("nan")
             hit = float(np.mean(np.sign(pred[done]) == np.sign(real[done])) * 100.0)
 
             # THE HIT RATE'S OWN NULL, reported beside it.
             #
-            # `hit` alone is unreadable, and reads FLATTERINGLY wrong. A 50%
-            # directional hit rate looks like a coin flip — neutral, no harm
-            # done — but the benchmark is not 50%. It is the unconditional
-            # majority direction of the SAME realized windows, which on a
-            # trending asset is well above half: measured 2026-08-17 the base
-            # rate was 57.8% (Gold) and 53.5-57.0% (Copper), while the matcher
-            # scored 43.0-51.8%. Every horizon tested was WORSE than always
-            # predicting the majority direction, and nothing on screen said so.
-            #
-            # This is the same failure the convergence agreement tooltip had —
-            # a number judged against an assumed 50% null that was never its
-            # null — so the null now travels with the number rather than being
-            # something a reader is expected to know.
-            #
-            # `edge` is the honest headline: hit minus what a constant
-            # prediction would have scored. Negative means the matching added
-            # nothing over ignoring the state entirely.
+            # A 50% hit rate looks like a coin flip, but the benchmark is the
+            # unconditional majority direction of the SAME realized windows,
+            # which on a trending asset is well above half: measured
+            # 2026-08-17 the base rate was 57.8% (Gold) and 53.5-57.0%
+            # (Copper) while the matcher scored 43.0-51.8% — worse than always
+            # predicting the majority direction, with nothing on screen saying
+            # so. `edge` = hit − that null is the honest headline.
             up = float(np.mean(real[done] > 0))
             base = float(max(up, 1.0 - up) * 100.0)
             edge = float(hit - base)
-        out[H] = {"ic": ic, "hit": hit, "base": base, "edge": edge,
+        out[H] = {"ic": ic, "ic_pos": ic_pos, "hit": hit, "base": base, "edge": edge,
                   "n": n_done, "pval": pval, "df": df}
     return out

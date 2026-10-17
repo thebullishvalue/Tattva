@@ -382,7 +382,7 @@ def chart_layout(
     margin: dict | None = None,
     responsive: bool = False,
 ) -> dict:
-    """Return a base Plotly layout dict for the Obsidian Quant theme.
+    """Return a base Plotly layout dict for the active Tattva appearance.
 
     Args:
         height: Fixed pixel height for the chart.
@@ -594,7 +594,7 @@ def apply_default_hover(fig, precision: int = 2) -> None:
 
 
 def inject_css(theme: str = "dark") -> None:
-    """Inject the Obsidian Quant Terminal CSS into the Streamlit app.
+    """Inject the Tattva design-system CSS into the Streamlit app.
 
     Loads from external theme.css file for maintainability. theme.css defines
     the canonical DARK token block; when ``theme == "light"`` a second, small
@@ -681,8 +681,3 @@ def progress_bar(slot, pct: int, label: str, sub: str = "") -> None:
         unsafe_allow_html=True,
     )
 
-
-def apply_chart_theme(fig) -> None:
-    """Apply the Obsidian Quant Terminal theme to a Plotly figure (mutates in place)."""
-    fig.update_layout(**chart_layout())
-    style_axes(fig)

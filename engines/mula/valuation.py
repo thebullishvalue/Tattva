@@ -18,9 +18,14 @@ time-varying long-run relation -- i.e. mispricing.  Two properties follow
 that a return-space regression cannot deliver:
 
 1. The residual is a *level*, so "fair value" is a price, not a forecast.
-2. If the relation is genuinely cointegrating, the residual is stationary
-   and its mean reversion is testable online -- which is exactly the gate
-   the decision layer needs to know whether valuation is informative today.
+2. If the relation is genuinely cointegrating, the residual is stationary.
+   Stationarity of the GAP is not the same claim as "price returns to fair
+   value", though: a gap closes when either side moves, and on real data
+   most of the closing is fair value moving toward price (measured: price
+   covers 9% / 2% / 24% of the daily gap closure on Gold / S&P 500 /
+   USD-INR). Whether PRICE responds to the gap is tested separately, by the
+   error-correction read in ``engines/mula/ecm.py``; this module publishes
+   the gap and its own persistence.
 
 Why a level regression and not a valuation model on fundamentals?  Because
 the question is relative pricing against the traded opportunity set, which
@@ -64,7 +69,7 @@ import pandas as pd
 
 from analytics.adaptive import AdaptiveThreshold
 from analytics.causal import (EPS, BatchDLM, DynamicModelAverage, EWMA,
-                              ExpandingRank, OnlineAR1, norm_cdf_scalar)
+                              ExpandingRank, OnlineAR1)
 from .factors import K_MAX, AdaptiveVolPanel, OnlineFactorModel
 from .blocks import block_membership
 from .regime import RegimeFilter
@@ -249,10 +254,10 @@ class MarketValuationEngine:
 
         # -- output buffers ------------------------------------------------
         out = {k: np.full(T, np.nan) for k in (
-            "fair_value", "gap", "pct_mispricing", "fvo", "pred_sd", "ci_lo",
-            "ci_hi", "resid_rmse", "k_factors", "explained_var", "corr_memory",
-            "t_eff", "confidence", "xs_consistency", "gap_halflife",
-            "mr_prob", "stress", "regime_stress", "regime_persistence",
+            "fair_value", "gap", "pct_mispricing", "fvo", "pred_sd", "fv_sd",
+            "ci_lo", "ci_hi", "resid_rmse", "k_factors", "explained_var",
+            "corr_memory", "t_eff", "xs_consistency", "gap_halflife",
+            "gap_phi", "stress", "regime_stress", "regime_persistence",
             "switch_prob", "regime_drift", "regime_entropy",
             "w_latent", "w_block", "gap_percentile", "adapt_memory",
             "factor_var_share", "loo_dispersion", "xs_dispersion",
@@ -386,15 +391,32 @@ class MarketValuationEngine:
                                prior_mean=pm_b)
 
             # ---- predict, then absorb (strict order) ------------------------
-            f_lat, q_lat = lat_bank.forecast(Flat)
-            f_blk, q_blk = blk_bank.forecast(Fblk)
+            f_lat, q_lat, qp_lat = lat_bank.forecast_parts(Flat)
+            f_blk, q_blk, qp_blk = blk_bank.forecast_parts(Fblk)
 
             w = np.exp(view_logw - view_logw.max())
             w = w / max(w.sum(), EPS)
             fv = float(w[0] * f_lat + w[1] * f_blk)
-            qv = float(w[0] * q_lat + w[1] * q_blk
-                       + w[0] * (f_lat - fv) ** 2 + w[1] * (f_blk - fv) ** 2)
+            view_spread = float(w[0] * (f_lat - fv) ** 2 + w[1] * (f_blk - fv) ** 2)
+            qv = float(w[0] * q_lat + w[1] * q_blk) + view_spread
+            # TWO SCALES, and they answer different questions.
+            #
+            # `sd` is the predictive SD of the next OBSERVED log price around
+            # the fitted level: parameter uncertainty PLUS the regression's own
+            # residual noise. It is the natural unit for the gap — "how many
+            # typical gaps away is price?" — so it stays the FVO denominator
+            # (published as GapScale).
+            #
+            # `fv_sd` drops the residual noise and keeps only what is uncertain
+            # about the LEVEL itself: the coefficients' posterior and the
+            # disagreement between the two views. That is what "Model Spread —
+            # how tightly is fair value pinned?" claims to be, and it is not
+            # what it was: measured on Gold, 95.6% of the old Model Spread's
+            # variance was the residual term (parameter SD ~66 bps against
+            # ~274 bps displayed), so the card was reporting the size of a
+            # typical gap and calling it uncertainty about fair value.
             sd = math.sqrt(max(qv, 1e-12))
+            fv_sd = math.sqrt(max(float(w[0] * qp_lat + w[1] * qp_blk) + view_spread, 0.0))
 
             gap = p - fv
             fvo = gap / sd
@@ -423,12 +445,22 @@ class MarketValuationEngine:
             phi, se = gap_ar.solve()
             resid_ewma.update(gap * gap)
 
+            # The gap's own persistence. `phi` is published (GapPhi) because the
+            # error-correction layer needs it to project the gap forward over
+            # the horizon; the half-life is the same number in days.
+            #
+            # (A "mean-reversion probability" P(phi < 1) used to be formed here
+            # and fed the Confidence score. After a few hundred sessions it read
+            # 1.000 on every row of every instrument measured — the gap's
+            # stationarity is not in doubt — so it gated nothing, and its label
+            # invited the reading "price reverts", which is the ECM's question,
+            # not this one's. Reversion evidence now comes from the price side;
+            # see engines/mula/ecm.py.)
             if np.isfinite(phi) and np.isfinite(se) and se > EPS:
-                mr_prob = norm_cdf_scalar((1.0 - phi) / se)
                 hl = (math.log(2.0) / -math.log(min(max(phi, 1e-6), 0.999999))
                       if 0 < phi < 1 else np.nan)
             else:
-                mr_prob, hl = np.nan, np.nan
+                hl = np.nan
 
             sgn = np.sign(gap)
             agree = float(np.mean(np.sign(loo_gaps) == sgn)) if sgn != 0 else 0.5
@@ -444,13 +476,6 @@ class MarketValuationEngine:
             agree_w = lam_s * agree_w + (1.0 - lam_s)
             xs_cons = max(0.0, 2.0 * (agree_ew / max(agree_w, EPS)) - 1.0)
             loo_disp = float(np.std(loo_gaps) / max(abs(gap), sd))
-
-            # The mean-reversion term is usually saturated at 1 -- after
-            # thousands of sessions the residual's stationarity is a settled
-            # question -- so it acts as a gate that only bites in the regime
-            # where the cointegrating relation has genuinely broken down.
-            conf = float(np.sqrt(max(mr_prob, 0.0) * max(xs_cons, 0.0))
-                         ) if np.isfinite(mr_prob) else np.nan
 
             beta_l = lat_bank.coef
             beta_b = blk_bank.coef
@@ -514,6 +539,7 @@ class MarketValuationEngine:
             out["pct_mispricing"][t] = pct
             out["fvo"][t] = fvo
             out["pred_sd"][t] = sd
+            out["fv_sd"][t] = fv_sd
             out["ci_lo"][t] = math.exp(fv - zc * sd)
             out["ci_hi"][t] = math.exp(fv + zc * sd)
             out["resid_rmse"][t] = math.sqrt(max(resid_ewma.mean, 0.0))
@@ -521,11 +547,10 @@ class MarketValuationEngine:
             out["explained_var"][t] = finfo["explained"]
             out["corr_memory"][t] = finfo["memory"]
             out["t_eff"][t] = finfo["t_eff"]
-            out["confidence"][t] = conf
             out["xs_consistency"][t] = xs_cons
             out["loo_dispersion"][t] = loo_disp
             out["gap_halflife"][t] = hl
-            out["mr_prob"][t] = mr_prob
+            out["gap_phi"][t] = phi
             out["stress"][t] = stress_c
             out["xs_dispersion"][t] = xs_disp
             out["xs_dispersion_pct"][t] = xs_disp_pct

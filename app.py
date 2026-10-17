@@ -2,9 +2,10 @@
 Tattva — Main Streamlit entrypoint.
 तत्त्व (Tattva) — "Principle / Essence"
 
-TATTVA — Two systems. One conclusion. A top-down macro forecast and a bottom-up
-basket regime read — across commodities, FX, and equity indices — unified by
-adaptive convergence.
+TATTVA — one claim, graded. Mūla values the instrument against the whole macro
+cross-section; Swayam reads its own internals; a conviction chain of independent
+gates says how far the claim can be trusted — across commodities, FX, crypto,
+equity indices and listed stocks.
 
 Usage:
     streamlit run app.py
@@ -14,13 +15,13 @@ from __future__ import annotations
 
 import os
 
-# ── BLAS thread pinning (MUST run before numpy/sklearn import) ────────────────
-# The walk-forward fits hundreds of small models sequentially. On Streamlit
-# Community Cloud the container is throttled to ~1 shared vCPU but the host
-# reports many logical CPUs, so OpenBLAS/MKL spawn one thread per reported core
-# and thrash — turning each tiny PCA/Ridge solve into a thread-contention storm
-# (the #1 reason the walk-forward is far slower on cloud than locally). One
-# thread per process is strictly faster for many-small-matrix workloads here.
+# ── BLAS thread pinning (MUST run before numpy import) ────────────────────────
+# The recursive engines solve thousands of small linear systems in sequence
+# (one per session per discount-grid member). On Streamlit Community Cloud the
+# container is throttled to ~1 shared vCPU but the host reports many logical
+# CPUs, so OpenBLAS/MKL spawn one thread per reported core and thrash on every
+# tiny solve. One thread per process is strictly faster for many-small-matrix
+# workloads like this.
 # os.environ.setdefault → respects any explicit override from the environment.
 for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
@@ -91,6 +92,9 @@ from ui.components import (
     render_top_bar,
     render_notice_rail,
     render_rail_readout,
+    format_conviction,
+    window_cutoff,
+    GATE_TITLES,
 )
 from ui.tabs.tab_mula import render_mula_tab
 from ui.tabs.tab_swayam import render_swayam_tab
@@ -99,37 +103,27 @@ from ui.tabs.tab_data import render_data_tab
 from ui.tabs.tab_precedent import render_precedent_tab
 
 # ── Data ─────────────────────────────────────────────────────────────────────
-from data.fetcher import fetch_constituent_ohlcv, fetch_macro_live, fetch_commodity_dataset, fetch_stock_target_series
+from data.fetcher import fetch_ohlcv, fetch_commodity_dataset, fetch_stock_target_series, is_yfinance_ticker
 from data.calendars import trading_days_behind, is_session, session_mask, resolve_exchange
 from data.universe import resolve_stock_symbol
 
 # ── Engines ──────────────────────────────────────────────────────────────────
-from engines.mula import FairValueEngine
+# Mūla (valuation, with its error-correction layer) and Swayam (breadth). There
+# is no engine selector and no fallback: the import guard that used to sit
+# here could not do what it promised — FairValueEngine lives in the same
+# package, so a broken engines.mula failed on the line above the guard.
+from engines.mula import MulaEngine, FairValueEngine
 from engines.mula.blocks import block_membership
 from engines.swayam import aggregate_views
 from engines.swayam.kernel import view_skill_weights
 
-# ── Valuation engine (MŪLA) ─────────────────────────────────────────────────
-# MulaEngine SUBCLASSES FairValueEngine, so every isinstance check and cache
-# path downstream works unchanged. Engine 2 is Swayam, unchanged. There is no
-# engine selector: this import guard exists only so that a broken or missing
-# engines.mula package degrades silently to the pipeline core (no ECM layer)
-# instead of taking the app down.
-try:
-    from engines.mula import MulaEngine
-    _HAS_V2_ENGINES = True
-except Exception:  # pragma: no cover — degraded environments only
-    MulaEngine = None
-    _HAS_V2_ENGINES = False
-
 # ── Convergence ──────────────────────────────────────────────────────────────
 from convergence.cross_validator import CrossValidator
-from convergence.conviction_model import UnifiedConvictionModel
 from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import LOOKBACK_WINDOWS, MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, TARGET_EXCLUDED_PREDICTORS, ALL_TARGETS, TARGET_CATEGORIES, is_stock_target, FORECAST_HORIZON, RAW_YIELD_PREDICTORS, DIV_LOOKBACK, TIMEFRAME_TRADING_DAYS, swayam_macro_columns, FREEFORM_STOCK_CATEGORIES, register_stock_target, get_instrument_config
+from core.config import MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, ALL_TARGETS, TARGET_CATEGORIES, is_stock_target, STOCK_TARGET_MARKETS, FORECAST_HORIZON, RAW_YIELD_PREDICTORS, DIV_LOOKBACK, TIMEFRAME_TRADING_DAYS, swayam_macro_columns, FREEFORM_STOCK_CATEGORIES, register_stock_target, get_instrument_config
 from engines.swayam import build_swayam_frames, effective_member_count, default_swayam_members
 from core.config import GLOBAL_MACRO_MAP, MACRO_SYMBOLS_YF, INDEX_TARGETS_MAP
 
@@ -144,68 +138,60 @@ _COLUMN_TICKERS = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF, **INDEX_TARGETS_MAP, 
 # snapshot them per cache_key so revisiting a previously-computed config (e.g.
 # the user switches Gold → Silver → Gold) restores instantly instead of
 # recomputing the whole 5-phase pipeline. Bounded (LRU) to cap memory.
+#
+# THE RULE: every per-target value a page reads is either one of these keys or
+# derived from one. `mula_summary` used to sit outside the bundle as a parallel
+# copy, so a cached switch-back showed the PREVIOUS target's error-correction
+# read on the hero — the ECM gate, and so the conviction, belonged to the
+# wrong instrument. It is now read off the bundled engine.
 _BUNDLE_KEYS = (
-    "engine", "fvo_ts", "swayam_daily", "swayam_view_dfs",
-    "convergence_df", "divergence_events", "nishkarsh_result", "last_agreement",
-    "nishkarsh_conv_normalized", "wf_results",
-    "intelligence_active_weights", "intelligence_active_thresholds",
-    "intelligence_active_profile",
-    # The consensus's full history (Convergence-tab marker tiers) and the
-    # weighted composite (hero WEIGHTED row / amber overlay) — must travel
-    # with the bundle so a cached target switch-back doesn't leave the
-    # PREVIOUS target's state in session.
-    "hero_series",
-    "nishkarsh_calibrated_score", "nishkarsh_calibrated_signal",
-    "calibrated_conv_series",
-    # Per-target UI metadata that must travel with the result bundle —
-    # otherwise a cached target switch-back leaves the PREVIOUS target's
-    # value in session state (e.g. the Swayam tab showing a stale
-    # "basket source: snapshot" hint for a target resolved live, or the
-    # Convergence tab's "breadth carried forward" notice firing/missing
-    # based on the WRONG target's basket-freshness timestamp).
-    "swayam_native_last", "swayam_n_eff",
+    "engine", "fvo_ts", "swayam_daily", "swayam_view_dfs", "swayam_view_weights",
+    "swayam_n_eff", "swayam_native_last",
+    "convergence_df", "divergence_events", "hero_series",
+    "intelligence_active_weights", "intelligence_active_profile",
+    "edges",
 )
-# Keep the last N configs. The comment here previously said "the 3
-# commodities" — stale since the universe grew to 30+ targets (commodities,
-# FX, India/US indices, sector ETFs; audit finding E5). Each entry is a full
-# 5-phase pipeline result, so this stays modest rather than trying to cover
-# the whole universe; 6 covers a session that browses a handful of targets
-# (e.g. all commodities, or an index + its close comparators) without
-# recomputing.
+# Keep the last N configs. Each entry is a full pipeline result; 6 covers a
+# session that browses a handful of targets without recomputing.
 _RESULTS_CACHE_MAX = 6
 
-# Baskets at/above this size get their per-constituent frames trimmed before
-# entering the _RESULTS_CACHE_MAX-deep results_cache LRU (audit finding F19).
-# swayam_view_dfs carries ~200 columns per constituent (the full
-# kernel output); only the ~9 the Swayam tab's drill-down actually
-# displays (_SWAYAM_DRILLDOWN_COLS) are needed once the result is just sitting
-# in the switch-back cache. A small commodity basket (~15-20 names) is cheap
-# either way and kept at full width so nothing else that might read the wider
-# frame in-session breaks; an uncapped large index (S&P 500 ~500 names) is
-# where the ~200-column full width, multiplied across up to 6 LRU entries,
-# actually matters.
-_CONSTITUENT_TRIM_THRESHOLD = 60
+#: Every session key a run produces or caches — the ONE list Start over and
+#: Refresh clear. They used to keep two hand-maintained lists that had already
+#: drifted (Refresh cleared the Swayam caches, Reset did not, so a Reset an
+#: hour later paired fresh Mūla data with stale Swayam frames).
+_SESSION_RESULT_KEYS = _BUNDLE_KEYS + (
+    "engine_cache", "fvo_engine", "fvo_fit_key", "results_cache",
+    "precedent_summary", "_prec_key", "_precedent_analogs_cache", "_analog_skill_cache",
+    "_swayam_fetch_cache", "_swayam_analysis_cache",
+)
+
+#: The Swayam tab's drill-down reads only these per-view columns. The kernel
+#: emits ~270 per view; at 15 views × ~2,300 rows that is ~76 MB per target,
+#: held in the live session, the Swayam analysis cache and up to six result
+#: bundles — the likely cause of hosted sessions being dropped under memory
+#: pressure. Everything that needs the full width (skill weights, aggregation,
+#: the effective view count) has consumed it before the frames are stored.
 _SWAYAM_DRILLDOWN_COLS = (
     "Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition",
     "Regime", "Vol_Regime", "Change_Point", "Confidence",
 )
 
 
-def _bundle_swayam_view_dfs(dfs: dict) -> dict:
-    """Trim swayam_view_dfs to the Swayam tab's drill-down columns
-    before it enters the per-config results_cache LRU, for baskets at/above
-    _CONSTITUENT_TRIM_THRESHOLD names. Only affects the SNAPSHOT stored in
-    results_cache — the live session_state copy the active render reads
-    (and engines.swayam.aggregate_views, which needs the
-    full width and runs before this snapshot is taken) is never touched.
-    """
-    if not dfs or len(dfs) < _CONSTITUENT_TRIM_THRESHOLD:
-        return dfs
-    trimmed = {}
-    for sym, df in dfs.items():
+def _slim_view_dfs(dfs: dict) -> dict:
+    """The per-view frames trimmed to what the drill-down displays."""
+    out = {}
+    for name, df in (dfs or {}).items():
         cols = [c for c in _SWAYAM_DRILLDOWN_COLS if c in df.columns]
-        trimmed[sym] = df[cols] if cols else df.iloc[:, :0]
-    return trimmed
+        out[name] = df[cols] if cols else df.iloc[:, :0]
+    return out
+
+
+def _clear_results() -> None:
+    """Drop every run product from the session (the data frame is kept)."""
+    for _k in _SESSION_RESULT_KEYS:
+        st.session_state.pop(_k, None)
+    for _k in [k for k in list(st.session_state) if str(k).startswith("conv_norm_causal::")]:
+        st.session_state.pop(_k, None)
 
 
 def _ensure_stock_target_column(df: pd.DataFrame, active_target: str) -> pd.DataFrame:
@@ -235,8 +221,11 @@ def _ensure_stock_target_column(df: pd.DataFrame, active_target: str) -> pd.Data
     silent fetch.
 
     Aligned to the matrix's DATE spine, ffilled, leading NaNs left for the
-    per-target dropna downstream. Mutates st.session_state['data'] too, so a
-    target switch or a cached rerun sees the column without re-fetching.
+    per-target dropna downstream. Joined to a LOCAL copy only: it used to be
+    written back into st.session_state['data'], after which every later
+    target in the session — Gold included — carried the stock as a predictor
+    and every one of its published fair values moved. The series fetch is
+    cached, so re-joining on each rerun costs nothing.
     """
     if active_target in df.columns or not is_stock_target(active_target):
         return df
@@ -252,7 +241,6 @@ def _ensure_stock_target_column(df: pd.DataFrame, active_target: str) -> pd.Data
     s = s[~s.index.duplicated(keep="last")]
     df = df.copy()
     df[active_target] = s.reindex(spine).ffill().to_numpy()
-    st.session_state["data"] = df
     return df
 
 
@@ -269,7 +257,7 @@ def _render_header(frame=None) -> None:
     """
     render_header(
         title=f"{PRODUCT_NAME}",
-        tagline="Cross-Asset Fair Value · Self-Referential Breadth · Unified Convergence",
+        tagline="Cross-Asset Fair Value · Self-Referential Breadth · One Graded Call",
     )
     if frame is not None:
         render_ticker(frame)
@@ -281,27 +269,27 @@ def _render_header(frame=None) -> None:
 #: blocks did (they already had: two said "Ensemble/Signal", one said
 #: "Fusion", and the label column was a <span> in one and a <div> in another).
 _SYSTEM_PANELS = (
-    ("mula", "System 01", "Mūla", "Top-down valuation",
+    ("mula", "System 01", "Mūla", "The world's valuation",
      "Prices the target against the whole traded macro cross-section with a dynamic "
-     "cointegrating regression on log price. It answers one question: is this instrument "
-     "cheap or dear relative to everything it moves with?",
+     "cointegrating regression on log price, then asks the question a trade depends on: "
+     "does price, not just fair value, close the gap? It makes the one call Tattva issues.",
      (("Estimator", "Recursive discounted DLM"),
       ("Equilibrium", "MP factors + asset blocks"),
-      ("Reversion", "ECM κ̂ · predictive likelihood"))),
-    ("swayam", "System 02", "SWAYAM", "Bottom-up breadth",
-     "Reads the instrument's own internals through a self-referential bank of views "
-     "spanning timescale, information set and mechanism, then aggregates them by "
-     "realised skill rather than by a fixed grid.",
+      ("Reversion", "Price-side error correction"))),
+    ("swayam", "System 02", "Swayam", "The instrument's own read",
+     "Reads the instrument's own price through a bank of views spanning timescale, "
+     "information set and mechanism, and weights each view by its own realised skill. "
+     "It confirms or contradicts the call from the inside.",
      (("Signal", "MSF + MMR oscillator"),
-      ("Breadth", "Oversold / overbought share"),
+      ("Breadth", "Net oversold share of views"),
       ("Regime", "HMM \u00b7 GARCH \u00b7 CUSUM"))),
-    ("convergence", "System 03", "CONVERGENCE", "Adaptive fusion",
-     "Scores the two systems against each other across four dimensions \u2014 direction, "
-     "breadth, magnitude, regime \u2014 with weights learned forward from resolved "
-     "outcomes, then filters the composite through a leaky DDM.",
+    ("convergence", "System 03", "Convergence", "Agreement, measured",
+     "Scores the two systems against each other across direction, breadth, magnitude and "
+     "regime, with weights learned forward from each dimension's signed skill — and grades "
+     "the result the way every engine is graded.",
      (("Fusion", "Mūla \u00d7 Swayam"),
       ("Weights", "Learned online, causal"),
-      ("Filter", "Leaky drift-diffusion"))),
+      ("Graded", "Walk-forward IC"))),
 )
 
 
@@ -322,15 +310,16 @@ def _render_landing_page() -> None:
     The claim still leads, because a reader who has not run anything needs to
     know what the thing IS before they are shown what it covers.
     """
-    from core.config import TARGET_CATEGORIES, ALL_TARGETS
+    from core.config import TARGET_CATEGORIES, CATALOGUE_TARGETS
 
-    _n_cat, _n_tgt = len(TARGET_CATEGORIES), len(ALL_TARGETS)
+    _n_cat, _n_tgt = len(TARGET_CATEGORIES), len(CATALOGUE_TARGETS)
 
     # ── The proposition ───────────────────────────────────────────────────
     st.markdown(
         """<div class="lede">
-  <div class="lede-claim">Two independent systems price the same instrument,
-    and a third measures how much their agreement has actually been worth.</div>
+  <div class="lede-claim">One engine values the instrument against the world, a second
+    reads its own price from fifteen angles, and Tattva makes one call — graded by six
+    independent conditions, with the one that limits it named.</div>
   <div class="lede-cta">Pick an asset class and a target in the rail, then
     <strong>Run Analysis</strong>.</div>
 </div>""",
@@ -342,14 +331,14 @@ def _render_landing_page() -> None:
     render_kpi_strip(
         [
             {"label": "Asset Classes", "value": str(_n_cat),
-             "subtext": "Commodities, FX, India and US indices, sector ETFs, "
-                        "and any listed stock by symbol"},
+             "subtext": "Commodities, FX, crypto, India and US indices, and any listed "
+                        "stock by symbol"},
             {"label": "Catalogue Targets", "value": str(_n_tgt),
-             "subtext": "Each with its own engine configuration — horizon, filter, "
-                        "breadth tier, precedent term structure"},
+             "subtext": "Every one runnable on free data; each carries its own "
+                        "configuration, defaulting to its asset class's"},
             {"label": "Daily History Per Run", "value": "~9y",
-             "subtext": "Walk-forward throughout; every score is out-of-sample with "
-                        "respect to everything after it"},
+             "subtext": "Every published value uses only data available on its own "
+                        "date, so re-running extends the record instead of rewriting it"},
         ],
         max_cols=3,
         key="landing-coverage",
@@ -376,14 +365,13 @@ def _render_landing_page() -> None:
     # ── What a run returns ────────────────────────────────────────────────
     render_section_header("What a run returns", icon="target")
     _out = (
-        ("A directional claim", "One verdict, with the six gates that condition it and "
-                                "the single binding constraint named."),
-        ("A measured edge", "Walk-forward IC across expanding windows — the honest "
-                            "answer to whether this has paid before."),
-        ("An independent check", "A non-parametric base rate from the most similar "
-                                 "historical states, which does not depend on the models."),
-        ("The evidence", "Every series, weight and diagnostic behind the verdict, "
-                         "exportable."),
+        ("One graded call", "Cheap, rich or fair against the cross-section — and six "
+                            "independent conditions, the weakest named as the limit."),
+        ("A measured edge", "Every engine's lean scored on non-overlapping windows at the "
+                            "call's horizon: the honest answer to whether it has paid."),
+        ("A base rate", "What followed the most similar past states of the system — no "
+                        "model fitted to returns, matched on the engines' own reading."),
+        ("The record", "Every series behind the call, joined by date and exportable."),
     )
     # ONE markdown block, not four panels. These four cards are static text, so
     # they gain nothing from a Streamlit container and lose something real to
@@ -405,168 +393,96 @@ def _render_landing_page() -> None:
     )
 
 
-def _compute_hero_verdict(nishkarsh_norm, agreement, fvo_signal) -> dict:
-    """Gather session-state inputs and build the hero conviction-chain verdict.
+def _recent_divergences(window: int) -> int:
+    """Divergence events within the last ``window`` SCORED sessions.
 
-    All interpretation lives in ``ui.components.build_hero_verdict`` (a pure,
-    unit-testable function — see research/test_hero_verdict.py); this wrapper
-    only gathers session-state inputs and returns the verdict. Rendering
-    (``render_hero_card``) is the caller's job — the Overview page renders
-    the full card; every other page can read the same verdict object for its
-    top-bar status chip / KPI strip without disagreeing with what Overview
-    shows, since both read the identical dict computed once per rerun.
-
-    The card is a CONVICTION CHAIN: direction from Mūla, then gates whose
-    product is the conviction, with the smallest gate named as the binding
-    constraint. Every engine contributes exactly one gate — Mūla (mispricing
-    and reversion), Swayam (breadth), Convergence (agreement + normalized
-    consensus), the walk-forward read (edge), and Precedent (base rate).
+    Anchored on the newest scored session, not on the newest event: the count
+    used to run 1.5×window calendar days back from the latest EVENT, so a
+    burst two years ago was reported as "N events in the last 20 sessions".
     """
-    wf          = st.session_state.get("wf_results")                   # list[dict] | None
-    div_events  = st.session_state.get("divergence_events")            # DataFrame | None
-    prec        = st.session_state.get("precedent_summary")            # dict | None
-    # MŪLA read (None on the legacy path — the ECM gate it feeds is
-    # conditional and the chain collapses to its incumbent shape).
-    mula_read   = st.session_state.get("mula_summary") or None
+    events = st.session_state.get("divergence_events")
+    cdf = st.session_state.get("convergence_df")
+    if events is None or not len(events) or cdf is None or cdf.empty:
+        return 0
+    sessions = pd.DatetimeIndex(pd.to_datetime(cdf.index, errors="coerce")).dropna().sort_values()
+    if not len(sessions):
+        return 0
+    start = sessions[max(0, len(sessions) - int(window))]
+    if "date" in getattr(events, "columns", ()):
+        when = pd.to_datetime(events["date"], errors="coerce")
+    elif isinstance(events.index, pd.DatetimeIndex) or events.index.inferred_type in (
+            "string", "date", "datetime", "datetime64"):
+        # A positional index must never be parsed as dates — pd.to_datetime
+        # reads bare integers as epoch nanoseconds and every row "clears" 1970.
+        when = pd.to_datetime(pd.Series(events.index), errors="coerce")
+    else:
+        return 0
+    return int((when >= start).sum())
 
-    # DEGENERATE-CONVERGENCE GATE: `nishkarsh_norm` is None exactly when the
-    # Mūla/Swayam alignment found no overlap. The verdict handles that case
-    # directly now — `swayam_breadth=None` leaves the corroboration gate at a
-    # neutral 0.5 and says "no breadth read" on the card, rather than the
-    # signal quietly becoming half-weight Mūla wearing a convergence label.
-    # Divergences are silenced for the same reason: the detector would be
-    # comparing Mūla against breadth that does not exist.
-    if nishkarsh_norm is None:
-        div_events = None
 
-    # Active instrument's forecast horizon - for interpretation copy only.
+def _compute_hero_verdict(signal: dict) -> dict:
+    """Gather the run's readings and build the conviction chain. Pure assembly.
+
+    All interpretation lives in ``ui.components.build_hero_verdict`` (pure,
+    unit-tested in tests/test_hero_verdict.py); this only collects inputs.
+    Computed once per rerun, so every page's command bar and KPI strip read
+    the identical object Overview renders and cannot disagree with it.
+    """
+    from analytics.analogs import MIN_EFFECTIVE_N
     try:
-        FWD_HORIZON = get_instrument_config(st.session_state.get("active_target", "")).forecast_horizon
+        horizon = get_instrument_config(st.session_state.get("active_target", "")).forecast_horizon
     except KeyError:
-        FWD_HORIZON = FORECAST_HORIZON
+        horizon = FORECAST_HORIZON
 
-    wf_ics = [r["ic"] for r in wf if isinstance(r, dict) and r.get("ic") == r.get("ic")] if wf else []
-    # The edge number IS the walk-forward mean now. There is no calibration to
-    # hold out from: weights are learned forward, so every window's IC is
-    # already out-of-sample with respect to everything after it, and a separate
-    # "Val IC" would just be one more window of the same thing.
-    oos_ic = float(np.mean(wf_ics)) if wf_ics else None
-    wf_pos = (sum(1 for v in wf_ics if v > 0) / len(wf_ics)) if wf_ics else None
-    wf_n = len(wf_ics) if wf_ics else None
-    # RECENT divergence count only (audit finding F7) — div_events spans the
-    # WHOLE history (6+ years), so a bare len() reads in the hundreds and is a
-    # permanent, meaningless alarm ("N divergence events flagged"). Count only
-    # events within the last DIV_LOOKBACK trading days of the series (the same
-    # window CrossSystemDivergenceDetector uses for its own persistence flag),
-    # anchored on the LATEST event date in the table (a proxy for "today" —
-    # div_events carries no direct handle on the engine's current as-of date).
-    n_div = 0
-    if (div_events is not None
-            and hasattr(div_events, "__len__") and len(div_events)):
-        try:
-            _idx = div_events.index
-            if isinstance(_idx, pd.DatetimeIndex):
-                _div_dates = _idx
-            elif _idx.inferred_type in ("string", "date", "datetime", "datetime64"):
-                _div_dates = pd.DatetimeIndex(pd.to_datetime(_idx, errors="coerce"))
-            else:
-                # A POSITIONAL index must not be parsed as dates. `pd.to_datetime`
-                # accepts bare integers and reads them as epoch NANOSECONDS, so a
-                # RangeIndex silently becomes 1970-01-01+0ns … +2ns: the cutoff
-                # lands in 1970, every row clears it, and n_div reports the whole
-                # history — precisely the permanent meaningless alarm the window
-                # above exists to prevent. It also trips NumPy 2.x's
-                # generic-unit timedelta deprecation ("implicit conversion of
-                # bare integers"), which is scheduled to become an error.
-                _div_dates = pd.DatetimeIndex([])
-            _valid_dates = _div_dates.dropna()
-            if len(_valid_dates):
-                _cutoff = pd.Timestamp(_valid_dates.max()) - pd.DateOffset(days=int(DIV_LOOKBACK * 1.5))
-                n_div = int((_div_dates >= _cutoff).sum())
-            else:
-                # No usable dates — fall back to the raw count rather than a
-                # window computed from nothing.
-                n_div = int(len(div_events))
-        except Exception:
-            n_div = int(len(div_events))
-
-    # Swayam's current breadth — the corroboration gate. Read from the daily
-    # frame's last row rather than a session scalar so it is the same object
-    # the Swayam tab shows.
+    # Swayam's current breadth — read from the same frame the Swayam page
+    # shows. A tail that is carried forward (no native Swayam row) still
+    # counts: the Convergence page discloses the carry.
     _sw = st.session_state.get("swayam_daily")
     swayam_breadth = None
     if _sw is not None and not _sw.empty:
         _last = _sw.iloc[-1]
-        swayam_breadth = {
-            "oversold_pct": float(_last.get("Oversold_Pct", 50.0)),
-            "overbought_pct": float(_last.get("Overbought_Pct", 50.0)),
-        }
-
-    # The convergence layer's own output: how far the two engines concur
-    # (dimension-weighted by learned skill) and where the normalized consensus
-    # — the series the Convergence tab plots — currently points.
+        swayam_breadth = {"oversold_pct": float(_last.get("Oversold_Pct", 0.0)),
+                          "overbought_pct": float(_last.get("Overbought_Pct", 0.0))}
     _cdf = st.session_state.get("convergence_df")
-    convergence_read = None
-    if _cdf is not None and not _cdf.empty:
-        convergence_read = {
-            "agreement_ratio": float(_cdf["agreement_ratio"].iloc[-1])
-            if "agreement_ratio" in _cdf.columns else 0.5,
-            "consensus": (float(nishkarsh_norm["value"])
-                          if nishkarsh_norm and nishkarsh_norm.get("value") is not None
-                          else None),
-        }
+    agreement = (float(_cdf["agreement_ratio"].dropna().iloc[-1])
+                 if _cdf is not None and not _cdf.empty and "agreement_ratio" in _cdf.columns
+                 and _cdf["agreement_ratio"].notna().any() else None)
 
-    verdict = build_hero_verdict(
-        fvo_signal=fvo_signal,
+    return build_hero_verdict(
+        mula=signal,
         swayam_breadth=swayam_breadth,
-        convergence=convergence_read,
-        wf_ic=oos_ic,
-        wf_pos=wf_pos,
-        wf_n=wf_n,
-        precedent=prec,
-        n_divergences=n_div,
-        horizon_days=FWD_HORIZON,
+        agreement=agreement,
+        edge=(st.session_state.get("edges") or {}).get("mula"),
+        precedent=st.session_state.get("precedent_summary"),
+        n_divergences=_recent_divergences(DIV_LOOKBACK),
+        horizon_days=int(horizon),
         div_window=DIV_LOOKBACK,
-        mula=mula_read,
+        min_precedent_n=MIN_EFFECTIVE_N,
     )
-    return verdict
 
 
-def _render_model_passport_sidebar(current_universe: str, current_index: str | None = None) -> None:
-    """Sidebar Passport — what the model is doing right now.
+def _render_model_passport_sidebar() -> None:
+    """Rail readout — what the run reached, not a control.
 
-    This used to be a PROFILE manager: it showed which calibrated profile was
-    loaded, its train/val IC and timestamp, warned when the profile had been fit
-    on a different universe, and offered Import / Export / Reset. All of that
-    existed because calibration produced a persisted artefact that could be
-    stale, mismatched, or shared — and because the output depended on which
-    artefact happened to be loaded.
-
-    Nothing is persisted now. Weights are learned forward from the data in
-    front of the model, every run, so there is no profile to import, no
-    mismatch to warn about, and nothing to reset to. What remains worth showing
-    is the state the run actually reached.
+    Two facts worth a glance from any page: the dimension weights the
+    convergence learner arrived at, and what Mūla's call has been worth out of
+    sample. Nothing is persisted between runs, so there is no profile to load,
+    compare or reset — only the state this run reached.
     """
     st.markdown('<div class="sidebar-title">Model</div>', unsafe_allow_html=True)
-
     w = st.session_state.get("intelligence_active_weights") or {}
-    wf = st.session_state.get("wf_results") or []
-
-    if not w:
+    edge = (st.session_state.get("edges") or {}).get("mula") or {}
+    if not w and not edge:
         render_control_hint("Run an analysis to populate.")
         return
-
-    # Dimension weights, heaviest first, then the walk-forward read — one
-    # key/value block rather than two differently-styled fragments, so the
-    # rail's status area has a single visual grammar.
-    rows = [(k, f"{v:.3f}", "accent") for k, v in sorted(w.items(), key=lambda kv: -kv[1])]
-    if wf:
-        _ics = [r["ic"] for r in wf if np.isfinite(r.get("ic", float("nan")))]
-        if _ics:
-            _mean = float(np.mean(_ics))
-            _pos = sum(1 for v in _ics if v > 0)
-            rows.append(("WF IC", f"{_mean:+.3f}", "long" if _mean > 0 else "short"))
-            rows.append(("Windows +", f"{_pos}/{len(_ics)}", ""))
+    rows = [(f"{k.capitalize()} weight", f"{v:.2f}", "accent")
+            for k, v in sorted(w.items(), key=lambda kv: -kv[1])]
+    ic = edge.get("ic")
+    if ic is not None and np.isfinite(ic):
+        rows.append(("Mūla edge (IC)", f"{ic:+.3f}", "long" if ic > 0 else "short"))
+        nb = len(edge.get("blocks") or [])
+        if nb:
+            rows.append(("Periods +", f"{edge.get('positive_blocks', 0)}/{nb}", ""))
     render_rail_readout(rows)
 
 
@@ -734,7 +650,7 @@ def main():
         # roster (commodities, FX, India & US indices, sector-ETF universe)
         # logically grouped instead of one long flat list.
         all_names = list(ALL_TARGETS.keys())
-        prev_commodity = st.session_state.get("selected_commodity", all_names[0])
+        prev_commodity = st.session_state.get("active_target", all_names[0])
         if prev_commodity not in all_names:
             prev_commodity = all_names[0]
 
@@ -849,25 +765,20 @@ def main():
                     return
                 progress_bar(progress_container, 15, "Market Data Loaded",
                              f"{df.shape[1]} series × {df.shape[0]} rows · preparing analysis…")
-                st.session_state.pop("engine", None)
-                st.session_state.pop("engine_cache", None)
+                _clear_results()
                 st.session_state["data"] = df
-                st.session_state["selected_commodity"] = selected_commodity
                 st.session_state["active_target"] = selected_commodity
-                st.session_state["nishkarsh_index"] = selected_commodity
                 st.session_state["run_analysis"] = True
                 st.rerun()
         else:
             df = st.session_state["data"]
             # Post-load target switch — re-runs the engines on the already
-            # fetched universe (no re-fetch; only the Swayam basket re-pulls).
+            # fetched universe. No macro re-fetch: both engines read the one
+            # panel in session; only the new target's own OHLCV is fetched.
             if selected_commodity != st.session_state.get("active_target"):
                 if st.button(f"Switch → {selected_commodity}", type="primary",
                              width="stretch"):
-                    st.session_state["selected_commodity"] = selected_commodity
                     st.session_state["active_target"] = selected_commodity
-                    st.session_state["nishkarsh_index"] = selected_commodity
-                    st.session_state.pop("active_features", None)  # re-default predictors for new target
                     st.session_state.pop("engine", None)
                     st.session_state.pop("engine_cache", None)
                     st.rerun()
@@ -902,12 +813,9 @@ def main():
         _render_footer()
         return
 
-    # A stock target's price column is injected here — BEFORE numeric_cols/
-    # commodity_options are computed below — so target_col never falls back
-    # to some other target for a stock on its first render (Model
-    # Configuration's "Apply Configuration" button, further down, writes
-    # that fallback straight into st.session_state["active_target"] if it's
-    # ever wrong). Cheap no-op once the column already exists (cached fetch).
+    # A stock target's price column is joined here — BEFORE numeric_cols are
+    # computed below — so the target resolves to itself on its first render
+    # instead of falling back to some other column. Local to this run.
     df = _ensure_stock_target_column(df, st.session_state.get("active_target", ""))
 
     # ─── Sidebar: Model Configuration ──────────────────────────────────────
@@ -929,95 +837,62 @@ def main():
         date_candidates = [c for c in all_cols if "date" in c.lower()]
         date_col = date_candidates[0] if date_candidates else "None"
 
-        # (A read-only "Target: <name>" chip used to render here. It restated
-        # the selector directly above it and the command bar's own instrument
-        # block — three copies of one string, none of which could disagree.)
-
-        # The valuation panel is the WHOLE macro cross-section, minus this
-        # target's self-replicating near-duplicates (e.g. GLTR for a precious
-        # metal, which would let the regression explain gold with gold). There
-        # is no predictor picker any more: the Mūla engine prices the target
-        # against the traded opportunity set, and hand-deselecting instruments
-        # from that set does not make it a better opportunity set — it makes it
-        # a smaller one with an undocumented reason. The engine already handles
-        # a wide panel on its own terms (Marchenko-Pastur decides how many
-        # factors are real; an instrument that never prints is never admitted).
-        _excluded = set(TARGET_EXCLUDED_PREDICTORS.get(target_col, []))
-        available = [c for c in numeric_cols if c != target_col and c not in _excluded]
-        st.session_state["active_features"] = tuple(available)
         st.session_state["active_date_col"] = date_col
 
+        _render_model_passport_sidebar()
 
-        # ── Model Passport ─────────────────────────────────────────────
-        # Surfaces the learned dimension weights + walk-forward read. (Each
-        # target used to key its own persisted profile here — see
-        # _intel_index below).
-        _current_universe = st.session_state.get("active_target") or st.session_state.get("selected_commodity", "Gold")
-        _current_index = st.session_state.get("nishkarsh_index", _current_universe)
-        _render_model_passport_sidebar(_current_universe, _current_index)
-
-        if "run_analysis" in st.session_state and st.session_state.get("run_analysis"):
+        if st.session_state.get("run_analysis"):
             st.markdown('<div class="sidebar-title">Session</div>', unsafe_allow_html=True)
             # One per row, each stretched to the rail width — the same shape as
-            # the selectboxes above them. Side by side they were half-width
-            # against full-width controls, and "Refresh" broke mid-word.
-            _do_reset = st.button("Reset", type="secondary", width="stretch",
-                                  help="Re-run both engines on the data already in "
-                                       "session — no network fetch. Fast.")
-            _do_refresh = st.button("Refresh", type="secondary", width="stretch",
-                                    help="Force-fetch the live universe, then recompute. "
-                                         "Slower; use when the data is stale or partial.")
-            if _do_reset:
-                st.session_state.pop("data", None)
-                st.session_state.pop("engine", None)
-                st.session_state.pop("engine_cache", None)
-                st.session_state.pop("fvo_engine", None)
-                st.session_state.pop("fvo_fit_key", None)
-                st.session_state.pop("wf_results", None)
-                st.session_state.pop("results_cache", None)  # drop all cached configs
-                st.session_state.pop("run_analysis", None)
-                st.session_state.pop("nishkarsh_result", None)
+            # the selectboxes above them.
+            _do_refresh = st.button(
+                "Refresh data", type="secondary", width="stretch",
+                help="Fetch the live universe now (bypassing the one-hour cache), then "
+                     "recompute. Use when the data is stale or partial.")
+            _do_restart = st.button(
+                "Start over", type="secondary", width="stretch",
+                help="Clear this session's results and return to the start screen. "
+                     "Data fetched within the last hour is reused on the next run.")
+            # (The second button was labelled "Reset" and promised "re-run both
+            # engines on the data already in session — no network fetch". It
+            # dropped the data and returned to the landing page. Re-running
+            # deterministic engines on identical data would reproduce the same
+            # numbers anyway, so the honest control is the one it actually was.)
+            if _do_restart:
+                _clear_results()
+                for _k in ("data", "run_analysis"):
+                    st.session_state.pop(_k, None)
                 st.rerun()
 
-            # Force a live re-pull of the whole universe, then recompute — for when
-            # the data is stale/partial (the freshness notices point here). Reset =
-            # re-run on cached data (fast); Refresh = re-fetch live + re-run (slower).
-            # Snapshot-preserving: if the live pull fails (rate-limit / circuit open),
-            # the cache's stale fallback keeps the app working on last-good data.
+            # One forced live pull of the whole universe; the target's own OHLCV
+            # is forced once on the recompute that follows. A failed or
+            # stale-snapshot pull is said out loud on the next render rather than
+            # leaving the user believing they refreshed.
             if _do_refresh:
-                from data.cache import begin_force_refresh
-                begin_force_refresh()   # next fetches bypass TTL; disk snapshot kept
-                # Same main-area progress bar as Run Analysis (no spinner) — the recompute
-                # on rerun picks it up from ~15%, so refresh reads as one continuous bar.
                 progress_bar(progress_container, 3, "Re-fetching Live Market Data",
                              "yfinance · full universe · bypassing cache · ~30–60s")
                 _rend = pd.Timestamp.today()
-                _rdf, _rerr = fetch_commodity_dataset(_rend - pd.DateOffset(days=365 * 9), _rend)
-                if _rdf is not None:
+                _rdf, _rerr = fetch_commodity_dataset(
+                    _rend - pd.DateOffset(days=365 * 9), _rend, force=True)
+                _src = ((_rdf.attrs or {}).get("source") if _rdf is not None else None)
+                if _rdf is not None and _src != "stale-snapshot":
                     progress_bar(progress_container, 15, "Live Data Refreshed",
                                  f"{_rdf.shape[1]} series × {_rdf.shape[0]} rows · recomputing…")
-                    st.session_state["data"] = _rdf   # keep run_analysis → stay in results
+                    st.session_state["data"] = _rdf
+                    st.session_state["_force_ohlcv"] = True
                 else:
                     progress_container.empty()
-                for _k in ("engine", "engine_cache", "fvo_engine", "fvo_fit_key",
-                           "wf_results", "results_cache", "nishkarsh_result",
-                           "precedent_summary", "_prec_key", "_precedent_analogs_cache", "conv_norm_params",
-                           # Horizon-independent Swayam cache (audit finding F17) —
-                           # must be dropped on a live re-fetch too, else Refresh
-                           # Data re-pulls the Mūla macro universe live but
-                           # silently keeps serving the PRE-refresh Swayam
-                           # basket/constituent analysis.
-                           "_swayam_fetch_cache", "_swayam_analysis_cache"):
-                    st.session_state.pop(_k, None)
-                # The convergence tab's actual per-config normalization cache key is
-                # "conv_norm_causal::<engine_cache>" (ui/tabs/tab_convergence.py) — the
-                # legacy "conv_norm_params" prefix below predates that rename and no
-                # longer matches anything, so those z-score caches survived every
-                # "Refresh Data" click unpruned (audit finding C1). Sweep both
-                # prefixes so a future rename doesn't reintroduce the same gap.
-                for _prefix in ("conv_norm_params", "conv_norm_causal::"):
-                    for _k in [k for k in list(st.session_state) if str(k).startswith(_prefix)]:
-                        st.session_state.pop(_k, None)
+                    _last = pd.to_datetime(df["DATE"], errors="coerce").max() if "DATE" in df.columns else None
+                    st.session_state["_pending_notices"] = [{
+                        "kind": "warning", "title": "Refresh failed",
+                        "body": (f"The live pull did not complete ({_rerr or 'the source served a stale snapshot'}). "
+                                 f"Showing last-good data"
+                                 + (f" through {_last:%d %b %Y}" if _last is not None and pd.notna(_last) else "")
+                                 + ". Try again once yfinance recovers."),
+                    }]
+                    if _rdf is not None:
+                        st.session_state["data"] = _rdf
+                _clear_results()
                 st.rerun()
 
         _render_appearance_control()
@@ -1035,11 +910,18 @@ def main():
     except KeyError:
         from core.config import InstrumentConfig as _IC
         _icfg = _IC()
-    active_features = list(st.session_state.get("active_features", [c for c in numeric_cols if c != active_target]))
-    # Never let the target — or a self-replicating predictor (e.g. GLTR for a
-    # precious metal) — leak into its own predictor set.
-    _excluded_feats = {active_target, *TARGET_EXCLUDED_PREDICTORS.get(active_target, [])}
-    active_features = [f for f in active_features if f not in _excluded_feats]
+    # The valuation panel is the WHOLE macro cross-section, minus the target,
+    # its self-replicating near-duplicates (e.g. GLTR for a precious metal,
+    # the US equity complex for a US index) and any free-form stock. There is
+    # no predictor picker: the Mūla engine prices the target against the
+    # traded opportunity set, and hand-deselecting instruments from that set
+    # does not make it a better opportunity set — it makes it a smaller one
+    # with an undocumented reason. The exclusions are read from ONE place, the
+    # instrument's own config (`excluded_predictors`); the parallel global map
+    # it is built from is no longer consulted here.
+    _excluded_feats = {active_target, *_icfg.excluded_predictors}
+    active_features = [c for c in numeric_cols
+                       if c not in _excluded_feats and c not in STOCK_TARGET_MARKETS]
     active_date = st.session_state.get("active_date_col", date_col)
 
     # ─── Data freshness notices ─────────────────────────────────────────────
@@ -1055,43 +937,56 @@ def main():
     def _notice(kind: str, title: str, body: str) -> None:
         _notices.append({"kind": kind, "title": title, "body": body})
 
-    # Measured in TRADING days behind (weekends ignored) so Friday data read on a
-    # Sunday is "current", not stale. Tiered, design-consistent: a calm info note
-    # when 1–2 trading days behind (today's bar often isn't published yet), and a
-    # prominent warning once genuinely stale (source hasn't updated). The signal
-    # always reflects the as-of date shown, never "today".
-    # "Trading days behind" is counted on the TARGET's own exchange calendar via
-    # data.calendars.trading_days_behind — holiday-aware when exchange_calendars is
-    # installed (so Diwali/Thanksgiving no longer over-count by ~1), else it degrades
-    # to the exact legacy Mon–Fri busday count. The partial-session check below remains
-    # the calendar-agnostic primary freshness signal (native coverage).
+    # Notices queued by an action on the PREVIOUS run (a failed Refresh) — the
+    # rerun that action triggers is where they can be seen.
+    for _pn in st.session_state.pop("_pending_notices", None) or []:
+        _notice(_pn["kind"], _pn["title"], _pn["body"])
+
+    # ONE freshness reading, shared by these notices and the command bar's
+    # status chip. They used to be computed separately — the notice from the
+    # panel's newest date (any market), the chip from the model spine (the
+    # target's sessions only) — so on a target-market holiday the notice said
+    # "as of 16 Oct" while the chip said 15 Oct. The signal is as of the
+    # target's last session, so that is the date both read.
+    #
+    # Measured in TRADING days behind on the target's own exchange calendar
+    # (holiday-aware when exchange_calendars is installed, Mon–Fri otherwise),
+    # so Friday data read on a Sunday is current, not stale. "Today" is the
+    # EARLIER of UTC and machine-local: a UTC-hosted deploy rolls past midnight
+    # ahead of an IST/EST exchange, and taking the earlier date means a
+    # time-zone skew can never overstate staleness.
+    _tgt_ticker = ALL_TARGETS.get(active_target)
+    today = min(datetime.now(timezone.utc).date(), datetime.now().date())
+    _fresh = {"as_of": None, "behind": None, "label": "", "tone": "neutral"}
     if active_date != "None" and active_date in df.columns:
         try:
-            dates = pd.to_datetime(df[active_date], errors="coerce", dayfirst=True).dropna()
-            if len(dates) > 0:
-                latest_date = dates.max().to_pydatetime()
-                if latest_date.tzinfo is not None:
-                    latest_date = latest_date.replace(tzinfo=None)
-                # `latest_date` is a tz-naive EXCHANGE-LOCAL date, but "today" has no
-                # single frame: a UTC-hosted deploy (Streamlit Cloud) rolls past
-                # midnight ahead of an IST/EST exchange, over-counting a current bar
-                # as "1 day behind". Anchor to the EARLIER of UTC and machine-local —
-                # that brackets the realistic tz band, so a tz skew never *overstates*
-                # staleness. Genuine staleness (≥ STALENESS_DAYS) and the exact
-                # partial-session gate below still fire normally.
-                today = min(datetime.now(timezone.utc).date(), datetime.now().date())
-                # trading days strictly after the data date, up to & including today,
-                # on the target exchange's calendar (holiday-aware when available).
-                _tgt_ticker = ALL_TARGETS.get(active_target)
+            _all_dates = pd.to_datetime(df[active_date], errors="coerce", dayfirst=True)
+            _mask = _all_dates.notna()
+            if active_target in df.columns:
+                _mask &= pd.to_numeric(df[active_target], errors="coerce").notna()
+            _cand = _all_dates[_mask]
+            _sm = session_mask(_tgt_ticker, _cand) if len(_cand) else np.zeros(0, dtype=bool)
+            _dates = _cand[_sm] if _sm.any() else _cand
+            if len(_dates):
+                latest_date = _dates.max().to_pydatetime().replace(tzinfo=None)
                 behind = trading_days_behind(_tgt_ticker, latest_date.date(), today)
+                _fresh.update(as_of=latest_date, behind=behind)
+                if behind >= STALENESS_DAYS:
+                    _fresh.update(label="STALE", tone="danger")
+                elif behind >= 1:
+                    _fresh.update(label=f"{behind}D BEHIND", tone="warning")
+                else:
+                    # "Current", not "live": this is end-of-day data that can be
+                    # hours old; it is the newest session the source has.
+                    _fresh.update(label="CURRENT", tone="success")
                 ds = latest_date.strftime("%d %b %Y")
                 if behind >= STALENESS_DAYS:
                     _notice(
                         "warning", "Latest data unavailable",
                         (f"Newest data is {ds} — {behind} trading days behind. The price source "
                          f"(yfinance) hasn't published more recent data, so every signal below "
-                         f"reflects {ds}, not today. Use Refresh in the rail to pull the "
-                         f"latest once the source updates."),
+                         f"reflects {ds}, not today. Use Refresh data in the rail once the "
+                         f"source updates."),
                     )
                 elif behind >= 1:
                     _notice(
@@ -1100,122 +995,90 @@ def main():
                         f"{'s' if behind > 1 else ''} behind — today's bar may not be published yet).",
                     )
 
-                # Predictors carried from a snapshot backfill (data.fetcher's
-                # rate-limit recovery, audit finding B1): a rate-limited ticker
-                # this run was refilled from the most recent prior snapshot
-                # that HAD it, which may itself be stale. Surface which
-                # columns and how old, rather than a silent log.warning no
-                # one watching a Streamlit deploy will ever see.
-                from data.fetcher import _current_stale_backfills
-                _stale_backfills = _current_stale_backfills()
+                # Predictors refilled from a cached snapshot (data.fetcher's
+                # rate-limit recovery). Read off the frame itself, so a frame
+                # served from cache carries its own warning — it used to live in
+                # a per-session registry that a cached frame arrived without.
+                _stale_backfills = (df.attrs or {}).get("stale_backfills") or {}
                 if _stale_backfills:
                     _sb_items = sorted(_stale_backfills.items(), key=lambda kv: kv[1])
                     _sb_preview = ", ".join(f"{k} (as of {v})" for k, v in _sb_items[:5])
                     _sb_more = f" +{len(_sb_items) - 5} more" if len(_sb_items) > 5 else ""
                     _notice(
-                        # WARNING, not info. The old copy said only that momentum
-                        # goes flat, which understates it: a snapshot-reconstructed
-                        # column is reindexed onto this run's calendar and ffilled
-                        # (data.fetcher._backfill_missing_columns), so it is a
-                        # DIFFERENT SERIES from a live pull, not a staler one.
-                        # Measured 2026-08-17: two fetches minutes apart that hit
-                        # different timeouts backfilled different tickers, and 1563
-                        # settled input cells then differed — moving 5743 published
-                        # output cells, from the first post-burn-in row onward. That
-                        # happened on 1 of 4 fetch pairs.
+                        # WARNING, not info: a snapshot-reconstructed column is
+                        # reindexed onto this run's calendar and ffilled, so it is
+                        # a DIFFERENT SERIES from a live pull, not a staler one —
+                        # and every published date can move with it.
                         "warning", "Predictors carried from snapshot — history differs",
                         f"{len(_sb_items)} predictor(s) were rate-limited this fetch and refilled "
                         f"from a prior cached snapshot: {_sb_preview}{_sb_more}. A rebuilt column "
                         f"is not merely staler than a live one — it is a different series, so "
-                        f"THIS RUN'S PUBLISHED HISTORY MAY DIFFER from a run that fetched cleanly. "
-                        f"Compare the panel fingerprint before treating this run's past values as "
-                        f"final; re-run once the source is healthy for an authoritative record.",
+                        f"this run's published history may differ from a run that fetched "
+                        f"cleanly. Compare the panel fingerprint before treating past values as "
+                        f"final; refresh once the source is healthy for an authoritative record.",
                     )
 
-                # Session completeness (Phase 2 — exchange-aware): of the inputs whose
-                # market was OPEN on the latest date, how many actually posted a fresh
-                # value vs are still forward-filled? Columns whose exchange was CLOSED
-                # that day (e.g. US on Thanksgiving) are legitimately carried forward
-                # and EXCLUDED — only genuinely-lagging open markets count, so a global
-                # holiday no longer trips a false "partial session". Native freshness =
-                # changed vs the prior row (continuous prices move every session). With
-                # the calendar lib absent, is_session is "is a weekday" → every column
-                # counts → identical to the prior calendar-agnostic gate.
+                # Session completeness (exchange-aware): of the inputs whose market
+                # was OPEN on the panel's newest date, how many actually posted a
+                # fresh value rather than a carried-forward one? Markets that were
+                # closed that day are legitimately carried and excluded, so a
+                # foreign holiday does not trip a false "partial session".
                 num = df.select_dtypes(include=[np.number])
-                if len(num) >= 2:
+                _panel_last = _all_dates.max()
+                if len(num) >= 2 and pd.notna(_panel_last):
                     cols = list(num.columns)
                     last_r = num.iloc[-1].to_numpy(dtype=np.float64)
                     prev_r = num.iloc[-2].to_numpy(dtype=np.float64)
                     finite = np.isfinite(last_r) & np.isfinite(prev_r)
                     should_post = np.array(
-                        [is_session(_COLUMN_TICKERS.get(c), latest_date.date()) for c in cols]
-                    )
+                        [is_session(_COLUMN_TICKERS.get(c), _panel_last.date()) for c in cols])
                     judged = finite & should_post
                     denom = int(judged.sum())
-                    if denom >= 3:   # need a few open markets before judging completeness
+                    if denom >= 3:
                         fresh_frac = float(((last_r != prev_r) & judged).sum() / denom)
-                        # Skip the warning when latest_date is today: the session is
-                        # still in progress, so most prices are forward-filled by
-                        # design — that is expected, not a data problem.
-                        _session_is_live = (latest_date.date() >= today)
-                        if fresh_frac < SESSION_FRESH_FLOOR and not _session_is_live:
+                        # A session still in progress is expected to be mostly
+                        # carried forward — that is not a data problem.
+                        if fresh_frac < SESSION_FRESH_FLOOR and _panel_last.date() < today:
                             _notice(
                                 "warning", "Partial latest session",
-                                (f"Only {fresh_frac:.0%} of the markets open on {ds} have posted — the "
-                                 f"rest are forward-filled from the prior session, so the macro predictors "
-                                 f"and bottom-up breadth behind the latest signal are stale. Treat it as "
-                                 f"provisional; use Refresh in the rail once those markets post."),
+                                (f"Only {fresh_frac:.0%} of the markets open on "
+                                 f"{_panel_last:%d %b %Y} have posted — the rest are forward-filled "
+                                 f"from the prior session, so the inputs behind the latest reading "
+                                 f"are stale. Treat it as provisional; refresh once those markets post."),
                             )
 
-                # Per-source freshness for the ACTIVE target specifically — it can
-                # lag the macro universe (sheet behind, or its market shut on a
-                # holiday) with the gap forward-filled. Find its true last update:
-                #   • sheet target  → exact, from the source series.
-                #   • yfinance/other → detect the ff-filled tail (continuous prices
-                #     don't repeat, so a run of identical closes = forward-filled days).
-                try:
-                    from data.sheets import SHEET_SOURCES, fetch_sheet_series
-                    t_last = None
-                    if active_target in SHEET_SOURCES:
-                        s = fetch_sheet_series(active_target)
-                        if s is not None and len(s):
-                            t_last = pd.Timestamp(s.index.max()).to_pydatetime()
-                    elif active_target in df.columns and active_date in df.columns:
-                        tv = pd.to_numeric(df[active_target], errors="coerce").to_numpy()
-                        tdates = pd.to_datetime(df[active_date], errors="coerce", dayfirst=True)
-                        j = len(tv) - 1
-                        while j > 0 and np.isfinite(tv[j]) and tv[j] == tv[j - 1]:
-                            j -= 1
-                        if j < len(tv) - 1 and pd.notna(tdates.iloc[j]):
-                            t_last = pd.Timestamp(tdates.iloc[j]).to_pydatetime()
+                # The target's own last genuine print. Its column is forward-filled
+                # across days it did not post, and continuous prices do not repeat
+                # exactly, so a run of identical closes at the tail is a carried
+                # value. One rule for every source — the sheet targets used to be
+                # re-fetched here, on every rerun, to answer the same question.
+                if active_target in df.columns:
+                    tv = pd.to_numeric(df[active_target], errors="coerce").to_numpy()
+                    j = len(tv) - 1
+                    while j > 0 and np.isfinite(tv[j]) and tv[j] == tv[j - 1]:
+                        j -= 1
+                    t_last = (pd.Timestamp(_all_dates.iloc[j]).to_pydatetime()
+                              if j < len(tv) - 1 and pd.notna(_all_dates.iloc[j]) else None)
                     if t_last is not None:
                         t_behind = trading_days_behind(_tgt_ticker, t_last.date(), today)
                         if t_behind >= 1:
-                            _today_is_session = is_session(_tgt_ticker, today)
-                            if _today_is_session and t_behind == 1:
-                                # Market is open but today's bar is forward-filled —
-                                # most likely yfinance rate-limited this ticker during
-                                # the last fetch and the backfill used a prior snapshot.
-                                # Prompt a manual refresh rather than crying "stale".
+                            if is_session(_tgt_ticker, today) and t_behind == 1:
                                 _notice(
                                     "info", f"{active_target} price not yet updated",
-                                    (f"Today's bar is carried forward from {t_last.strftime('%d %b %Y')} — "
-                                     f"the {active_target} market is open but yfinance may have rate-limited "
-                                     f"this ticker during the last fetch. Use Refresh in the rail "
-                                     f"to pull the latest price."),
+                                    (f"Today's bar is carried forward from {t_last:%d %b %Y} — the "
+                                     f"market is open but the last fetch did not return a new price "
+                                     f"for it. Refresh data in the rail to pull the latest."),
                                 )
                             else:
                                 _notice(
                                     "warning", f"{active_target} data is lagging",
-                                    (f"This target last updated {t_last.strftime('%d %b %Y')} "
-                                     f"({t_behind} trading day{'s' if t_behind > 1 else ''} behind the macro "
-                                     f"universe) — more recent rows are forward-filled from that value, so "
-                                     f"its latest signal may be stale."),
+                                    (f"This target last updated {t_last:%d %b %Y} ({t_behind} trading "
+                                     f"day{'s' if t_behind > 1 else ''} behind the macro universe) — "
+                                     f"later rows carry that value forward, so its latest reading may "
+                                     f"be stale."),
                                 )
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        except Exception as _fe:                      # noqa: BLE001 - never break a run to report
+            console.warning(f"Freshness check skipped: {type(_fe).__name__}: {_fe}")
 
     # ─── Clean & Fit Engine ────────────────────────────────────────────────
     # Guard: a selected target whose column failed to fetch (e.g. a sheet/source
@@ -1463,79 +1326,80 @@ def main():
         # Reuse the hoisted main-area progress slot (created at the top of main())
         # so the bar continues from where the fetch left it (~15%) with no gap.
 
-        # ── Phase 1: Data Loading ─────────────────────────────────────────
-        # HORIZON-INDEPENDENT: the macro fetch and the target's own OHLCV depend
-        # only on active_target, never on the scoring horizon, so they are cached
-        # separately (audit finding F17) and survive a re-run.
+        # ── Phase 1: Data Acquisition ─────────────────────────────────────
+        # HORIZON-INDEPENDENT: Swayam's inputs depend on the target and on the
+        # panel in session, never on the scoring horizon, so they are cached
+        # separately and survive a horizon change. The key carries the data's
+        # identity (date range + panel fingerprint): it used to carry the target
+        # alone, so Swayam frames from an earlier pull were reused against a
+        # newer Mūla panel after any re-run that did not go through Refresh.
         #
-        # There is no mode resolution left to do. Every target reads breadth off
-        # its own price through Swayam; the branch that used to choose between
-        # that and a constituent basket — and the basket resolution, the
-        # snapshot fallbacks, and the up-to-503-symbol OHLCV fetch behind it —
-        # went with the basket engine. On a large index that fetch was ~13 of
-        # the run's ~14 minutes.
-        _swayam_fetch_key = f"swayam_fetch::{active_target}"
+        # ONE panel feeds both engines. Swayam's MMR driver pool used to be a
+        # second fetch of the macro universe, keyed by TICKER — so the leakage
+        # guard below, which drops the target and its near-replicas by NAME,
+        # matched nothing (0 drivers dropped for every target; GLTR at r = 0.985
+        # stayed in Gold's pool), and after the cache's hour the two engines
+        # read two different pulls. The drivers are now the same friendly-named
+        # frame Mūla values against.
+        _fp = (df.attrs or {}).get("panel_fingerprint", "")
+        _swayam_fetch_key = f"swayam_fetch::{active_target}|{_date_range}|{_fp}"
         _nf_cache = st.session_state.get("_swayam_fetch_cache")
+        console.start_phase("DATA ACQUISITION", 1, 5)
         if _nf_cache is not None and _nf_cache.get("key") == _swayam_fetch_key:
-            console.start_phase("DATA ACQUISITION", 1, 5)
             target_ohlcv = _nf_cache["target_ohlcv"]
             swayam_macro_df = _nf_cache["swayam_macro_df"]
             macro_cols_list = _nf_cache["macro_cols_list"]
-            console.item("Macro/OHLCV", "reused cached fetch (horizon-independent)")
-            progress_bar(progress_container, 19, "Data Acquisition Reused", f"{len(macro_cols_list)} Macros (cached)")
-            console.end_phase("DATA ACQUISITION")
+            console.item("Target OHLCV / drivers", "reused (same target, same panel)")
+            progress_bar(progress_container, 19, "Data Acquisition Reused", f"{len(macro_cols_list)} drivers (cached)")
         else:
-            console.start_phase("DATA ACQUISITION", 1, 5)
             progress_bar(progress_container, 16, "Resolving Swayam Source",
-                         f"{active_target} · own OHLCV (self-referential ensemble)")
-
-            console.section("Macro Data")
+                         f"{active_target} · own OHLCV (self-referential view bank)")
             end_date = pd.Timestamp.today()
-            # Match the Mūla model-dataset window (~9y) so the Swayam views and
-            # macro drivers overlap the FULL series — convergence then runs on
-            # real data, not neutral placeholders.
             start_date = end_date - pd.DateOffset(days=365 * 9)
-            macro_df = fetch_macro_live(start_date, end_date)
-            console.item("Date Range", f"{start_date.date()} to {end_date.date()}")
-            if not macro_df.empty:
-                console.item("YF Columns", f"{len(macro_df.columns)} symbols")
-                console.item("Rows", len(macro_df))
-                console.success(f"Macro data: {len(macro_df.columns)} symbols × {len(macro_df)} rows")
-            else:
-                console.warning("No macro data available")
 
             console.section("Target OHLCV")
-            # Swayam needs the target's own OHLC (and volume where it exists —
-            # the volume-dependent views abstain when it does not; see
-            # ensemble._is_volume_dependent).
+            # Swayam reads the target's own OHLC (and volume where it exists —
+            # the volume-dependent views abstain when it does not). A
+            # sheet-sourced target has no OHLCV feed at all; it is said once,
+            # here, instead of being sent to yfinance as a guaranteed failure.
             _tgt_ticker = ALL_TARGETS[active_target]
-            progress_bar(progress_container, 18, "Fetching Target OHLCV", f"yfinance · {_tgt_ticker}")
-            _ohlcv = fetch_constituent_ohlcv([_tgt_ticker], start_date, end_date)
-            target_ohlcv = _ohlcv.get(_tgt_ticker)
+            target_ohlcv = None
+            if is_yfinance_ticker(_tgt_ticker):
+                progress_bar(progress_container, 18, "Fetching Target OHLCV", f"yfinance · {_tgt_ticker}")
+                _ohlcv = fetch_ohlcv([_tgt_ticker], start_date, end_date,
+                                     force=bool(st.session_state.pop("_force_ohlcv", False)))
+                target_ohlcv = _ohlcv.get(_tgt_ticker)
             if target_ohlcv is not None and not target_ohlcv.empty:
                 console.item("Symbol", _tgt_ticker)
                 console.item("Rows", len(target_ohlcv))
                 console.item("Has Volume", bool("Volume" in target_ohlcv.columns
                                                 and target_ohlcv["Volume"].fillna(0).abs().sum() > 0))
                 console.success(f"Target OHLCV: {len(target_ohlcv)} rows")
+            elif not is_yfinance_ticker(_tgt_ticker):
+                console.warning(f"{active_target} has no OHLCV source ({_tgt_ticker}) — Swayam unavailable")
             else:
                 console.warning(f"No OHLCV for {_tgt_ticker} — Swayam breadth will be unavailable")
 
-            console.section("Swayam Macro Assembly")
-            swayam_macro_df = macro_df.copy() if macro_df is not None and not macro_df.empty else pd.DataFrame()
-            if not swayam_macro_df.empty:
-                console.item("YF Symbols", len(swayam_macro_df.columns))
-                console.success(f"Macro indicators: {len(swayam_macro_df.columns)} × {len(swayam_macro_df)} rows")
-            macro_cols_list = list(swayam_macro_df.columns) if not swayam_macro_df.empty else []
-            console.end_phase("DATA ACQUISITION")
-            progress_bar(progress_container, 19, "Data Acquisition Complete", f"{len(swayam_macro_df.columns)} Macros")
-
+            console.section("Swayam Drivers")
+            _dcols = [c for c in df.select_dtypes(include=[np.number]).columns
+                      if c not in STOCK_TARGET_MARKETS or c == active_target]
+            if "DATE" in df.columns:
+                swayam_macro_df = df[["DATE"] + _dcols].copy()
+                swayam_macro_df.index = pd.to_datetime(swayam_macro_df.pop("DATE"), errors="coerce").dt.normalize()
+                swayam_macro_df = swayam_macro_df[~swayam_macro_df.index.isna()]
+                swayam_macro_df = swayam_macro_df[~swayam_macro_df.index.duplicated(keep="last")]
+            else:
+                swayam_macro_df = pd.DataFrame()
+            macro_cols_list = list(swayam_macro_df.columns)
+            console.item("Driver pool", f"{len(macro_cols_list)} panel columns (the panel Mūla reads)")
+            progress_bar(progress_container, 19, "Data Acquisition Complete", f"{len(macro_cols_list)} drivers")
             st.session_state["_swayam_fetch_cache"] = {
                 "key": _swayam_fetch_key,
                 "target_ohlcv": target_ohlcv,
                 "swayam_macro_df": swayam_macro_df,
                 "macro_cols_list": macro_cols_list,
             }
+        console.end_phase("DATA ACQUISITION")
 
         # ── Phase 2: Mūla (FairValueEngine) ─────────────────────────────────
         console.start_phase("MŪLA ENGINE", 2, 5)
@@ -1561,7 +1425,7 @@ def main():
         console.item("Print Floor", f"{_icfg.fvo_min_prints} prints before an instrument may join")
         console.item("Coefficient Memory", f"deltas {_icfg.fvo_valuation_deltas}")
         console.item("Min Data Points", MIN_DATA_POINTS)
-        console.item("Lookback Windows", f"{LOOKBACK_WINDOWS}")
+        console.item("Lookback Windows", f"{tuple(_icfg.fvo_lookback_windows)}")
 
         console.section("Recursive Valuation")
         # Reuse an already-fit Mūla engine for this exact config if a prior
@@ -1576,15 +1440,10 @@ def main():
             console.item("Valuation", "reused cached fit (resumed run)")
             progress_bar(progress_container, 40, "Mūla Engine Reused", "Cached valuation pass")
         else:
-            if _HAS_V2_ENGINES:
-                engine = MulaEngine()
-                console.item("Valuation Core", "Mūla — cointegrating core + ECM / expert pooling")
-            else:
-                engine = FairValueEngine()
-            # `config=_icfg` threads this instrument's per-instrument Mūla knobs
-            # (burn-in, print floor, discount grid, lookback windows) into the
-            # valuation, so Mūla is tuned per instrument / asset class exactly
-            # like Swayam and Swayam.
+            engine = MulaEngine()
+            console.item("Valuation Core", "Mūla — cointegrating core + error-correction layer")
+            # `config=_icfg` threads this instrument's own Mūla knobs (burn-in,
+            # print floor, discount grid, lookback windows, horizon).
             engine.fit(
                 _tgt_px, _expl_px,
                 feature_names=active_features, config=_icfg,
@@ -1592,71 +1451,77 @@ def main():
                     progress_container, int(20 + pct * 20), "Running Mūla Engine", msg),
             )
             # Carry the raw price LEVEL on the engine output too. `Actual` is
-            # already the price here, but the analog matcher and Intelligence
-            # tuner both key off a column literally named "Price".
+            # already the price here, but the analog matcher and the edge
+            # scorer both key off a column literally named "Price".
             engine.ts_data["Price"] = _price_level
             st.session_state["fvo_engine"] = engine
             st.session_state["fvo_fit_key"] = cache_key
-        # MŪLA summary travels through session state for the hero card's ECM
-        # gate and the Precedent state vector (empty dict on the legacy path).
-        st.session_state["mula_summary"] = getattr(engine, "mula_summary", {})
 
         sig = engine.get_current_signal()
         stats = engine.get_model_stats()
+
+        def _fmt(v, spec, none="n/a"):
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                return none
+            return format(v, spec) if np.isfinite(v) else none
+
         console.section("Engine Results")
-        console.item("Signal", f"{sig['signal']} ({sig['strength']})")
-        console.item("Conviction", f"{sig['conviction_score']:+.0f}")
-        console.item("Mūla Osc", f"{sig['fvo']:+.2f}σ ({sig['pct_mispricing'] * 100:+.2f}% vs fair value)")
-        console.item("Fair Value", f"{sig['fair_value']:,.2f} vs price {sig['actual']:,.2f}")
-        console.item("OOS R²", f"{stats['r2_oos']:.3f} (log price vs fitted level)")
-        console.item("R² vs Trailing Mean", f"{stats['r2_vs_anchor']:+.3f} (edge over a 252d anchor)")
-        console.item("Model Spread", f"{sig['model_spread'] * 10000:.1f} bps (predictive SD of fair value)")
-        console.item("Valuation Confidence", f"{sig['valuation_confidence']:.2f} "
-                     f"(mean-reversion {sig['mr_prob']:.2f} × cross-sectional agreement {sig['xs_consistency']:.2f})")
-        # DFA Hurst is deliberately not printed: its single log-log slope is
-        # biased sharply upward for a short-memory series and would read
-        # "trending" for a gap ADF calls strongly stationary. See
-        # FairValueEngine._compute_hurst.
-        console.item("Gap Half-Life", f"{sig['gap_half_life']:.0f}d (online AR1) · OU {sig['ou_half_life']:.0f}d")
-        console.item("Gap Stationarity", f"ADF p={sig['adf_pvalue']:.4f} "
-                     f"({'stationary — reversion licensed' if sig['adf_pvalue'] < 0.05 else 'unit root not rejected'})")
-        # `n_available` is the count that PRINTED today, not the count ADMITTED
-        # (that is NAdmitted, the instruments past the print floor). Labelling
-        # it "admitted" made a normal early-session reading look like a
-        # collapsed cross-section: a 05:49 UTC run shows ~87 of 234 printed
-        # because Asia is open and the US is not, which is not the same claim as
-        # "only 87 instruments qualify".
+        console.item("Valuation", f"{sig.get('valuation_state', '?')} · oscillator "
+                     f"{_fmt(sig.get('fvo'), '+.2f')}σ ({_fmt((sig.get('pct_mispricing') or 0) * 100, '+.2f')}% vs fair value)")
+        console.item("Fair Value", f"{_fmt(sig.get('fair_value'), ',.2f')} vs price {_fmt(sig.get('actual'), ',.2f')}")
+        if sig.get("asof_row_withheld"):
+            console.warning(f"Latest session not valued ({sig.get('withheld_reason')}) — reading is the last valued session")
+        console.item("OOS R²", f"{_fmt(stats.get('r2_oos'), '.3f')} (log price vs fitted level)")
+        console.item("R² vs Trailing Mean", f"{_fmt(stats.get('r2_vs_anchor'), '+.3f')} (edge over a 252d anchor)")
+        console.item("Model Spread", f"{_fmt((sig.get('model_spread') or 0) * 10000, '.1f')} bps (SD of the fair-value level)")
+        console.item("Cross-Section", f"{_fmt(sig.get('xs_consistency'), '.2f')} (leave-one-block-out sign agreement)")
+        console.item("Price Reverts", f"P={_fmt(sig.get('mr_prob'), '.2f')} · κ̂ {_fmt(sig.get('mula_kappa'), '+.4f')}/d · "
+                     f"expected {FWD_HORIZON}d move {_fmt(sig.get('expected_drift_pct'), '+.2f')}% "
+                     f"± {_fmt(sig.get('drift_sd_pct'), '.2f')}%")
+        console.item("Gap Half-Life", f"{_fmt(sig.get('gap_half_life'), '.0f')}d (online AR1) · "
+                     f"OU {_fmt(sig.get('ou_half_life'), '.0f')}d (full history)")
+        _adf = sig.get("adf_pvalue")
+        console.item("Gap Stationarity", f"ADF p={_fmt(_adf, '.4f')}"
+                     + (" (stationary)" if _adf is not None and np.isfinite(_adf) and _adf < 0.05
+                        else " (unit root not rejected)"))
         # Name any gap the reader can see on the chart. A break is never "the
-        # value was zero" — it is the system declining to publish — and the four
+        # value was zero" — it is the system declining to publish — and the
         # causes want different responses. Only "incomplete fetch" is worth
-        # re-running for, so it is the only one reported as a warning.
+        # re-running for, so it is the only one reported as a warning. (This
+        # report read `fvo_ts` a hundred lines before it was assigned, so it
+        # raised UnboundLocalError into a bare `except: pass` on every run and
+        # the warning it exists for never once printed.)
         try:
-            _wr = fvo_ts.get("WithheldReason") if fvo_ts is not None else None
+            _wr = engine.ts_data.get("WithheldReason")
             if _wr is not None:
-                _c = _wr[_wr.astype(str) != ""].astype(str).value_counts()
+                _wr = _wr.astype(str)
+                _c = _wr[_wr != ""].value_counts()
                 if len(_c):
-                    console.item("Gaps in the trace",
-                                 " · ".join(f"{k}: {int(v)}" for k, v in _c.items()))
+                    console.item("Gaps in the trace", " · ".join(f"{k}: {int(v)}" for k, v in _c.items()))
                 _bad = int(_c.get("incomplete fetch", 0))
                 if _bad:
-                    _dates = _wr.index[_wr.astype(str) == "incomplete fetch"]
-                    _shown = ", ".join(str(d)[:10] for d in list(_dates)[-3:])
+                    _dates = pd.DatetimeIndex(_cal)[np.asarray(_wr == "incomplete fetch")]
+                    _shown = ", ".join(f"{d:%Y-%m-%d}" for d in list(_dates)[-3:])
                     console.warning(
-                        f"{_bad} session(s) withheld as INCOMPLETE FETCH ({_shown}). "
-                        f"The calendar says those exchanges were open, so this is a "
-                        f"data gap in this run rather than a market closure — re-run "
-                        f"to fill it."
+                        f"{_bad} session(s) withheld as INCOMPLETE FETCH ({_shown}). The calendar "
+                        f"says those exchanges were open, so this is a data gap in this run rather "
+                        f"than a market closure — refresh to fill it."
                     )
-        except Exception:                       # noqa: BLE001 - never break a run to report
-            pass
+        except Exception as _ge:                # noqa: BLE001 - never break a run to report
+            console.warning(f"Gap report skipped: {type(_ge).__name__}: {_ge}")
 
-        console.item("Factors", f"k={sig['k_factors']} above the MP edge · "
-                                f"{sig['n_available']} instruments printed so far today")
-        console.item("Market Regime", f"{sig['market_regime']} (stress pct {sig['stress']:.2f})")
+        # `n_available` is the count that PRINTED today, not the count admitted
+        # past the print floor — early in a session that is a fraction of it.
+        console.item("Factors", f"k={sig.get('k_factors')} above the MP edge · "
+                                f"{sig.get('n_available')} instruments printed so far today")
+        console.item("Market Regime", f"{sig.get('market_regime')} (stress pct {_fmt(sig.get('stress'), '.2f')})")
         console.success(f"Mūla engine complete | {len(engine.ts_data)} output rows "
                         f"({int(engine.ts_data['Valid'].sum())} valued, {engine.min_train_size} burn-in)")
         console.end_phase("MŪLA ENGINE")
-        progress_bar(progress_container, 40, "Mūla Engine Complete", f"Signal: {sig['signal']} ({sig['strength']}) · Conviction: {sig['conviction_score']:+.0f}")
+        progress_bar(progress_container, 40, "Mūla Engine Complete",
+                     f"{sig.get('valuation_state', '')} · {_fmt(sig.get('fvo'), '+.2f')}σ")
 
         # ── Phase 3: Swayam Breadth ───────────────────────────────────────
         # HORIZON-INDEPENDENT (audit finding F17): the view bank and its
@@ -1669,16 +1534,18 @@ def main():
                      "MSF+MMR+Regime · self-referential view bank")
 
         _na_cache = st.session_state.get("_swayam_analysis_cache")
-        if _na_cache is not None and _na_cache.get("key") == _swayam_fetch_key:
+        if _na_cache is not None and _na_cache.get("key") == f"{_swayam_fetch_key}|h{FWD_HORIZON}":
             swayam_view_dfs = _na_cache["swayam_view_dfs"]
             swayam_daily_pre_reindex = _na_cache["swayam_daily_pre_reindex"]
-            if "n_eff" in _na_cache:
-                st.session_state["swayam_n_eff"] = _na_cache["n_eff"]
-            console.item("View Bank", "reused cached fit (horizon-independent)")
+            st.session_state["swayam_n_eff"] = _na_cache.get("n_eff")
+            st.session_state["swayam_view_weights"] = _na_cache.get("view_weights")
+            console.item("View Bank", "reused cached fit (same target, panel and horizon)")
             progress_bar(progress_container, 74, "Swayam Engine Reused", f"{len(swayam_view_dfs)} Views (cached)")
         else:
             swayam_daily_pre_reindex = pd.DataFrame()
             swayam_view_dfs = {}
+            st.session_state["swayam_n_eff"] = None
+            st.session_state["swayam_view_weights"] = None
 
             if target_ohlcv is not None and not target_ohlcv.empty:
                 console.section("Self-Referential View Bank")
@@ -1688,6 +1555,8 @@ def main():
                 # column, which would let MMR "explain" the target with itself
                 # and silently zero the deviation oscillator.
                 swayam_cols = swayam_macro_columns(active_target, macro_cols_list)
+                console.item("Leakage guard", f"{len(macro_cols_list) - len(swayam_cols)} drivers dropped "
+                             f"(the target and its near-replicas)")
                 _swayam_members = default_swayam_members(_icfg.swayam_lengths, _icfg.swayam_roc_frac)
                 console.item("Views (bank)", f"{len(_swayam_members)} · timescale × information-set × mechanism")
                 console.item("Timescale Span", str(_icfg.swayam_lengths))
@@ -1722,15 +1591,21 @@ def main():
                 swayam_daily_pre_reindex = aggregate_views(swayam_view_dfs, weights=_view_w)
                 if not _view_w.empty:
                     _last = _view_w.iloc[-1].sort_values(ascending=False)
+                    st.session_state["swayam_view_weights"] = {k: float(v) for k, v in _view_w.iloc[-1].items()}
                     console.item("View Weighting", f"skill-weighted · {len(_last)} views")
                     console.item("Top Views", " · ".join(f"{k} {v:.2f}" for k, v in _last.head(4).items()))
                     console.item("Weakest View", f"{_last.index[-1]} {_last.iloc[-1]:.2f}")
+                # Everything that needs the full ~270-column frames has run;
+                # from here on only the drill-down's columns are kept.
+                swayam_view_dfs = _slim_view_dfs(swayam_view_dfs)
 
+            # The skill weights are scored at the horizon, so the cache is too.
             st.session_state["_swayam_analysis_cache"] = {
-                "key": _swayam_fetch_key,
+                "key": f"{_swayam_fetch_key}|h{FWD_HORIZON}",
                 "swayam_view_dfs": swayam_view_dfs,
                 "swayam_daily_pre_reindex": swayam_daily_pre_reindex,
                 "n_eff": st.session_state.get("swayam_n_eff"),
+                "view_weights": st.session_state.get("swayam_view_weights"),
             }
 
         # ── HORIZON-DEPENDENT tail: reindex onto the target's calendar ──────
@@ -1738,16 +1613,13 @@ def main():
         # warm-up trim can shift the target's date spine.
         swayam_daily = swayam_daily_pre_reindex
         if not swayam_daily.empty:
-            # Carry the basket forward onto the TARGET's trading calendar. The
-            # views share the target's own calendar by construction, but the macro
-            # driver pool behind MMR does not
-            # than the target — on a Monday-morning IST run, or when the target's
-            # market is open but the basket's is on holiday, the basket's last close
-            # IS its current value. Reindexing it onto the target's dates (ff-fill)
-            # lets the SIGNAL, cards and plots all reach the target's latest session
-            # instead of truncating to the slowest constituent. We record the
-            # basket's true last-native date so the UI can flag how much is carried
-            # over (the partial-session notice covers the row-level staleness).
+            # Carry the breadth forward onto the model spine's calendar. The
+            # views are built on the target's own OHLCV, which can end a session
+            # before the panel does (yfinance publishes the OHLCV feed and the
+            # close feed on different schedules). Reindexing onto the spine
+            # (ff-fill) lets every page reach the latest valued session; the
+            # true last-native date is recorded so the UI can say how much of
+            # the tail is carried rather than observed.
             st.session_state["swayam_native_last"] = pd.Timestamp(swayam_daily.index.max())
             if active_date in data.columns:
                 _cal = pd.DatetimeIndex(sorted(pd.to_datetime(
@@ -1772,8 +1644,7 @@ def main():
                 console.item("Avg Signal", f"{last.get('Avg_Signal', 0):+.2f}")
                 console.item("Oversold %", f"{last.get('Oversold_Pct', 0):.0f}%")
                 console.item("Overbought %", f"{last.get('Overbought_Pct', 0):.0f}%")
-                console.item("Buy Signals", int(last.get('Buy_Signals', 0)))
-                console.item("Sell Signals", int(last.get('Sell_Signals', 0)))
+                console.item("Net Breadth", f"{last.get('Oversold_Pct', 0) - last.get('Overbought_Pct', 0):+.0f} pts")
             console.success(f"Swayam aggregation: {len(swayam_daily)} trading days")
 
         console.end_phase("SWAYAM ENGINE")
@@ -1781,35 +1652,18 @@ def main():
 
         # ── Phase 4: Convergence ──────────────────────────────────────────
         console.start_phase("CONVERGENCE", 4, 5)
-        progress_bar(progress_container, 76, "Computing Convergence", "Cross-Validation · DDM Filtering")
-
-        console.section("Cross-Validation Setup")
-        # ── Convergence weights: prior, then learned forward ─────────────
-        # The first pass builds the dim_* matrix with the PRIOR weights. The
-        # composite is then recomputed (Phase 4b) with weights learned online
-        # from resolved outcomes only, so no score depends on data that had
-        # not happened when it was published.
-        #
-        # There is no profile to resolve and no mode to be in. The Optuna
-        # search that used to run here fit the whole history at once and wrote
-        # its winner to disk, which meant the output depended both on future
-        # data and on when you last calibrated; both are gone.
+        progress_bar(progress_container, 76, "Computing Convergence", "Four dimensions · per session")
         from convergence import intelligence as _intel_mod
-        _prior_w = _icfg.weights_seed()
-        console.item("Dimension weights", "prior → learned online (causal, no calibration step)")
+        from convergence.conviction_model import CompositeDDM
+        from convergence.normalization import (consensus_series, compute_normalized_convergence,
+                                               classify_convergence_score)
+        from core.semantics import valuation_lean, breadth_lean
 
-        # First pass builds the dim_* sub-scores; the composite it also writes
-        # is superseded below by the online-weighted recomputation.
-        _validator_weights = _prior_w
-        # The vote count is the Swayam bank's member count. Every view always
-        # reports, so coverage reads 1.0 — unlike a basket, where a constituent
-        # could simply be missing that day and breadth was read off a partial
-        # cross-section without saying so.
-        _expected_constituents = len(swayam_view_dfs) or None
-        validator = CrossValidator(
-            active_weights=_validator_weights,
-            expected_constituents=_expected_constituents,
-        )
+        # The first pass scores each session with the instrument's PRIOR
+        # dimension weights; the learner then re-weights forward from resolved
+        # outcomes only (4b), so no score depends on data that had not happened
+        # when it was published.
+        validator = CrossValidator(active_weights=_icfg.weights_seed())
         divergence_detector = CrossSystemDivergenceDetector()
 
         fvo_ts = engine.ts_data.copy()  # carries "Price" (set after fit)
@@ -1819,275 +1673,154 @@ def main():
         else:
             fvo_ts["Date"] = np.arange(len(fvo_ts))
         fvo_ts = fvo_ts[~fvo_ts.index.duplicated(keep="last")]
-        console.item("Mūla Dates", len(fvo_ts))
 
         swayam_by_date = {}
         if not swayam_daily.empty:
-            swayam_unique = swayam_daily[~swayam_daily.index.duplicated(keep="last")]
-            for idx in swayam_unique.index:
-                key = str(idx.date()) if hasattr(idx, "date") else str(pd.Timestamp(idx).date())
-                swayam_by_date[key] = swayam_unique.loc[idx]
-            console.item("Swayam Dates", len(swayam_by_date))
+            for idx, row in swayam_daily[~swayam_daily.index.duplicated(keep="last")].iterrows():
+                swayam_by_date[str(pd.Timestamp(idx).date())] = row
 
-        console.section("Daily Convergence Scoring")
-        overlap_count = 0
-        native_overlap_count = 0
-        skipped_warmup = 0
+        # Every Mūla session with a published valuation is offered; a date with
+        # no Swayam row is SKIPPED, not scored against a placeholder. The old
+        # stand-in (50% oversold AND 50% overbought, regime 33/33/34) was an
+        # impossible state that the learner, the walk-forward frame and the
+        # divergence detector all scored as if it were a reading.
+        overlap_count = native_overlap_count = 0
         total_dates = len(fvo_ts.index)
         for i, ts_idx in enumerate(fvo_ts.index):
-            ts_date = ts_idx.date() if hasattr(ts_idx, "date") else pd.Timestamp(ts_idx).date()
-            date_str = str(ts_date)
             row_a = fvo_ts.loc[ts_idx]
-            if isinstance(row_a, pd.DataFrame):
-                row_a = row_a.iloc[-1]
-            # Skip the engine's own [0, MIN_TRAIN_SIZE) warm-up rows — the
-            # `Valid` column (engines/mula/base.py) is False there because no
-            # genuine walk-forward forecast covers them (see A3 in the audit).
-            # Scoring them would feed the Intelligence calibration frame and
-            # the walk-forward IC a fabricated "neutral" convergence reading
-            # instead of genuinely excluding the unfit region.
-            if not bool(row_a.get("Valid", True)):
-                skipped_warmup += 1
-                continue
-            fvo_sig = {
-                "conviction_score": float(row_a.get("ConvictionBounded", 0)),
-                "oversold_breadth": float(row_a.get("OversoldBreadth", 50)),
-                "regime": str(row_a.get("Regime", "NEUTRAL")),
+            date_str = str(pd.Timestamp(ts_idx).date())
+            mula_in = {
+                "fvo": row_a.get("FVO", np.nan),
+                "oversold_breadth": row_a.get("OversoldBreadth", 0.0),
+                "overbought_breadth": row_a.get("OverboughtBreadth", 0.0),
+                "regime": str(row_a.get("Regime", "")),
             }
-            if date_str in swayam_by_date:
-                row_n = swayam_by_date[date_str]
-                swayam_stats = {
-                    "oversold_pct": float(row_n.get("Oversold_Pct", 50)),
-                    "overbought_pct": float(row_n.get("Overbought_Pct", 50)),
-                    "avg_unified_osc": float(row_n.get("Avg_Signal", 0)),
-                    "regime_bull_pct": float(row_n.get("Regime_Bull_Pct", 33)),
-                    "regime_bear_pct": float(row_n.get("Regime_Bear_Pct", 33)),
-                    "regime_neutral": float(row_n.get("Regime_Neutral", 34)),
-                    "num_constituents": int(row_n.get("Total_Analyzed", 0)),
+            sw_in = None
+            row_n = swayam_by_date.get(date_str)
+            if row_n is not None:
+                sw_in = {
+                    "oversold_pct": float(row_n.get("Oversold_Pct", 0.0)),
+                    "overbought_pct": float(row_n.get("Overbought_Pct", 0.0)),
+                    "avg_unified_osc": float(row_n.get("Avg_Signal", 0.0)),
+                    "regime_bull_pct": float(row_n.get("Regime_Bull_Pct", 0.0)),
+                    "regime_bear_pct": float(row_n.get("Regime_Bear_Pct", 0.0)),
+                    "native": bool(row_n.get("_Native", True)),
                 }
+            if validator.compute_convergence(mula_in, sw_in, date_str) is not None:
                 overlap_count += 1
-                if bool(row_n.get("_Native", True)):
-                    native_overlap_count += 1
-            else:
-                swayam_stats = {
-                    "oversold_pct": 50, "overbought_pct": 50, "avg_unified_osc": 0,
-                    "regime_bull_pct": 33, "regime_bear_pct": 33,
-                    "regime_neutral": 34, "num_constituents": 0,
-                }
-            validator.compute_convergence(fvo_sig, swayam_stats, date_str)
-            divergence_detector.detect(fvo_sig, swayam_stats, date_str)
-
-            if (i + 1) % 10 == 0 or i == total_dates - 1:
-                # 76-82: the step that follows this loop reports 83, so the
-                # loop must finish below it. It used to run to 85 and the bar
-                # visibly went backwards at the hand-off.
-                pct_val = int(76 + (i + 1) / total_dates * 6)
-                progress_bar(progress_container, pct_val, "Computing Convergence", f"{i + 1}/{total_dates} Dates Scored")
-
-        console.item("Total Mūla Dates", len(fvo_ts))
-        console.item("Skipped (warm-up, no genuine forecast)", skipped_warmup)
-        console.item("Overlap Dates", f"{overlap_count} ({native_overlap_count} native, "
-                     f"{overlap_count - native_overlap_count} carried-forward)")
-        console.success("Convergence scoring complete")
-
-        # ── Online-weighting overlap gate ────────────────────────────────
-        # Skip the online re-weighting when the Mūla/Swayam overlap is too thin.
-        # With no genuine overlap every date takes the same neutral swayam_stats
-        # default, so the continuous consensus direction degenerates to
-        # fvo_bull/2 and every Swayam-driven dim score is constant — the learner
-        # would then be scoring what is really a half-weight Mūla-only signal and
-        # attributing its skill to dimensions that never varied.
-        #
-        # Gated on NATIVE overlap, not raw overlap (audit finding F21):
-        # swayam_daily is forward-filled onto the target's calendar before the
-        # scoring loop, so `overlap_count` alone would count a long run of
-        # carried-forward, non-fresh breadth rows as new information each day.
-        # 60 dates (~3 trading months) excludes the genuinely-degenerate case
-        # without second-guessing a real but short history.
-        _MIN_OVERLAP_FOR_LEARNING = 60
-        _learn_weights = native_overlap_count >= _MIN_OVERLAP_FOR_LEARNING
-        if not _learn_weights:
-            console.warning(
-                f"Online dimension weighting skipped: only {native_overlap_count} NATIVE "
-                f"Mūla/Swayam overlap dates (< {_MIN_OVERLAP_FOR_LEARNING}; "
-                f"{overlap_count} total incl. carried-forward) — the dimensions would be "
-                f"constant and their measured skill meaningless. Prior weights stand."
-            )
-
-        # ── 4a. First-pass conviction model ─────────────────────────────
-        # First-pass DDM filter on the convergence_score from the first
-        # validator pass. Labeled "first-pass" only when Intelligence Mode
-        # is ON (a second pass will follow); just "Conviction Model" otherwise.
-        _first_pass_label = "First-Pass Conviction Model" if _learn_weights else "Conviction Model"
-        console.section("Conviction Model (initial pass)" if _learn_weights else "Conviction Model")
-        progress_bar(progress_container, 83, _first_pass_label, "DDM Filter · Prior Weights")
+                native_overlap_count += int(sw_in["native"])
+            divergence_detector.detect(mula_in, sw_in, date_str)
+            if (i + 1) % 25 == 0 or i == total_dates - 1:
+                progress_bar(progress_container, int(76 + (i + 1) / total_dates * 6),
+                             "Computing Convergence", f"{i + 1}/{total_dates} sessions")
         convergence_df = validator.get_convergence_series()
-        # DDM smoothing = the shared consensus-filter tuning (CONV_DDM_*).
-        conviction_model = UnifiedConvictionModel(
-            leak_rate=_icfg.ddm_leak,
-            drift_scale=_icfg.ddm_drift,
-            long_run_var=_icfg.ddm_lrv,
-        )
-        results = conviction_model.fit(
-            convergence_df["convergence_score"].tolist(),
-            convergence_df.index.tolist(),
-        )
-        if results:
-            latest = results[-1]
-            _pre_label = "DDM Conviction (pre-weighting)" if _learn_weights else "DDM Conviction"
-            _sig_label = "DDM Signal (pre-weighting)" if _learn_weights else "DDM Signal"
-            console.item(_pre_label, f"{latest.nishkarsh_conviction:+.0f}")
-            console.item(_sig_label, latest.nishkarsh_signal)
-        console.success(f"Initial conviction: {len(results)} scores computed")
+        console.item("Scored sessions", f"{overlap_count} ({native_overlap_count} with a native "
+                     f"Swayam row, {overlap_count - native_overlap_count} carried forward)")
 
         # ── 4b. Learn the dimension weights, forward only ───────────────
-        # Replaces the Optuna calibration that used to sit here. That search
-        # fit the whole history and applied its winner back across the same
-        # history, so every published score changed whenever a session was
-        # added; it also persisted the winner to disk, making the output depend
-        # on when it was last run. This learns the same thing — which
-        # dimensions actually predict this instrument — from resolved outcomes
-        # only, at a fraction of the cost and with no state carried between
-        # runs.
+        # Gated on NATIVE overlap at the learner's own warm-up: below it the
+        # learner can only return its prior, so "learned" would be a label on
+        # the prior.
+        _learn_weights = native_overlap_count >= _intel_mod.LEARNER_WARMUP
         _weight_hist = pd.DataFrame()
-        if _learn_weights:
+        if _learn_weights and not convergence_df.empty:
             console.section("Online Dimension Weighting")
-            progress_bar(progress_container, 86, "Learning Dimension Weights",
-                         "Causal · discounted directional skill per dimension")
+            progress_bar(progress_container, 84, "Learning Dimension Weights",
+                         "Causal · each dimension's signed skill")
             try:
                 convergence_df, _weight_hist = _intel_mod.apply_online_weights(
                     convergence_df, fvo_ts, horizon=FWD_HORIZON, target_col="Price",
+                    prior=_icfg.weights_seed(),
                 )
-                if not _weight_hist.empty:
-                    _wnow = _weight_hist.iloc[-1]
-                    _wprior = _intel_mod.PRIOR_WEIGHTS
-                    console.item("Horizon", f"{FWD_HORIZON}d (outcome resolves h days after the call)")
-                    console.item("Learned Weights",
-                                 " · ".join(f"{k} {v:.3f}" for k, v in _wnow.sort_values(ascending=False).items()))
-                    console.item("Prior Weights",
-                                 " · ".join(f"{k} {_wprior[k]:.2f}" for k in _wnow.index))
-                    _moved = max(abs(_wnow[k] - _wprior[k]) for k in _wnow.index)
-                    console.item("Max Shift From Prior", f"{_moved:+.3f}")
-                    console.success(f"Dimension weights learned over {len(_weight_hist)} dates (no repaint)")
-                else:
-                    console.warning("Online weighting produced no coverage — prior weights stand")
-            except Exception as _we:
-                console.warning(f"Online weighting failed: {_we} — prior weights stand")
-
-            # Re-fit the conviction model on the re-weighted composite.
-            progress_bar(progress_container, 92, "Re-Fitting Conviction Model",
-                         "DDM pass on the online-weighted composite")
-            conviction_model = UnifiedConvictionModel(
-                leak_rate=_icfg.ddm_leak, drift_scale=_icfg.ddm_drift, long_run_var=_icfg.ddm_lrv,
-            )
-            results = conviction_model.fit(
-                convergence_df["convergence_score"].tolist(),
-                convergence_df.index.tolist(),
-            )
-            console.section("Conviction Model (re-weighted)")
-            if results:
-                latest = results[-1]
-                console.item("DDM Conviction", f"{latest.nishkarsh_conviction:+.0f}")
-                console.item("DDM Signal", latest.nishkarsh_signal)
-                console.item("DDM Band", f"[{latest.confidence_lower:.0f}, {latest.confidence_upper:.0f}]")
-            console.success("Re-fit complete on online-weighted convergence")
-
-        _active_w = (dict(_weight_hist.iloc[-1]) if not _weight_hist.empty
-                     else _icfg.weights_seed())
-        _active_t = _icfg.composite_thresholds()
-
-        # Publish to session state so the Passport sidebar + Convergence cards
-        # see the calibrated state immediately on the next rerun.
+            except Exception as _we:                # noqa: BLE001 - prior weights stand
+                console.warning(f"Online weighting failed: {type(_we).__name__}: {_we} — prior weights stand")
+        elif not convergence_df.empty:
+            console.warning(
+                f"Online weighting skipped: {native_overlap_count} native overlap sessions "
+                f"(< {_intel_mod.LEARNER_WARMUP}, the learner's warm-up) — prior weights stand.")
+        _prior_w = {k.removeprefix("w_"): float(v) for k, v in _icfg.weights_seed().items()}
+        _tot = sum(_prior_w.values()) or 1.0
+        _prior_w = {k: v / _tot for k, v in _prior_w.items()}
+        _active_w = ({k: float(v) for k, v in _weight_hist.iloc[-1].items()}
+                     if not _weight_hist.empty else _prior_w)
+        if not _weight_hist.empty:
+            console.item("Learned weights", " · ".join(f"{k} {v:.3f}" for k, v in
+                                                       sorted(_active_w.items(), key=lambda kv: -kv[1])))
+            console.item("Prior weights", " · ".join(f"{k} {_prior_w[k]:.2f}" for k in _active_w))
         st.session_state["intelligence_active_weights"] = _active_w
-        st.session_state["intelligence_active_thresholds"] = _active_t
-        st.session_state["intelligence_active_profile"] = (
-            {"weights": _active_w, "learned": bool(_learn_weights)}
-        )
+        st.session_state["intelligence_active_profile"] = {"weights": _active_w,
+                                                           "learned": not _weight_hist.empty}
 
-        # ── 4d. NORMALIZED CONSENSUS ─────────────────────────────────────────
-        # The causal expanding-z average of Mūla's ConvictionRaw and Swayam's
-        # Avg_Signal. It headlined the hero card until the card became a
-        # conviction chain; it is now an INPUT to that chain's convergence
-        # gate (a consensus pointing against the Mūla call shuts the gate), and
-        # the top row of the Unified Signal plot. `consensus_series` is the
-        # single source for the full history; the dict is its last point.
-        from convergence.normalization import (
-            compute_normalized_convergence, consensus_series, classify_convergence_score,
-        )
+        # ── 4c. The composite's drift-diffusion filter — one pass ─────────
+        # On the learned composite, which is the only construction the
+        # learned weights mean anything for. (Two DDM passes used to run here,
+        # one on the prior-weighted composite, and neither was shown anywhere.)
+        if not convergence_df.empty:
+            progress_bar(progress_container, 90, "Filtering the Composite", "Leaky drift-diffusion")
+            _ddm = CompositeDDM(leak_rate=_icfg.ddm_leak, drift_scale=_icfg.ddm_drift,
+                                long_run_var=_icfg.ddm_lrv).fit_series(convergence_df["convergence_score"])
+            for _c in ("smoothed", "upper", "lower", "label"):
+                convergence_df[f"ddm_{_c}"] = _ddm[_c].to_numpy()
+            _last_c = convergence_df.iloc[-1]
+            console.item("Weighted composite", f"{_last_c['convergence_score']:+.1f} "
+                         f"({classify_convergence_score(_last_c['convergence_score'])}) · filtered "
+                         f"{_last_c['ddm_smoothed']:+.1f} ({_last_c['ddm_label']})")
+
+        # ── 4d. The consensus — evidence for the Convergence page ─────────
         _consensus_full = consensus_series(fvo_ts, swayam_daily)
-        _nishkarsh_norm = compute_normalized_convergence(fvo_ts, swayam_daily)
-        if _nishkarsh_norm:
-            console.section("Normalized Consensus (headline)")
-            console.item("Conviction", f"{_nishkarsh_norm['value']:+.2f}")
-            console.item("Signal", _nishkarsh_norm['signal'])
-            console.item("  Mūla contribution", f"{_nishkarsh_norm['fvo_norm']:+.2f}")
-            console.item("  Swayam contribution",  f"{_nishkarsh_norm['swayam_norm']:+.2f}")
-
-        # ── 4e. WEIGHTED COMPOSITE — the second construction ────────────────
-        # convergence_score (post online re-weighting, ±100 scale) IS the exact
-        # quantity the learner scores, so this is the one place the learned
-        # weights are semantically valid (audit findings F1/F2). It feeds the
-        # hero's WEIGHTED evidence row — a genuine second opinion, being a
-        # dimension-weighted construction of the same two engines rather than
-        # their plain 50/50 mean. The
-        # RAW factory-weight composite is no longer surfaced in the UI at all
-        # — it remains the research baseline in
-        # research/calibration_lift_study.py (raw-vs-calibrated ablation).
-        _calibrated_score = float(convergence_df["convergence_score"].iloc[-1]) if not convergence_df.empty else 0.0
-        _calibrated_signal = classify_convergence_score(_calibrated_score, _active_t)
-        console.section("Calibrated Signal (evidence)")
-        console.item("Score", f"{_calibrated_score:+.1f}")
-        console.item("Signal", _calibrated_signal)
+        _cons_now = compute_normalized_convergence(fvo_ts, swayam_daily)
+        if _cons_now:
+            console.item("Consensus", f"{_cons_now['value']:+.2f} ({_cons_now['label']}) · "
+                         f"Mūla {_cons_now['fvo_norm']:+.2f}, Swayam {_cons_now['swayam_norm']:+.2f}")
 
         console.section("Divergence Detection")
-        progress_bar(progress_container, 93, "Detecting Divergences", "Cross-System Disagreement Analysis")
         events = divergence_detector.get_events()
-        console.item("Total Events", len(events))
+        console.item("Events", len(events))
         if not events.empty:
-            event_types = events['divergence_type'].value_counts()
-            for etype, count in event_types.items():
+            for etype, count in events["divergence_type"].value_counts().items():
                 console.item(f"  {etype}", count)
-        console.success("Divergence analysis complete")
 
-        # ── Walk-Forward Validation (durability check, runs every analysis) ──
-        # Re-calibrates on each expanding window and scores IC on the next
-        # unseen block. Many genuine OOS grades → distinguishes a durable edge
-        # from a lucky recent regime. Results power the Diagnostics tab.
-        console.section("Walk-Forward Validation")
-        progress_bar(progress_container, 94, "Walk-Forward Validation", "Rolling OOS IC · Re-Calibration")
+        # ── 4e. Every engine graded the same way ─────────────────────────
+        # The lean each engine publishes, against the h-day forward return,
+        # on non-overlapping windows. The hero's edge gate reads Mūla's — the
+        # call it gates. It used to read a walk-forward of the unsigned
+        # AGREEMENT composite at 5 days on overlapping rows: it graded neither
+        # the call nor the composite, and returned −0.01 on a synthetic signal
+        # with a planted IC of +0.31.
+        console.section("Walk-Forward Edge")
+        progress_bar(progress_container, 93, "Grading Every Engine", f"Non-overlapping {FWD_HORIZON}d IC")
+        _price = pd.to_numeric(fvo_ts["Price"], errors="coerce")
+        _edges: dict = {}
         try:
-            _hold_grid = _icfg.hold_horizons  # IC durability at this instrument's forecast horizons
-            _wf_frame = _intel_mod._build_calibration_frame(
-                convergence_df, fvo_ts, target_col="Price", horizons=_hold_grid,
-            )
-            _wf_results = _intel_mod.walk_forward_ic(_wf_frame, horizons=_hold_grid)
-            st.session_state["wf_results"] = _wf_results
-            _wf_ics = [r["ic"] for r in _wf_results if r["ic"] == r["ic"]]  # drop NaN
-            if _wf_ics:
-                _wf_mean = sum(_wf_ics) / len(_wf_ics)
-                _wf_pos = sum(1 for v in _wf_ics if v > 0)
-                console.item("Windows", len(_wf_ics))
-                console.item("Mean OOS IC", f"{_wf_mean:+.3f}")
-                console.item("Positive", f"{_wf_pos}/{len(_wf_ics)}")
-                console.success(f"Walk-forward: mean OOS IC {_wf_mean:+.3f} ({_wf_pos}/{len(_wf_ics)} +ve)")
-            else:
-                console.warning("Walk-forward produced no scorable windows")
-        except Exception as _wf_e:
-            st.session_state["wf_results"] = None
-            console.warning(f"Walk-forward validation skipped: {_wf_e}")
-
+            _fvo = pd.to_numeric(fvo_ts["FVO"], errors="coerce")
+            _edges["mula"] = _intel_mod.series_edge(
+                _fvo.map(valuation_lean).where(_fvo.notna()), _price, FWD_HORIZON)
+            if not swayam_daily.empty:
+                # Native rows only: a carried-forward breadth row is not a new call.
+                _sw = (swayam_daily[swayam_daily["_Native"].astype(bool)]
+                       if "_Native" in swayam_daily.columns else swayam_daily)
+                _edges["swayam"] = _intel_mod.series_edge(
+                    pd.Series([breadth_lean(a, b) for a, b in zip(_sw["Oversold_Pct"], _sw["Overbought_Pct"])],
+                              index=_sw.index), _price, FWD_HORIZON)
+            if not convergence_df.empty:
+                _cs_idx = pd.to_datetime(convergence_df.index, errors="coerce")
+                _edges["composite"] = _intel_mod.series_edge(
+                    pd.Series(-convergence_df["convergence_score"].to_numpy(dtype=float) / 100.0,
+                              index=_cs_idx), _price, FWD_HORIZON)
+            for _k, _e in _edges.items():
+                console.item(f"{_k} edge", (f"IC {_e['ic']:+.3f} ± {_e['se']:.3f} · {_e['n']} calls · "
+                                            f"{_e['positive_blocks']}/{_e['scored_blocks']} periods +")
+                             if _e and _e.get("ic") is not None and np.isfinite(_e["ic"]) else "not graded")
+        except Exception as _ee:                    # noqa: BLE001 - a diagnostic, not the run
+            console.warning(f"Edge grading skipped: {type(_ee).__name__}: {_ee}")
         console.end_phase("CONVERGENCE")
-        _conv_complete_sub = (
-            f"{overlap_count} Overlap Dates · {len(events)} Divergence Events · "
-            f"{'Online-Weighted' if _learn_weights else 'Prior Weights'}"
-        )
-        progress_bar(progress_container, 95, "Convergence Phase Complete", _conv_complete_sub)
+        progress_bar(progress_container, 95, "Convergence Complete",
+                     f"{overlap_count} sessions · {len(events)} divergences · "
+                     f"{'learned' if not _weight_hist.empty else 'prior'} weights")
 
         # ── Phase 5: Final Assembly ───────────────────────────────────────
         console.start_phase("FINAL ASSEMBLY", 5, 5)
-        progress_bar(progress_container, 96, "Storing Results", "Session State · Cache")
-        console.section("Session State")
-
+        progress_bar(progress_container, 96, "Storing Results", "Session state · cache")
         st.session_state["engine"] = engine
         st.session_state["engine_cache"] = cache_key
         st.session_state["fvo_ts"] = fvo_ts
@@ -2095,402 +1828,260 @@ def main():
         st.session_state["swayam_view_dfs"] = swayam_view_dfs
         st.session_state["convergence_df"] = convergence_df
         st.session_state["divergence_events"] = events
-        st.session_state["nishkarsh_result"] = results[-1] if results else None
-        st.session_state["last_agreement"] = convergence_df["agreement_ratio"].iloc[-1] if not convergence_df.empty else 0
-        # The weighted composite — the hero's WEIGHTED evidence row and the
-        # Unified Signal plot's amber overlay.
-        st.session_state["nishkarsh_calibrated_score"] = _calibrated_score
-        st.session_state["nishkarsh_calibrated_signal"] = _calibrated_signal
-
-        # `hero_series` — the normalized consensus's full history (from
-        # consensus_series, the single source shared with the Unified Signal
-        # plot's top row). It is no longer a "hero" series in the sense of
-        # being what the card plots: the card has no plot. It survives because
-        # the Convergence tab's marker tiers are causal quantiles of THIS
-        # distribution (see _series_tier there), which needs the history.
-        #
-        # `hero_smoothed` (a DDM of the same consensus) went with the TREND
-        # evidence row it existed to feed.
+        st.session_state["edges"] = _edges
+        # The consensus's full history — the Convergence page's chart and the
+        # Data page's export read it.
         st.session_state["hero_series"] = (
-            _consensus_full["Consensus"].rename("HeroConsensus")
-            if not _consensus_full.empty else None)
-
-        if results:
-            _ccs_index = pd.to_datetime(convergence_df.index, errors="coerce")
-            st.session_state["calibrated_conv_series"] = pd.Series(
-                [r.nishkarsh_conviction / 100.0 for r in results],
-                index=_ccs_index, name="CalibratedConvergence",
-            )
-        else:
-            st.session_state["calibrated_conv_series"] = None
-
-        # THE HEADLINE: the normalized consensus dict (value + signal +
-        # per-engine contributions) — single source of truth from
-        # convergence/normalization.py, shared verbatim with the TATTVA
-        # CONVICTION card and the Unified Signal plot's top row.
-        st.session_state["nishkarsh_conv_normalized"] = _nishkarsh_norm
-
-        # Display signal = what the UI cards show: the consensus headline,
-        # then the DDM signal as a last resort.
-        display_signal = (
-            _nishkarsh_norm["signal"] if _nishkarsh_norm
-            else (results[-1].nishkarsh_signal if results else "N/A")
-        )
-
-        console.item("Mūla Engine", "✅ Cached")
-        console.item("Swayam Daily", f"✅ {len(swayam_daily)} rows")
-        console.item("View Bank", f"✅ {len(swayam_view_dfs)} views")
-        console.item("Convergence DF", f"✅ {len(convergence_df)} rows")
-        console.item("Convergence Result", f"✅ {display_signal}")
+            _consensus_full["Consensus"].rename("Consensus") if not _consensus_full.empty else None)
 
         console.end_phase("FINAL ASSEMBLY")
-
         console.summary("RUN SUMMARY", {
             "Total Phases": "5/5 complete",
             "Mūla Rows": len(engine.ts_data),
             "Swayam Views": len(swayam_view_dfs),
             "Swayam Trading Days": len(swayam_daily),
-            "Convergence Scores": len(convergence_df),
-            "Overlap Dates": overlap_count,
+            "Scored Sessions": overlap_count,
             "Divergence Events": len(events),
             "Status": "SUCCESS",
         })
-
         console.line('═', 70)
         console._write(f"  {Colors.BOLD}{Colors.GREEN}Analysis Complete{Colors.RESET}")
         console.line('═', 70)
         console._write()
 
         # Snapshot this config's full result into the bounded per-config cache
-        # so revisiting it later (commodity switch-back, predictor toggle-back)
-        # restores instantly. LRU-evict to keep memory bounded.
+        # so revisiting it later restores instantly. LRU-evict to bound memory.
         _rcache = st.session_state.setdefault("results_cache", {})
         _rcache.pop(cache_key, None)
-        _bundle_snapshot = {bk: st.session_state.get(bk) for bk in _BUNDLE_KEYS}
-        # Trim large baskets' per-constituent frames before they enter the LRU
-        # (audit finding F19) — see _bundle_swayam_view_dfs's docstring.
-        _bundle_snapshot["swayam_view_dfs"] = _bundle_swayam_view_dfs(
-            _bundle_snapshot.get("swayam_view_dfs") or {}
-        )
-        _rcache[cache_key] = _bundle_snapshot
+        _rcache[cache_key] = {bk: st.session_state.get(bk) for bk in _BUNDLE_KEYS}
         while len(_rcache) > _RESULTS_CACHE_MAX:
             _rcache.pop(next(iter(_rcache)))
 
-        progress_bar(progress_container, 100, "Analysis Complete", f"Convergence: {display_signal}")
+        progress_bar(progress_container, 100, "Analysis Complete", f"{active_target}")
         time.sleep(0.25)
         progress_container.empty()
-        st.session_state["run_requested"] = True
         st.rerun()
 
     engine: FairValueEngine = st.session_state["engine"]
     signal = engine.get_current_signal()
     model_stats = engine.get_model_stats()
-    regime_stats = engine.get_regime_stats()
     ts = engine.ts_data.copy()
     if active_date != "None" and active_date in data.columns:
         ts["Date"] = pd.to_datetime(data[active_date].values)
     else:
         ts["Date"] = np.arange(len(ts))
-    if "fvo_ts" not in st.session_state:
-        st.session_state["fvo_ts"] = ts.copy()
 
-    nishkarsh_norm = st.session_state.get("nishkarsh_conv_normalized")
-    agreement = st.session_state.get("last_agreement", 0)
-
-    # ─── Precedent base rate for the hero (co-equal second opinion) ────────
-    # A 33-target non-overlapping study (hero_study.py) found the analog precedent
-    # is a STRONGER directional read than the convergence signal, and adds genuine,
-    # independent value — while the plot markers add nothing (they ARE the
-    # convergence's own inputs). So the hero reads the precedent alongside its
-    # signal: agreement raises confidence, disagreement is flagged as a divergence.
-    # NOTE: the specific quoted numbers in the original study (IC +0.226 vs +0.158)
-    # were measured under a since-changed analog config (the old .55/.35/.10
-    # Mahalanobis/trajectory/recency blend, not the current pure-Mahalanobis 1/0/0 —
-    # see analytics.analogs.ANALOG_W_*) and with a look-ahead full-sample
-    # normalization the live tab avoids (causal expanding z-scores). Re-run
-    # hero_study.py with the shipped config before quoting a specific number again;
-    # the qualitative conclusion (precedent >= convergence, markers add nothing) is
-    # the part that's load-bearing here, not the exact ICs.
-    # Content-aware key (not just row count): include the latest Price so an intraday
-    # refresh that updates the last bar without adding a row still recomputes.
-    #
-    # Computed ONCE here over the FIXED precedent term structure
-    # (core.config.PRECEDENT_HORIZONS = 1/3/5/10/20/60d) and cached as the raw
-    # analog list — the tab (ui/tabs/tab_precedent.py) previously called
-    # find_similar_periods AGAIN with its own hold_horizons on every render,
-    # re-running the expensive part (feature-frame build incl. rolling Hurst,
-    # Mahalanobis distance, Theiler selection) a second time for the same
-    # ts/target/mom_window (audit finding F18). summarize_forward is cheap
-    # (pure aggregation), so both the hero's single-horizon read and the tab's
-    # per-horizon cards derive from this one cached analog list.
-    #
-    # The analog STATE features use this instrument's forecast-momentum window;
-    # the term structure is this instrument's precedent_horizons span.
+    # ─── Precedent base rate (the hero's sixth gate) ────────────────────────
+    # Computed ONCE over the instrument's fixed precedent term structure and
+    # cached as the raw analog list, so the Precedent page summarises the same
+    # list instead of re-running the matcher. The key carries the engine
+    # config as well as the last price: a different panel or horizon is a
+    # different state vector, not the same one with a new close.
     _plast = float(ts["Price"].iloc[-1]) if "Price" in ts.columns and len(ts) else 0.0
-    _pkey = f"{active_target}|{len(ts)}|{_plast:.6g}"
-    if st.session_state.get("_prec_key") != _pkey:   # recompute only when inputs change
-        _prec_summary = None
-        _cached_analogs: list = []
-        _cached_display_hold: tuple = ()
+    _pkey = f"{st.session_state.get('engine_cache', active_target)}|{len(ts)}|{_plast:.6g}"
+    if st.session_state.get("_prec_key") != _pkey:
+        _prec_summary, _cached_analogs = None, []
         try:
             from analytics.analogs import find_similar_periods as _fsp, summarize_forward as _sf
-            _display_hold = _icfg.precedent_horizons
-            _analogs = _fsp(ts, active_target, hold_horizons=_display_hold,
-                            mom_window=_icfg.analog_mom_window)
-            _cached_analogs = _analogs
-            _cached_display_hold = _display_hold
-            _ps = _sf(_analogs, _display_hold) if _analogs else {}
-            # Hero precedent second-opinion reads at this instrument's forecast
-            # horizon (a member of its precedent_horizons); fall back to the
-            # nearest available shorter horizon if it is ever absent.
+            _display_hold = tuple(_icfg.precedent_horizons)
+            _cached_analogs = _fsp(ts, active_target, hold_horizons=_display_hold,
+                                   mom_window=_icfg.analog_mom_window) or []
+            _ps = _sf(_cached_analogs, _display_hold) if _cached_analogs else {}
+            # The gate reads at this instrument's forecast horizon (a member of
+            # its precedent term structure); the nearest shorter one otherwise.
             _hp = int(_icfg.forecast_horizon)
             if _hp not in _ps:
                 _cands = [h for h in _display_hold if h <= _hp]
                 _hp = max(_cands) if _cands else min(_display_hold)
             _row = _ps.get(int(_hp))
             if _row:
-                _med = _row["median"]
                 _prec_summary = {
-                    "horizon": int(_hp), "median": float(_med),
+                    "horizon": int(_hp), "median": float(_row["median"]),
                     "positive_pct": float(_row["positive_pct"]),
-                    # n_eff, not n, is what the hero's precedent gate reads:
-                    # ten analogs carried by one episode is one observation.
-                    "n": int(round(_row.get("n_eff", _row["n"]))),
-                    "n_raw": int(_row["n"]),
-                    "n_eff": float(_row.get("n_eff", _row["n"])),
+                    # n_eff, not n: ten analogs carried by one episode are one
+                    # observation.
+                    "n": int(_row["n"]), "n_eff": float(_row.get("n_eff", _row["n"])),
                     "p25": float(_row.get("p25", float("nan"))),
                     "p75": float(_row.get("p75", float("nan"))),
                     "usable": bool(_row.get("usable", True)),
-                    "note": str(_row.get("note", "")),
-                    "dir": 1 if _med > 0 else -1 if _med < 0 else 0,
+                    "note": str(_row.get("note", "") or ""),
                 }
-        except Exception:
-            _prec_summary = None
+        except Exception as _pe:                       # noqa: BLE001 - a gate, not the run
+            console.warning(f"Precedent read skipped: {type(_pe).__name__}: {_pe}")
         st.session_state["precedent_summary"] = _prec_summary
-        st.session_state["_precedent_analogs_cache"] = {
-            "pkey": _pkey, "periods": _cached_analogs, "display_hold": _cached_display_hold,
-        }
+        st.session_state["_precedent_analogs_cache"] = {"pkey": _pkey, "periods": _cached_analogs}
         st.session_state["_prec_key"] = _pkey
 
     # ─── Hero verdict — computed once. Rendered in full only on Overview;
-    # every page's top-bar/KPIs can read the SAME object, so nothing can ever
-    # disagree with what Overview shows (see _compute_hero_verdict's docstring).
-    verdict = _compute_hero_verdict(nishkarsh_norm, agreement, signal)
+    # every page's command bar reads the SAME object, so nothing can disagree
+    # with what Overview shows.
+    verdict = _compute_hero_verdict(signal)
 
-    # (A decorative "◄ CONFIGURE" arrow pointing at the sidebar rendered here.
-    # It was the first thing on every page, it was amber — the caution colour,
-    # spent on a signpost — and it pointed at a rail that is open by default
-    # and self-evidently a control rail. Removed rather than restyled.)
-
-    # ─── Timeframe — read here, RENDERED in a chart panel header ───────────
-    # Read here (the filtered series below needs it) but RENDERED inside the
-    # panel header of each page's primary chart. Reading state up here and
-    # drawing the widget further down is safe and is the standard Streamlit
-    # pattern: a widget interaction reruns the script, so session_state
-    # already holds the new value by the time this line executes.
-    #
-    # Derived from TIMEFRAME_TRADING_DAYS (core/config.py) rather than a
-    # second hard-coded {3M:63, 6M:126, ...} literal — the two used to drift
-    # independently with no shared source (audit finding F15).
-    TIMEFRAMES = {**TIMEFRAME_TRADING_DAYS, 'ALL': None}
-    if st.session_state.get("tf_selected") not in TIMEFRAMES:
+    # ─── Chart window — read here, RENDERED in a chart panel header ────────
+    # Read here (the filtered series below needs it) but drawn inside the panel
+    # header of each page's primary chart; a widget interaction reruns the
+    # script, so session_state already holds the new value by this line. The
+    # cut comes from the one helper every page uses (ui.components.window_cutoff).
+    if st.session_state.get("tf_selected") not in (*TIMEFRAME_TRADING_DAYS, "ALL"):
         st.session_state["tf_selected"] = "6M"
     selected_tf = st.session_state["tf_selected"]
-
-    # Ensure timeframe survives config changes by always applying it
-    ts_filtered = ts.copy()
+    ts_filtered = ts
     if selected_tf != "ALL":
-        if active_date != "None" and pd.api.types.is_datetime64_any_dtype(ts["Date"]):
-            from pandas import DateOffset
-            max_date = ts["Date"].max()
-            offsets = {"3M": DateOffset(months=3), "6M": DateOffset(months=6), "1Y": DateOffset(years=1), "2Y": DateOffset(years=2)}
-            cutoff = max_date - offsets.get(selected_tf, DateOffset(years=1))
-            ts_filtered = ts[ts["Date"] >= cutoff]
+        if pd.api.types.is_datetime64_any_dtype(ts["Date"]):
+            _cut = window_cutoff(ts["Date"].max(), selected_tf)
+            ts_filtered = ts[ts["Date"] >= _cut] if _cut is not None else ts
         else:
-            n_days = TIMEFRAME_TRADING_DAYS.get(selected_tf, 252)
-            ts_filtered = ts.iloc[max(0, len(ts) - n_days):]
+            ts_filtered = ts.iloc[max(0, len(ts) - TIMEFRAME_TRADING_DAYS.get(selected_tf, 252)):]
     x_axis = ts_filtered["Date"]
-    x_title = "Date" if active_date != "None" else "Index"
 
-    # ─── Command-bar status (price / change / freshness chip) — shared by
-    # every page's shell. Deliberately independent of the queued freshness
-    # notices (which keep their own richer explanation, rendered in the rail
-    # below the bar) — this is only the one-glance summary. ────────────────
+    # ─── Command-bar status (price / change / freshness chip) ──────────────
     _cb_price = _cb_chg = None
     if "Price" in ts.columns and len(ts) >= 2:
         _cb_tail = pd.to_numeric(ts["Price"], errors="coerce").tail(2)
         if pd.notna(_cb_tail.iloc[-1]):
             _cb_price = float(_cb_tail.iloc[-1])
             if pd.notna(_cb_tail.iloc[-2]) and _cb_tail.iloc[-2] != 0:
-                # PERCENT POINTS, not a fraction. This was previously passed
-                # as a fraction (0.0042) into a "%.2f%%" format, so a +0.42%
-                # session printed as "0.00%" in the command bar — the one
-                # number on screen a desk reads before any other, wrong by
-                # two orders of magnitude on every render.
+                # PERCENT POINTS, not a fraction.
                 _cb_chg = float(_cb_tail.iloc[-1] / _cb_tail.iloc[-2] - 1.0) * 100.0
-    _cb_status_label, _cb_status_tone, _cb_asof = "", "neutral", ""
-    try:
-        if active_date != "None" and active_date in df.columns:
-            _cb_last_dt = pd.to_datetime(ts["Date"], errors="coerce").max()
-            if pd.notna(_cb_last_dt):
-                _cb_today = min(datetime.now(timezone.utc).date(), datetime.now().date())
-                _cb_behind = trading_days_behind(ALL_TARGETS.get(active_target), _cb_last_dt.date(), _cb_today)
-                if _cb_behind >= STALENESS_DAYS:
-                    _cb_status_label, _cb_status_tone = "STALE", "danger"
-                elif _cb_behind >= 1:
-                    _cb_status_label, _cb_status_tone = f"{_cb_behind}D BEHIND", "warning"
-                else:
-                    _cb_status_label, _cb_status_tone = "LIVE", "success"
-                _cb_asof = _cb_last_dt.strftime("%d %b %Y")
-    except Exception:
-        pass
+    _cb_status_label, _cb_status_tone = _fresh["label"], _fresh["tone"]
+    _cb_asof = _fresh["as_of"].strftime("%d %b %Y") if _fresh["as_of"] is not None else ""
+    _edges = st.session_state.get("edges") or {}
 
-    def _top_bar(*, toolbar: bool = False) -> None:
+    def _top_bar(*, windowed: bool = False) -> None:
         """The page shell, identical on every page.
 
         Order is fixed and means something: the TAPE (the world) sits above
         the COMMAND BAR (this instrument), which sits above the NOTICE RAIL
-        (the caveats on it). Page content follows.
-
-        The chart-window control used to dock here as a toolbar strip. It has
-        moved into the panel header of each page's primary chart — a control
-        that reframes a chart belongs on that chart, not in page chrome three
-        elements above it.
+        (the caveats on it). The bar names the chart window only on pages
+        whose charts it actually frames — on Overview, Precedent and System it
+        changed nothing and still claimed "Window 6M".
         """
         render_ticker(data)
+        _meta = [("Call", f"{verdict['signal']} · {format_conviction(verdict)}"),
+                 ("Horizon", f"{FWD_HORIZON}D"), ("As of", _cb_asof)]
+        if windowed:
+            _meta.insert(1, ("Window", selected_tf))
         render_top_bar(
             target=active_target, price=_cb_price, change_pct=_cb_chg,
             status_label=_cb_status_label, status_tone=_cb_status_tone,
-            meta_items=[
-                ("Window", selected_tf),
-                ("Horizon", f"{FWD_HORIZON}D"),
-                ("As of", _cb_asof),
-            ],
-            open_strip=toolbar,
+            meta_items=_meta,
         )
         render_notice_rail(_notices)
 
-    # Error boundary wrapper — unchanged from the previous per-tab dispatch,
-    # just reused per-page now instead of per-tab.
     def _safe_render(name, render_fn):
-        """Render a page's content with graceful error handling."""
+        """Render a page's content; a failure says which page and why."""
         try:
             render_fn()
-        except Exception as e:
-            st.markdown(
-                f'<div class="warning-box">'
-                f'<div class="interp-title">Error in {html.escape(name)}</div>'
-                f'<div class="interp-body">{html.escape(str(e))}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+        except Exception as e:                       # noqa: BLE001 - one page, not the app
+            console.warning(f"{name} page failed: {type(e).__name__}: {e}")
+            render_warning_box(title=f"{name} could not be drawn", content=html.escape(str(e)))
 
-    # ─── App shell — one real page per analytical surface (st.navigation),
-    # restyled into an institutional nav rail via theme.css. Every page below
-    # is a THIN wrapper: none of them recompute the pipeline above, they only
-    # call the exact same tab-render functions app.py has always called, with
-    # the exact same arguments — this is a presentation-layer restructure,
-    # not a change to what gets computed or when.
-    # ─────────────────────────────────────────────────────────────────────
+    # ─── App shell — one real page per analytical surface (st.navigation).
+    # Every page below is a THIN wrapper over the run above: none recompute
+    # the pipeline, so every page reads the same objects.
     def _page_overview() -> None:
-        """Overview — scan first, then read.
+        """Overview — the call, then why.
 
-        The KPI strip now leads and the conviction chain follows it. It was
-        the other way round: a ~400px verdict card, then a section header,
-        then the six numbers that summarise it — so the one row a returning
-        user actually needs sat below the fold, under prose they had already
-        read. Six numbers across the top answers "what changed since I last
-        looked" in one saccade; the chain below answers "why", for the reader
-        who wants it. Nothing was removed, and the numbers are the same
-        objects the card is built from, so the two cannot disagree.
+        Six numbers across the top answer "what changed since I last looked";
+        the conviction chain under them answers "why", for the reader who
+        wants it. They are built from the same objects, so they cannot disagree.
         """
         _top_bar()
         _swd = st.session_state.get("swayam_daily")
-        _sw_os = (float(_swd["Oversold_Pct"].iloc[-1])
-                  if _swd is not None and not _swd.empty and "Oversold_Pct" in _swd.columns else None)
+        _os = _ob = None
+        if _swd is not None and not _swd.empty and {"Oversold_Pct", "Overbought_Pct"} <= set(_swd.columns):
+            _os, _ob = float(_swd["Oversold_Pct"].iloc[-1]), float(_swd["Overbought_Pct"].iloc[-1])
         _cdf = st.session_state.get("convergence_df")
-        _agree = (float(_cdf["agreement_ratio"].iloc[-1])
-                  if _cdf is not None and not _cdf.empty and "agreement_ratio" in _cdf.columns else None)
-        _fvo_val = float(signal.get("fvo", 0.0) or 0.0)
+        _agree = (float(_cdf["agreement_ratio"].dropna().iloc[-1])
+                  if _cdf is not None and not _cdf.empty and "agreement_ratio" in _cdf.columns
+                  and _cdf["agreement_ratio"].notna().any() else None)
+        _val = verdict["valuation"]
+        _fvo_v = _val.get("fvo")
+        _trust = verdict["trust"]
+        _bind = verdict.get("binding")
         render_kpi_strip([
-            {"label": "Signal", "value": verdict["signal"], "subtext": verdict["action"]["prose"],
+            {"label": "Call", "value": verdict["signal"],
+             "subtext": verdict["action"]["label"].title(),
              "color_class": ("success" if verdict["signal_class"] == "buy"
                              else "danger" if verdict["signal_class"] == "sell" else "neutral")},
-            {"label": "Conviction", "value": f"{verdict['conviction']:.2f}",
-             "subtext": verdict["action"]["label"], "color_class": "accent"},
+            {"label": "Conviction", "value": format_conviction(verdict),
+             "subtext": (("capped by " + GATE_TITLES[_bind].lower()) if _bind
+                         else "every gate holds" if verdict.get("conviction") is not None
+                         else "no claim to grade"),
+             "color_class": "accent"},
+            {"label": "Valuation", "value": (_val.get("state") or "—").title() if _fvo_v is not None else "—",
+             "subtext": (f"{_fvo_v:+.2f}σ · {abs(_val['pct']):.1f}% {_val['side']} fair value"
+                         if _fvo_v is not None else "no published valuation"),
+             "color_class": ("success" if _fvo_v is not None and _fvo_v <= -0.5
+                             else "danger" if _fvo_v is not None and _fvo_v >= 0.5 else "neutral")},
             {"label": "Walk-Forward Edge",
-             "value": (f"{verdict['trust']['oos_ic']:+.3f}" if verdict["trust"].get("oos_ic") is not None else "—"),
-             "subtext": verdict["trust"]["chip"], "color_class": "info"},
-            {"label": "Mispricing", "value": f"{_fvo_val:+.2f}σ",
-             "subtext": f"{abs(float(signal.get('pct_mispricing', 0.0) or 0.0)) * 100:.1f}% vs fair value",
-             "color_class": "success" if _fvo_val < 0 else "danger" if _fvo_val > 0 else "neutral"},
-            {"label": "Swayam Breadth", "value": (f"{_sw_os:.0f}%" if _sw_os is not None else "—"),
-             "subtext": "oversold share", "color_class": "neutral"},
-            {"label": "Engine Agreement", "value": (f"{_agree:.0%}" if _agree is not None else "—"),
-             "subtext": "Mūla vs Swayam", "color_class": "neutral"},
+             "value": f"{_trust['oos_ic']:+.3f}" if _trust.get("oos_ic") is not None else "—",
+             "subtext": (f"{_trust['chip'].title()} · ± {_trust['se']:.3f}"
+                         if _trust.get("se") is not None else _trust["chip"].title()),
+             "color_class": "info"},
+            {"label": "Swayam Net Breadth",
+             "value": f"{_os - _ob:+.0f} pts" if _os is not None else "—",
+             "subtext": f"{_os:.0f}% oversold · {_ob:.0f}% overbought" if _os is not None else "no Swayam read",
+             "color_class": ("success" if _os is not None and _os - _ob > 10
+                             else "danger" if _os is not None and _os - _ob < -10 else "neutral")},
+            {"label": "Engine Agreement", "value": f"{_agree:.0%}" if _agree is not None else "—",
+             "subtext": "Mūla × Swayam, four dimensions", "color_class": "neutral"},
         ], max_cols=6)
         render_section_header(
             "Conviction Chain",
-            "One directional claim from Mūla, then every condition that can invalidate it. "
-            "Conviction is their product, so the smallest gate is the binding constraint.",
+            "One directional claim from Mūla, then six independent conditions that can each "
+            "invalidate it. Conviction is their product, so the weakest gate is the binding "
+            "constraint.",
             icon="target", accent="accent",
         )
         render_hero_card(verdict)
 
-    def _page_fvo() -> None:
-        _top_bar()
+    def _page_mula() -> None:
+        _top_bar(windowed=True)
         _safe_render("Mūla", lambda: render_mula_tab(
-            engine, ts_filtered, x_axis, x_title, signal, model_stats, regime_stats, ts, active_target))
+            engine, ts_filtered, x_axis, signal, model_stats, ts, active_target,
+            edge=_edges.get("mula"), horizon=FWD_HORIZON))
 
     def _page_swayam() -> None:
-        _top_bar()
-        _safe_render("Swayam", lambda: render_swayam_tab(selected_tf=selected_tf))
+        _top_bar(windowed=True)
+        _safe_render("Swayam", lambda: render_swayam_tab(
+            selected_tf=selected_tf, edge=_edges.get("swayam"), horizon=FWD_HORIZON))
 
     def _page_convergence() -> None:
-        _top_bar()
-        _safe_render("Convergence", lambda: render_convergence_tab(ts_filtered))
+        _top_bar(windowed=True)
+        _safe_render("Convergence", lambda: render_convergence_tab(
+            ts_filtered, edge=_edges.get("composite"), horizon=FWD_HORIZON))
 
     def _page_precedent() -> None:
         _top_bar()
-        # Reuse the analog list already computed above (Precedent base-rate for
-        # the hero) instead of having the tab call find_similar_periods a second
-        # time for the same (ts, target, mom_window) — audit finding F18. Guarded
-        # on the pkey matching THIS render's ts/target/horizon; a mismatch
-        # (shouldn't happen since the precompute above always runs first) falls
-        # back to None, and the tab recomputes itself exactly as before.
         _prec_cache = st.session_state.get("_precedent_analogs_cache")
-        _cached_periods = (
-            _prec_cache["periods"] if _prec_cache and _prec_cache.get("pkey") == _pkey else None
-        )
-        # Precedent term structure + momentum/horizon come from this
-        # instrument's own config (precedent_horizons / analog_mom_window /
-        # forecast_horizon).
+        _cached_periods = (_prec_cache["periods"]
+                           if _prec_cache and _prec_cache.get("pkey") == _pkey else None)
         _safe_render("Precedent", lambda: render_precedent_tab(
             ts, active_target, _icfg.precedent_horizons, _icfg.analog_mom_window, _icfg.forecast_horizon,
             precomputed_periods=_cached_periods))
 
-    def _page_diagnostics() -> None:
+    def _page_system() -> None:
         _top_bar()
-        _safe_render("Diagnostics", lambda: render_diagnostics_tab(
-            engine, ts_filtered, x_axis, x_title, signal, model_stats))
+        _safe_render("System", lambda: render_diagnostics_tab(engine, signal, horizon=FWD_HORIZON))
 
     def _page_data() -> None:
-        _top_bar()
+        _top_bar(windowed=True)
         _safe_render("Data", lambda: render_data_tab(ts_filtered, ts, active_target))
 
     pages = {
         "": [st.Page(_page_overview, title="Overview", icon=":material/dashboard:", default=True)],
-        # Convergence leads: it is the read that combines the other two, so it
-        # is the one a returning user opens first. Mūla and Swayam follow as
-        # its inputs, Precedent as the independent check on all three.
+        # In the order the conviction chain reads them: the claim (Mūla), the
+        # instrument's own confirmation (Swayam), their agreement
+        # (Convergence), and the base rate (Precedent).
         "Engines": [
-            st.Page(_page_convergence, title="Convergence", icon=":material/merge_type:"),
-            st.Page(_page_fvo, title="Mūla", icon=":material/monitoring:"),
+            st.Page(_page_mula, title="Mūla", icon=":material/monitoring:"),
             st.Page(_page_swayam, title="Swayam", icon=":material/hub:"),
+            st.Page(_page_convergence, title="Convergence", icon=":material/merge_type:"),
             st.Page(_page_precedent, title="Precedent", icon=":material/history:"),
         ],
         "System": [
-            st.Page(_page_diagnostics, title="Diagnostics", icon=":material/monitor_heart:"),
+            st.Page(_page_system, title="System", icon=":material/monitor_heart:"),
             st.Page(_page_data, title="Data", icon=":material/table_chart:"),
         ],
     }

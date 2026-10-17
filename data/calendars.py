@@ -162,7 +162,10 @@ def _get_calendar(mic: str):
     lib hiccup) retries on the next call rather than permanently disabling the
     exchange calendar for the process lifetime.
     """
-    if not _HAVE_EC or not mic or mic == _FX:
+    # FX and crypto are sentinels, not MICs: asking exchange_calendars for
+    # "CRYPTO" failed on EVERY call (failures are deliberately not cached), so
+    # each crypto freshness check paid a library lookup to learn nothing.
+    if not _HAVE_EC or not mic or mic in (_FX, _CRYPTO):
         return None
     if mic in _CAL_CACHE:
         return _CAL_CACHE[mic]
@@ -242,6 +245,13 @@ def trading_days_behind(ticker: str | None, latest: date, today: date) -> int:
     if today <= latest:
         return 0
     mic = resolve_exchange(ticker)
+    # Crypto trades 24×7, but the model spine does not: fetch_commodity_dataset
+    # drops weekend rows (nothing else in the cross-section printed), so the
+    # newest bar a crypto target can have on a Sunday is Friday's. Counting
+    # calendar days here would call that bar two days stale every weekend; the
+    # weekday count is the honest one for a weekday spine.
+    if mic == _CRYPTO:
+        return _busday_behind(latest, today)
     cal = _get_calendar(mic)
     if cal is None:
         return _busday_behind(latest, today)

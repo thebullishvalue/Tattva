@@ -29,7 +29,7 @@ weight becomes the exponentially-discounted predictive skill of the thing being
 weighted, accumulated forward. Nothing is fitted to data that had not happened
 yet, so a value published on day *t* is never revised, and the same input
 prefix always produces the same output prefix — the reproducibility property
-``research/test_reproducibility.py`` asserts.
+the test suite asserts.
 
 What this deliberately does NOT auto-derive: horizons (``forecast_horizon``,
 ``precedent_horizons``) are product decisions about what you intend to trade,
@@ -66,7 +66,6 @@ __all__ = [
     "adaptive_tiers",
     "tier_now",
     "expanding_quantile_series",
-    "expanding_symmetric_tiers",
 ]
 
 
@@ -194,9 +193,6 @@ class OnlineSkillWeights:
             w = (1.0 - k) * w + k / n
         return w
 
-    def weight_map(self) -> dict[str, float]:
-        return dict(zip(self.names, self.weights()))
-
     def observe(self, signals: np.ndarray, outcome: float) -> None:
         """Absorb one scored round: what each member said, and what happened.
 
@@ -223,17 +219,6 @@ class OnlineSkillWeights:
     @property
     def n_scored(self) -> int:
         return self._n_scored
-
-    @property
-    def mean_agreement(self) -> dict[str, float]:
-        """Each member's discounted mean directional agreement, in [-1, +1]."""
-        return dict(zip(self.names, self._abar))
-
-    @property
-    def effective_n(self) -> float:
-        """Participation ratio of the weights — how many views are really voting."""
-        w = self.weights()
-        return float(1.0 / max(np.sum(w ** 2), EPS)) if len(w) else 0.0
 
 
 def expanding_quantile_series(
@@ -330,24 +315,3 @@ def tier_now(
         thr.update(v)
     # quantile() already refuses a degenerate (non-positive) estimate.
     return float(thr.quantile(q, fallback=float(prior)))
-
-
-def expanding_symmetric_tiers(
-    values: np.ndarray, q_strong: float = 0.90, q_moderate: float = 0.75,
-    min_obs: int = 252, fallback_strong: float = float("nan"),
-    fallback_moderate: float = float("nan"),
-) -> tuple[np.ndarray, np.ndarray]:
-    """Causal ``(strong, moderate)`` tiers from |signal|'s own past.
-
-    Tiers are taken on the ABSOLUTE signal and applied symmetrically, which is
-    the convention the hand-set constants already followed (they were quoted as
-    "p75/p90 of |x|"). Using |x| rather than the two tails separately means the
-    opening stretch needs half as much history to be informative, and it cannot
-    produce the pathological state where the buy tier sits above the sell tier
-    because one side happened to be quiet.
-    """
-    a = np.abs(np.asarray(values, dtype=np.float64))
-    return (
-        expanding_quantile_series(a, q_strong, min_obs, fallback_strong),
-        expanding_quantile_series(a, q_moderate, min_obs, fallback_moderate),
-    )

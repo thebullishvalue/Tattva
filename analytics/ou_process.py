@@ -1,8 +1,10 @@
 """
-Ornstein-Uhlenbeck process estimation with a Kendall (1954) / Orcutt & Winokur
-(1969) first-order bias-corrected AR(1) coefficient.
+Tattva — Ornstein-Uhlenbeck estimation of the mispricing gap.
+तत्त्व (Tattva) — "Principle / Essence"
 
-Extracted from correl.py lines 389-448, 560-589.
+ANALYTICS — OU parameters from an AR(1) regression with a Kendall (1954) /
+Orcutt & Winokur (1969) first-order bias correction. Used by the Mūla engine
+for the gap's full-history half-life and its decay projection.
 """
 
 from __future__ import annotations
@@ -91,47 +93,3 @@ def ornstein_uhlenbeck_estimate(
 
     return max(float(theta), 1e-4), float(mu), max(float(sigma), 1e-6)
 
-
-def andrews_median_unbiased_ar1(series: np.ndarray) -> tuple[float, float]:
-    """Kendall (1954) / Orcutt & Winokur (1969) first-order bias-corrected AR(1)
-    estimator with half-life.
-
-    (Despite the function name — kept for import-site compatibility — this is
-    NOT Andrews (1993); that is a quantile-table/simulation-based median-
-    unbiased estimator. This is the simpler closed-form first-order bias
-    correction: E[a_hat] ~= a - (1+3a)/n, so the correction is ADDITIVE.)
-
-    Parameters
-    ----------
-    series : np.ndarray
-        Input time-series.
-
-    Returns
-    -------
-    ar_coef : float
-        Bias-corrected AR(1) coefficient.
-    half_life : float
-        Half-life of mean reversion (``log(0.5) / log(ar_coef)``).
-    """
-    x = np.asarray(series, dtype=np.float64)
-    x = x[np.isfinite(x)]
-    n = len(x)
-
-    if n < 20:
-        return 0.0, np.inf
-
-    x_lag = x[:-1]
-    x_curr = x[1:]
-
-    a_ols = np.corrcoef(x_lag, x_curr)[0, 1]
-
-    if a_ols > 0.95:
-        a_mu = a_ols + (1 + 3 * a_ols) / n + 3 * (1 + 3 * a_ols) / (n**2)
-    else:
-        a_mu = a_ols + (1 + 3 * a_ols) / n
-
-    a_mu = np.clip(a_mu, 0.0, 0.999)
-
-    half_life = np.log(0.5) / np.log(a_mu) if a_mu > 0.01 else np.inf
-
-    return float(a_mu), float(half_life)

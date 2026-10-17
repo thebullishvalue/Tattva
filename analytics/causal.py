@@ -19,13 +19,6 @@ Raftery, A. E., Karny, M. & Ettler, P. (2010). "Online Prediction Under
     The recursive model-probability update used by :class:`DynamicModelAverage`.
 Koop, G. & Korobilis, D. (2012). "Forecasting Inflation Using Dynamic Model
     Averaging." *International Economic Review* 53(3).
-Opper, M. (1998). "A Bayesian Approach to Online Learning." In *Online
-    Learning in Neural Networks*.  Assumed-density filtering, the basis of
-    :class:`OnlineLogistic`.
-Spiegelhalter, D. J. & Lauritzen, S. L. (1990). "Sequential updating of
-    conditional probabilities on directed graphical structures." *Networks* 20.
-Welford, B. P. (1962). "Note on a Method for Calculating Corrected Sums of
-    Squares and Products." *Technometrics* 4(3).
 """
 
 from __future__ import annotations
@@ -49,50 +42,9 @@ def halflife_to_lambda(halflife: float) -> float:
     return float(np.exp(-np.log(2.0) / max(halflife, EPS)))
 
 
-def safe_div(a, b, fill=0.0):
-    """Elementwise division that returns `fill` where the denominator vanishes."""
-    b = np.asarray(b, dtype=float)
-    a = np.asarray(a, dtype=float)
-    out = np.full(np.broadcast(a, b).shape, fill, dtype=float)
-    ok = np.abs(b) > EPS
-    np.divide(a, b, out=out, where=ok)
-    return out
-
-
 # ===========================================================================
 # 1. Elementary streaming moments
 # ===========================================================================
-class Welford:
-    """Expanding-window mean/variance (Welford 1962), numerically stable.
-
-    ``mean``/``var`` always reflect observations already absorbed, so reading
-    them *before* calling :meth:`update` yields a strictly causal statistic.
-    """
-
-    __slots__ = ("n", "mean", "_m2")
-
-    def __init__(self) -> None:
-        self.n = 0
-        self.mean = 0.0
-        self._m2 = 0.0
-
-    def update(self, x: float) -> None:
-        if not np.isfinite(x):
-            return
-        self.n += 1
-        d = x - self.mean
-        self.mean += d / self.n
-        self._m2 += d * (x - self.mean)
-
-    @property
-    def var(self) -> float:
-        return self._m2 / (self.n - 1) if self.n > 1 else 0.0
-
-    @property
-    def std(self) -> float:
-        return math.sqrt(max(self.var, 0.0))
-
-
 class EWMA:
     """Exponentially weighted mean and variance with bias correction.
 
@@ -427,10 +379,39 @@ class DynamicModelAverage:
 
     @property
     def coef_var(self) -> np.ndarray:
-        """Model-averaged marginal coefficient variances (incl. model spread)."""
+        """Model-averaged marginal posterior variances of the coefficients.
+
+        Law of total variance across the bank: each member's own posterior
+        variance plus the spread of the members' means. ``BatchDLM.C`` is
+        already the posterior scale in the data's units — the conjugate update
+        rescales it by ``S_new / S`` every step (West & Harrison §4.6) — so it
+        is NOT multiplied by ``S`` again. (It was, before this property had a
+        consumer: harmless while nothing read it, a variance in squared units
+        of the observation variance the moment anything did.)
+        """
         mu = self.coef
         diag = np.einsum("mii->mi", self.bank.C)
-        return self.w @ (diag * self.bank.S[:, None] + (self.bank.M - mu) ** 2)
+        return self.w @ (diag + (self.bank.M - mu) ** 2)
+
+    def forecast_parts(self, F: np.ndarray) -> tuple[float, float, float]:
+        """Mixture predictive ``(mean, total variance, parameter variance)``.
+
+        The total is what :meth:`forecast` returns: the uncertainty about the
+        next OBSERVATION. The parameter part drops each member's observation
+        noise ``S`` and keeps only ``F'RF`` — the uncertainty about the
+        fitted LEVEL itself — plus the members' disagreement. For a valuation
+        regression those are different claims: one says how far price
+        typically sits from fair value, the other how precisely fair value is
+        known.
+        """
+        fs, qs, dofs = self.bank.forecast(F)
+        infl = np.where(dofs > 2.0, dofs / np.maximum(dofs - 2.0, EPS), 3.0)
+        mean = float(self.w @ fs)
+        spread = float(self.w @ (fs - mean) ** 2)
+        var = float(self.w @ (qs * infl)) + spread
+        par = np.maximum(qs - self.bank.S, 0.0)
+        var_par = float(self.w @ (par * infl)) + spread
+        return mean, max(var, VAR_FLOOR), max(var_par, 0.0)
 
     @property
     def effective_memory(self) -> float:
@@ -438,199 +419,7 @@ class DynamicModelAverage:
         mem = np.array([1.0 / max(1.0 - d, 1e-4) for d in self.grid])
         return float(self.w @ mem)
 
-    @property
-    def obs_var(self) -> float:
-        return float(self.w @ self.bank.S)
-
-
-# ===========================================================================
-# 3. Bayesian online logistic regression (assumed density filtering)
-# ===========================================================================
-class OnlineLogistic:
-    """Sequential Bayesian logistic regression with parameter drift.
-
-    Gaussian posterior on the weights, propagated by a discount factor and
-    updated by a single assumed-density-filtering step (Opper 1998;
-    Spiegelhalter & Lauritzen 1990).  Predictions are made by the standard
-    probit approximation to the logistic-Gaussian integral (MacKay 1992),
-    which propagates *parameter* uncertainty into the emitted probability --
-    the quantity the decision layer needs.
-    """
-
-    def __init__(self, k: int, delta: float = 0.995, prior_scale: float = 1.0) -> None:
-        self.k = k
-        self.delta = float(delta)
-        self.m = np.zeros(k)
-        self.P = np.eye(k) * float(prior_scale)
-        self.n_obs = 0
-
-    def predict(self, x: np.ndarray) -> tuple[float, float]:
-        """(calibrated probability, latent-score variance)."""
-        P = self.P / self.delta
-        mu = float(x @ self.m)
-        s2 = float(x @ P @ x)
-        kappa = 1.0 / math.sqrt(1.0 + math.pi * s2 / 8.0)
-        p = 1.0 / (1.0 + math.exp(-np.clip(kappa * mu, -30.0, 30.0)))
-        return p, max(s2, 0.0)
-
-    def update(self, x: np.ndarray, y: float) -> tuple[float, float]:
-        p, s2 = self.predict(x)
-        self.P = self.P / self.delta
-        if np.isfinite(y):
-            var = max(p * (1.0 - p), 1e-6)
-            Px = self.P @ x
-            denom = 1.0 / var + float(x @ Px)
-            K = Px / max(denom, EPS)
-            self.m = self.m + K * (y - p)
-            self.P = self.P - np.outer(K, Px)
-            self.P = 0.5 * (self.P + self.P.T)
-            d = np.diag(self.P).copy()
-            np.fill_diagonal(self.P, np.maximum(d, 1e-9))
-            self.n_obs += 1
-        return p, s2
-
-
-# ===========================================================================
-# 4. Streaming skill accounting
-# ===========================================================================
-class OnlineCorr:
-    """Forgetting-weighted correlation between a signal and a later outcome.
-
-    Used to turn "confidence" from an assertion into a measurement: the
-    signal at t-1 is correlated with the outcome at t, so the statistic is a
-    demonstrated association, evaluated out of sample by construction.
-    """
-
-    __slots__ = ("lam", "_xy", "_xx", "_yy", "_x", "_y", "_w")
-
-    def __init__(self, halflife: float = 504.0) -> None:
-        self.lam = halflife_to_lambda(halflife)
-        self._xy = self._xx = self._yy = self._x = self._y = self._w = 0.0
-
-    def update(self, x: float, y: float) -> None:
-        if not (np.isfinite(x) and np.isfinite(y)):
-            return
-        lam = self.lam
-        self._xy = lam * self._xy + x * y
-        self._xx = lam * self._xx + x * x
-        self._yy = lam * self._yy + y * y
-        self._x = lam * self._x + x
-        self._y = lam * self._y + y
-        self._w = lam * self._w + 1.0
-
-    @property
-    def n_eff(self) -> float:
-        return float(self._w)
-
-    @property
-    def rho(self) -> float:
-        w = self._w
-        if w < 5.0:
-            return 0.0
-        cxy = self._xy - self._x * self._y / w
-        cxx = self._xx - self._x * self._x / w
-        cyy = self._yy - self._y * self._y / w
-        den = math.sqrt(max(cxx, 0.0) * max(cyy, 0.0))
-        return float(cxy / den) if den > EPS else 0.0
-
-    @property
-    def evidence(self) -> float:
-        """P(rho > 0) under the Fisher-z sampling law: a calibrated
-        confidence in the association, not a rescaled magnitude."""
-        w = self.n_eff
-        if w < 10.0:
-            return 0.5
-        r = min(max(self.rho, -0.999), 0.999)
-        z = 0.5 * math.log((1.0 + r) / (1.0 - r)) * math.sqrt(max(w - 3.0, 1.0))
-        return norm_cdf_scalar(z)
-
-
-class OnlineSkill:
-    """Discounted out-of-sample skill of a stream of one-step predictions.
-
-    Tracks a forgetting-weighted R^2 against the unconditional-mean benchmark
-    and a directional hit rate.  Both are computed from predictions that were
-    made strictly before the corresponding outcome, so the resulting
-    "confidence" is a demonstrated, not assumed, quantity.
-    """
-
-    __slots__ = ("lam", "_se", "_sv", "_w", "_hit", "_hw", "_ymean")
-
-    def __init__(self, halflife: float = 252.0) -> None:
-        self.lam = halflife_to_lambda(halflife)
-        self._se = 0.0
-        self._sv = 0.0
-        self._w = 0.0
-        self._hit = 0.0
-        self._hw = 0.0
-        self._ymean = EWMA(halflife)
-
-    def update(self, pred: float, actual: float) -> None:
-        if not (np.isfinite(pred) and np.isfinite(actual)):
-            return
-        lam = self.lam
-        base = self._ymean.mean
-        self._se = lam * self._se + (actual - pred) ** 2
-        self._sv = lam * self._sv + (actual - base) ** 2
-        self._w = lam * self._w + 1.0
-        if abs(pred) > EPS:
-            self._hit = lam * self._hit + (1.0 if np.sign(pred) == np.sign(actual) else 0.0)
-            self._hw = lam * self._hw + 1.0
-        self._ymean.update(actual)
-
-    @property
-    def r2(self) -> float:
-        if self._sv <= EPS:
-            return 0.0
-        return float(1.0 - self._se / self._sv)
-
-    @property
-    def hit_rate(self) -> float:
-        return float(self._hit / self._hw) if self._hw > EPS else 0.5
-
-    @property
-    def n_eff(self) -> float:
-        return float(self._w)
-
-
-def logistic(x):
-    return 1.0 / (1.0 + np.exp(-np.clip(x, -30.0, 30.0)))
-
-
-def norm_cdf(x):
-    """Standard normal CDF (vectorised, no SciPy dependency in hot loops)."""
-    return 0.5 * (1.0 + np.vectorize(math.erf)(np.asarray(x, dtype=float) / math.sqrt(2.0)))
-
 
 def norm_cdf_scalar(x: float) -> float:
+    """Standard normal CDF of a scalar (no SciPy in the hot loops)."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
-def probit(u: float) -> float:
-    """Inverse standard normal CDF (Acklam's rational approximation).
-
-    Accurate to ~1e-9 in the central region, which is far beyond what an
-    empirical CDF built from a few thousand points can resolve.
-    """
-    u = min(max(float(u), 1e-6), 1.0 - 1e-6)
-    a = (-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
-         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00)
-    b = (-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
-         6.680131188771972e+01, -1.328068155288572e+01)
-    c = (-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
-         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00)
-    d = (7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
-         3.754408661907416e+00)
-    pl, ph = 0.02425, 1.0 - 0.02425
-    if u < pl:
-        q = math.sqrt(-2.0 * math.log(u))
-        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-               ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
-    if u > ph:
-        q = math.sqrt(-2.0 * math.log(1.0 - u))
-        return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / \
-                ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
-    q = u - 0.5
-    rr = q * q
-    return (((((a[0] * rr + a[1]) * rr + a[2]) * rr + a[3]) * rr + a[4]) * rr + a[5]) * q / \
-           (((((b[0] * rr + b[1]) * rr + b[2]) * rr + b[3]) * rr + b[4]) * rr + 1.0)

@@ -1878,8 +1878,8 @@
     padding: var(--s1) !important;
 }
 /* MENU ROWS MUST NOT PAINT THEIR OWN GROUND.
-   .streamlit/config.toml is STATICALLY dark (base="dark",
-   secondaryBackgroundColor=#0F1217) and cannot know about Paper — it exists
+   .streamlit/config.toml is STATIC — it cannot follow the in-app Paper/Slate
+   toggle, which swaps CSS tokens at render time — and it exists
    for native controls that read Streamlit's theme system instead of our CSS
    variables, and the main menu is one of them. The result on Paper was our
    white popover shell with Streamlit's near-black pills painted inside it, and
@@ -1904,7 +1904,7 @@
    the pill this block removes. */
 [data-baseweb="popover"] [aria-disabled="true"],
 [data-baseweb="popover"] [role="menuitem"][disabled] {
-    color: var(--ink-muted) !important;
+    color: var(--ink-tertiary) !important;
     opacity: 0.7 !important;
 }
 [data-baseweb="popover"] li[role="option"],

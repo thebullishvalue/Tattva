@@ -2,19 +2,28 @@
 Tattva — Precedent tab: what happened last time the state looked like this.
 
 Covariance-aware Mahalanobis analog matching over the state the SYSTEM
-measures — momentum, realised volatility, Swayam breadth, the Mūla valuation
-oscillator, market stress and valuation confidence — under a Theiler exclusion
-window so the returned analogs are distinct episodes rather than adjacent days
-of one episode. The output is an empirical base rate, independent of the model:
-it is the one read on the app that does not depend on the engines being right.
+measures — momentum, realised volatility, the Mūla valuation oscillator and its
+window agreement, market stress and valuation confidence — under a Theiler
+exclusion window so the returned analogs are distinct episodes rather than
+adjacent days of one episode. The output is an empirical base rate: no model
+is fitted to forward returns to produce it.
+
+It is NOT independent of the engines, and the page no longer says it is: the
+state it matches on is the engines' own output, so "the last times the state
+looked like this" means "the last times Mūla read it like this". That is what
+makes it useful — it asks what this exact reading has historically preceded —
+and also why it is one gate of six rather than a second opinion that could
+outvote the call.
 
 Reading order — the house convention every analysis tab follows:
 
-  1 TRUST     can this reading be believed?      Analog skill term structure
-  2 ANCHOR    what is the underlying claim?      Forward-return base rate
-  3 SIGNAL    what does it say to do?            Predicted vs realised history
-  4 STATE     how does that sit historically?    The analog cards themselves
-  5 DETAIL    the evidence behind it             State → forward-return backtest
+  1 ANSWER    what happened after states like today's?   Forward-return base rate
+  2 TRUST     has the matcher been worth anything?       Analog skill term structure
+  3 DETAIL    the evidence behind it                     The analog cards themselves
+
+(The extension-vs-return backtest that closed this page graded Mūla's AvgZ on a
+70/30 split — a Mūla diagnostic on the wrong page, superseded by the
+walk-forward edge every engine page now carries.)
 """
 
 from __future__ import annotations
@@ -34,6 +43,7 @@ from analytics.analogs import (
     find_similar_periods, summarize_forward,
     analog_skill_by_horizon,
 )
+from core.semantics import valuation_state
 from ui.components import (
     render_section_header,
     render_metric_card,
@@ -46,33 +56,22 @@ from ui.theme import (chart_layout, style_axes,
                       chart_color, chart_rgba)
 
 
-def _classify_state(fvo: float) -> tuple[str, str, str, str]:
-    """Map the valuation oscillator to (tier, chip tone, label, fill) classes.
+def _classify_state(fvo: float) -> tuple[str, str, str]:
+    """Map the valuation oscillator to (tier class, chip tone, label).
 
     Describes WHERE the target sat versus its macro-implied level — cheap or
     rich — not what happened next; the forward tiles carry the realised outcome.
-
-    Keyed on Mūla because that is what the analogs are MATCHED on. It previously
-    keyed on AvgZ, which the tuning study had already removed from the matching
-    feature set, so the badge described a dimension the similarity score
-    ignored: two cards labelled "Deep Oversold" could have been selected for
-    reasons unrelated to being oversold. Thresholds are in units of the
-    engine's own predictive SD, so +/-1 and +/-2 read as the usual sigma bands.
-
-    The chip tone is one of the app's shared ``.chip-*`` tones (``render_chip``
-    in ui/components.py); ``"success-outline"``/``"danger-outline"`` render as
-    the lighter, unfilled variant for the weaker "Cheap"/"Rich" reads vs the
-    filled "Deep Value"/"Very Rich" extremes.
+    The word comes from ``core.semantics.valuation_state``, the one classifier
+    the hero and the Mūla page use too: this page used to cut at ±1σ while the
+    hero cut at ±0.5σ, so a −0.7σ day was "cheap" on Overview and "Fair" here.
     """
-    if fvo <= -2.0:
-        return "tier-strong-buy", "success", "Deep Value", "fill-strong-buy"
-    if fvo <= -1.0:
-        return "tier-buy", "success-outline", "Cheap", "fill-buy"
-    if fvo >= 2.0:
-        return "tier-caution", "danger", "Very Rich", "fill-caution"
-    if fvo >= 1.0:
-        return "tier-caution", "danger", "Rich", "fill-caution"
-    return "tier-hold", "neutral", "Fair", "fill-hold"
+    state = valuation_state(fvo)
+    return {
+        "VERY CHEAP": ("tier-strong-buy", "success", "Very cheap"),
+        "CHEAP": ("tier-buy", "success-outline", "Cheap"),
+        "RICH": ("tier-caution", "danger-outline", "Rich"),
+        "VERY RICH": ("tier-caution", "danger", "Very rich"),
+    }.get(state, ("tier-hold", "neutral", "Fair"))
 
 
 def _render_fwd_tile(horizon: int, val: float | None) -> str:
@@ -99,7 +98,7 @@ def _render_period_card(period: dict, target: str, hold_horizons: tuple[int, ...
     stress = period.get("stress", 0.5)
     similarity_pct = period["similarity"] * 100
     price_val = period["price"]
-    tier_cls, chip_tone, badge_label, bar_cls = _classify_state(fvo)
+    tier_cls, chip_tone, badge_label = _classify_state(fvo)
     tone_base, outline = (chip_tone[:-8], True) if chip_tone.endswith("-outline") else (chip_tone, False)
     badge_html = (
         f'<span class="chip chip-{tone_base}{" chip-outline" if outline else ""}">'
@@ -149,13 +148,6 @@ def _render_period_card(period: dict, target: str, hold_horizons: tuple[int, ...
     <div class="analog-fwd-block-label">Forward {html_mod.escape(target)} Return</div>
     <div class="analog-fwd-grid" style="{grid_style}">{fwd_tiles}</div>
   </div>
-  <div class="analog-card-foot">
-    <span class="analog-foot-label">Similarity</span>
-    <div class="conviction-bar">
-      <div class="conviction-bar-fill {bar_cls}" style="width:{similarity_pct:.0f}%;"></div>
-    </div>
-    <span class="analog-foot-pct">{similarity_pct:.0f}%</span>
-  </div>
 </div>
 """,
         unsafe_allow_html=True,
@@ -192,11 +184,13 @@ def render_precedent_tab(
     display_hold = tuple(hold_horizons)
 
     render_section_header(
-        title="Similar Historical Periods",
-        description=(f"Covariance-aware Mahalanobis state-matching · forward {active_target} "
-                     f"returns from each analog · term structure {'/'.join(str(h) for h in display_hold)}d"),
+        title="Precedent — What Followed States Like Today's",
+        description=(f"The most similar distinct historical states of the system (Mahalanobis on "
+                     f"Mūla's valuation, its window agreement, stress, confidence, momentum and "
+                     f"volatility) and what {active_target} did next, across "
+                     f"{'/'.join(str(h) for h in display_hold)}d."),
         icon="compass",
-        accent="emerald",
+        accent="accent",
     )
 
     if ts is None or len(ts) == 0 or "Price" not in getattr(ts, "columns", []):
@@ -221,28 +215,41 @@ def render_precedent_tab(
         return
 
     # ── Forward-return base-rate summary (one card per horizon) ──────────────
+    from analytics.analogs import MIN_EFFECTIVE_N as _MIN_N
     summary = summarize_forward(periods, display_hold)
+    _notes: list[str] = []
     if summary:
         cols = st.columns(len(summary), gap="small")
         for col, (h, s) in zip(cols, summary.items()):
+            n_raw = int(s.get("n", 0) or 0)
+            n_eff = float(s.get("n_eff", n_raw) or 0.0)
+            # The SAME usability rule the hero's precedent gate applies, so this
+            # page cannot print a confident green base rate the Overview just
+            # called "too few distinct analogs to read".
+            usable = bool(s.get("usable", True)) and n_eff >= _MIN_N
+            if not usable and s.get("note"):
+                _notes.append(f"+{h}d: {s['note']}")
             with col:
                 render_metric_card(
                     label=f"+{h}D Median Return",
                     value=f"{s['median']:+.1f}%",
-                    subtext=f"{s['positive_pct']:.0f}% positive ({s['n']} analogs)",
-                    color_class="success" if s["median"] > 0 else "danger",
-                    icon="trending-up" if s["median"] > 0 else "trending-down",
+                    subtext=(f"{s['positive_pct']:.0f}% rose · ≈{n_eff:.0f} distinct of {n_raw}"
+                             if usable else f"insufficient precedent · ≈{n_eff:.0f} distinct"),
+                    color_class=("neutral" if not usable else
+                                 "success" if s["median"] > 0 else "danger"),
                 )
+    for _n in dict.fromkeys(_notes):
+        render_note(_n)
 
     render_interpretation_card(
-        title="Empirical Base Rate",
+        title="A Base Rate, Conditioned on the System's Own State",
         body=(
-            "This is a <strong>non-parametric base rate</strong> — what "
-            f"{html_mod.escape(active_target)} actually did after the most "
-            "statistically-similar historical states (covariance-aware Mahalanobis "
-            "on Tattva's own state features). Read it <strong>alongside</strong> the "
-            "Mūla forecast: agreement strengthens conviction, disagreement is a "
-            "divergence worth respecting."
+            "What " + html_mod.escape(active_target) + " actually did after the most "
+            "similar past states — no model is fitted to returns to produce it. The state is "
+            "the engines' own reading, so this asks what <strong>this</strong> reading has "
+            "historically preceded; it is one gate of the conviction chain, read with Mūla's "
+            "call rather than against it. \u201cDistinct\u201d counts episodes, not days: "
+            "ten adjacent days of one episode are one observation."
         ),
         color="info",
     )
@@ -328,7 +335,7 @@ def render_precedent_tab(
             "ranks magnitudes but calls direction worse than assuming the "
             "majority — hover for both numbers."
         )
-        render_chart_panel(_fig_ts, "analog_skill_term_structure", units="Spearman IC", window=True)
+        render_chart_panel(_fig_ts, "analog_skill_term_structure", units="Spearman IC", windowed=False)
 
         # Plain-language read: best horizon + whether the forecast horizon is
         # where the edge actually lives.
@@ -388,139 +395,3 @@ def render_precedent_tab(
     for i, period in enumerate(periods[:MAX_ANALOG_CARDS]):
         with analog_cols[i % 2]:
             _render_period_card(period, active_target, display_hold)
-
-    # ── Backtest: state extension vs forward return (descriptive) ───────────
-    render_section_header(
-        title=f"Backtest · Extension (Z) vs Forward {active_target} Return",
-        description=f"Each dot = one independent (non-overlapping) {fwd_horizon}d window · honest OOS IC",
-        icon="chart",
-        accent="rose",
-    )
-
-    render_interpretation_card(
-        title="Descriptive, Not Predictive",
-        body=(
-            "Points are evaluated with the engine's current state features — treat the "
-            "relationship as <strong>descriptive</strong> context, not a standalone "
-            "<strong>predictive</strong> signal. The calibrated edge lives in the "
-            "Diagnostics walk-forward IC."
-        ),
-        color="warning",
-    )
-
-    df = ts.reset_index(drop=True)
-    price = pd.to_numeric(df["Price"], errors="coerce").to_numpy(dtype=np.float64)
-    n = len(price)
-    horizon = int(fwd_horizon)
-    if n <= horizon + 20 or "AvgZ" not in df.columns:
-        render_note("Insufficient data points for backtest.")
-        return
-
-    avgz_full = np.asarray(df["AvgZ"], dtype=np.float64)[: n - horizon]
-    fwd_full = (price[horizon:] / price[: n - horizon] - 1) * 100
-    # NON-OVERLAPPING sampling (stride = horizon): adjacent forward windows don't
-    # overlap, so the correlation isn't overlap-inflated (the honest IC for smooth
-    # multi-day returns). Every dot below is one independent window.
-    avgz = avgz_full[::horizon]
-    fwd_ret = fwd_full[::horizon]
-
-    valid = np.isfinite(avgz) & np.isfinite(fwd_ret)
-    x = avgz[valid]
-    y = fwd_ret[valid]
-    if len(x) <= 20:
-        render_note("Insufficient data points for backtest.")
-        return
-
-    from scipy.stats import spearmanr as _spearmanr
-
-    split = int(len(x) * 0.7)
-    tr_x, tr_y = x[:split], y[:split]
-    te_x, te_y = x[split:], y[split:]
-
-    tr_p = np.corrcoef(tr_x, tr_y)[0, 1] if len(tr_x) > 2 else 0.0
-    tr_s, _ = _spearmanr(tr_x, tr_y) if len(tr_x) > 2 else (0.0, 1.0)
-    oos_p = np.corrcoef(te_x, te_y)[0, 1] if len(te_x) > 2 else 0.0
-    oos_s, oos_s_pval = _spearmanr(te_x, te_y) if len(te_x) > 2 else (0.0, 1.0)
-    tr_s = 0.0 if not np.isfinite(tr_s) else tr_s
-    oos_s = 0.0 if not np.isfinite(oos_s) else oos_s
-    oos_p = 0.0 if not np.isfinite(oos_p) else oos_p
-    oos_s_pval = 1.0 if not np.isfinite(oos_s_pval) else oos_s_pval
-
-    fig = go.Figure()
-    fig.add_trace(go.Scattergl(
-        x=tr_x, y=tr_y, mode="markers",
-        marker=dict(size=4, color=np.where(tr_x > 0, chart_color("emerald"), chart_color("rose")), opacity=0.4),
-        hovertemplate="Z: %{x:.2f}<br>Fwd: %{y:.1f}%<extra></extra>",
-        name=f"Train (70%, n={len(tr_x)})",
-    ))
-    fig.add_trace(go.Scattergl(
-        x=te_x, y=te_y, mode="markers",
-        marker=dict(size=6, color=np.where(te_x > 0, chart_color("emerald"), chart_color("rose")),
-                    opacity=0.85, symbol="diamond"),
-        hovertemplate="Z: %{x:.2f}<br>Fwd: %{y:.1f}%<extra></extra>",
-        name=f"Test (30%, n={len(te_x)})",
-    ))
-    if len(tr_x) > 10:
-        xr = np.linspace(x.min(), x.max(), 50)
-        z1 = np.polyfit(tr_x, tr_y, 1)
-        fig.add_trace(go.Scatter(
-            x=xr, y=z1[0] * xr + z1[1], mode="lines",
-            line=dict(color=chart_color("amber"), width=1.2, dash="dash"),
-            name=f"Linear (train ρ={tr_p:.2f}, test ρ={oos_p:.2f})",
-        ))
-    # Quadratic curve needs more points than the linear fit to avoid a 2nd-degree
-    # polynomial chasing noise in a small training split — 40 is a low bar,
-    # chosen only to exclude the smallest/thinnest backtests, not a claim of
-    # genuine statistical power at 40 either.
-    if len(tr_x) >= 40:
-        z2 = np.polyfit(tr_x, tr_y, 2)
-        fig.add_trace(go.Scatter(
-            x=xr, y=z2[0] * xr ** 2 + z2[1] * xr + z2[2], mode="lines",
-            line=dict(color=chart_color("cyan"), width=1.2, dash="dot"),
-            name=f"Quadratic (train ρ_s={tr_s:.2f}, test ρ_s={oos_s:.2f})",
-        ))
-
-    fig.add_hline(y=0, line_color=chart_rgba("slate", 0.35), line_width=1, line_dash="dot")
-    fig.add_vline(x=0, line_color=chart_rgba("slate", 0.35), line_width=1, line_dash="dot")
-
-    layout = chart_layout(height=420, show_legend=True)
-    layout["hovermode"] = "closest"
-    fig.update_layout(**layout)
-    style_axes(fig, y_title=f"{active_target} Return T+{horizon}d (%)", x_title="Extension Z at T")
-
-    # This was the one chart in the app that passed its own Plotly config —
-    # a private, hand-rolled second opinion on chrome. It now takes the same
-    # PLOTLY_CONFIG as the other seventeen, via the same panel.
-    render_chart_panel(fig, "analog_extension_scatter", units="% return")
-
-    # Gate the verdict on the test-split Spearman p-value, not a bare |rho|
-    # magnitude threshold. After non-overlapping striding the test split is
-    # typically only ~20-30 points (e.g. h=20 on ~2200 rows), where |rho|=0.3
-    # has a two-sided p-value ~0.20 — a 1-in-5 fluke rate under the null that
-    # was previously being branded "holds out-of-sample" regardless of n.
-    # scipy's spearmanr already returns this p-value; use it directly rather
-    # than a fixed correlation-magnitude cutoff that ignores sample size.
-    n_test = len(te_x)
-    if oos_s_pval < 0.10:
-        strength = "strong" if abs(oos_s) > 0.5 else "moderate"
-        direction = "positive" if oos_s > 0 else "negative"
-        body = (
-            f"<strong>Out-of-sample (30%, n={n_test}):</strong> Pearson {oos_p:.2f} · "
-            f"Spearman {oos_s:.2f} (p={oos_s_pval:.3f}) — "
-            f"{strength} {direction} relationship holds on unseen data.<br>"
-            f"<span style='color:var(--ink-tertiary);'>In-sample (70%): Pearson {tr_p:.2f} · "
-            f"Spearman {tr_s:.2f}</span>"
-        )
-        render_interpretation_card("Relationship Holds Out-of-Sample", body, color="success")
-    else:
-        body = (
-            f"<strong>Out-of-sample (30%, n={n_test}):</strong> Pearson {oos_p:.2f} · "
-            f"Spearman {oos_s:.2f} (p={oos_s_pval:.3f}, not significant at 10%) — "
-            f"no reliable out-of-sample relationship at the {horizon}d horizon.<br>"
-            f"<span style='color:var(--ink-tertiary);'>In-sample (70%): Pearson {tr_p:.2f} · "
-            f"Spearman {tr_s:.2f}</span><br><br>"
-            "The extension→return link may be non-linear (see the quadratic curve, when shown), "
-            "stronger at a different horizon, or the test split (n above) may simply be "
-            "too small to detect a real but modest effect."
-        )
-        render_interpretation_card("Weak Out-of-Sample Fit", body, color="warning")

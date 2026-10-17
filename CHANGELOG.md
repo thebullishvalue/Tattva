@@ -9,7 +9,152 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
-## [Unreleased]
+## [2.8.0] — 2026-10-17 — *One graded call · the council audit*
+
+A five-seat review (Mūla methodology, the signal chain, the data layer, UI and
+information design, product coherence) read every module against what the
+system claims to be, ran it end to end on live data, and found the design right
+and the machinery behind it pointing several ways at once. This release keeps
+the architecture — Mūla, Swayam, Convergence, Precedent, the conviction chain,
+the Paper/Slate design system — and makes each part say what it does.
+
+### Changed — the call
+- **One claim, six independent gates.** The conviction chain had seven gates,
+  three of which re-counted each other (Mūla/Swayam agreement sat in the breadth
+  gate, the agreement ratio and the half-Mūla consensus; mean reversion in two).
+  It is now mispricing · reversion · cross-section · convergence · edge ·
+  precedent, each asked once, and the tier cut-points' "six gates" rationale is
+  true again.
+- **The word follows the tier.** A cheap reading the gates do not support reads
+  **HOLD** with the reason — never "BUY" beside "STAND ASIDE · no actionable edge",
+  which the card used to print. LEAN / BUY / STRONG at low / moderate / high.
+  Conviction prints as a percentage; inside the noise it prints "no claim".
+- **The edge grades the call.** The Edge gate, trust chip, Overview KPI and rail
+  read Mūla's own walk-forward IC at the horizon. They used to read a
+  walk-forward of the unsigned *agreement* composite at 5 days on overlapping
+  rows — which returned −0.01 on a synthetic signal with a planted IC of +0.31.
+- **Reversion means price reverts.** On real data price accounts for 2–24% of
+  daily gap closure; the rest is fair value moving to price. The reversion gate
+  reads P(κ̂ > 0) from the price-side error-correction regression, not the gap's
+  own stationarity.
+
+### Fixed — Mūla
+- Error-correction drift: published the opposite sign of the model's own
+  expected move, at about one day's size labelled as ten (`phi` was the
+  regression coefficient itself). Now `b·z·Σφᶻᵏ` with the gap's own persistence;
+  synthetic correlation with the true h-day move +0.94 (was −0.89). κ̂ is
+  published as −b (positive = reverts); its SD is an h-day SD.
+- κ̂ printed **0.000** on every card (the hero read `mula_kappa`, the summary
+  stored `kappa`).
+- One engine, two directions: the zone stack (BUY/SELL, "OVERSOLD", window
+  breadth) was built on 3/5/10-day windows — a two-week timing read, corr 0.85
+  with the 5-day change in the gap. Re-based on 21/63/252-session windows and
+  zero-anchored, it agrees in sign with the oscillator on every claim row.
+  `Regime` is the oscillator's valuation state; the engine no longer publishes
+  BUY/SELL of its own.
+- The 3-day window was always empty (`min_periods` 5 > 3); the "robust z" divided
+  by the 95% range, not the IQR (≈0.34× a z-score).
+- **Model Spread** is now the SD of the fair-value level (median 17–77 bps), not
+  the residual noise around it (≈274 bps, mislabelled). The oscillator's
+  denominator is published as `GapScale`.
+- **Valuation Confidence** composed a saturated term (P(φ<1) = 1.000 on every
+  row) and printed a different number beside it; it is now √(P(κ̂>0) × XS).
+- A withheld latest session was reported as "fairly valued" (NaN → 0).
+  `get_current_signal` reads the last published row and flags the withheld one.
+- The OU half-life labelled "full history" was a 60-day fit; the Bai-Perron test
+  never ran (the class does not exist in statsmodels) and `break_detected` was
+  always True; Hurst read 0.99 everywhere and fed nothing. Removed / corrected.
+
+### Fixed — signal chain
+- Swayam's view-skill learner credited momentum (+oscillator before a rise)
+  while every consumer reads Swayam contrarian; it scores the bullish lean now.
+  The 0.5 shrink was re-measured under the fix and kept (all differences < 1 SE).
+- The convergence learner scored unsigned agreement against signed returns (in
+  an up-trend it put 0.85 on a constant dimension); it scores each dimension's
+  signed contribution, starts from the instrument's own prior, and recomputes
+  the agreement ratio with the weights it learns.
+- The consensus was demeaned by its own history, so it could read STRONG BUY with
+  both engines at exactly zero; it is zero-anchored and causal, and read from
+  Mūla's oscillator (not the window-agreement score).
+- Dates with no Swayam row were scored against an impossible 50%/50% stand-in;
+  they are skipped. The divergence count was anchored on the latest event, not
+  the latest session. The precedent matcher filled a forming session's state
+  with zeros and ignored its own "unusable" verdict.
+- One DDM pass on the learned composite (two ran, neither was shown).
+
+### Fixed — data and pipeline
+- A stock symbol typed in one session joined every later fetch's panel and
+  became a predictor of Gold — moving published history and the fingerprint.
+  The fetch iterates the catalogue frozen at import; stocks never enter the
+  shared frame.
+- Swayam's MMR leakage guard matched names against tickers and dropped nothing
+  (GLTR, r = 0.985, stayed in Gold's pool). Swayam's drivers are now the same
+  friendly-named panel Mūla reads — one fetch, one panel.
+- A cached switch-back showed the previous target's error-correction read; the
+  Swayam caches were keyed by target only.
+- The circuit breaker counted failures for the life of the process and treated
+  "no such symbol" as a service failure (three typos opened it for every
+  session); it counts consecutive failures, and a missing symbol is not one.
+- Refresh pulled the universe twice and failed silently; it pulls once and says
+  when it could not. Stale-snapshot warnings travel on the frame. "Reset", which
+  promised a fast re-run and returned to the landing page, is **Start over**.
+- The "gaps in the trace" report read a variable before it existed and never ran.
+- US index targets were rebuilt by their own components (VTV + VUG explain 99.5%
+  of the S&P 500); the whole US equity complex is excluded for them.
+- Per-view frames are kept at the drill-down's nine columns once aggregation has
+  used the full ~270 (measured ~76 MB per target before, held up to six times
+  across the session caches).
+
+### Changed — pages
+- Every page leads with its answer and its own grade, then evidence. Overview:
+  Call · Conviction · Valuation · Edge · Swayam net breadth · Agreement.
+- **Mūla** plots the oscillator its call is made on, the ±0.5σ no-claim band and
+  the error-correction read; driver importance moved here from Diagnostics.
+- **Swayam** counts views, not "instruments" or "constituents"; shows the
+  effective view count it promised and the per-view skill weights.
+- **Convergence** no longer carries a "TATTVA CONVICTION" card with BUY/SELL words
+  of its own; it shows agreement against the target's own history, the
+  consensus, the learned composite and its edge, and the divergences table.
+- **Precedent** uses the hero's one valuation classifier, prints distinct-episode
+  counts with a usability flag, and says what it is: a base rate conditioned on
+  the engines' own state, not a check independent of them.
+- **System** (was Diagnostics) leads with every engine's edge side by side; the
+  Stationarity chip was green for "Non-Stationary" (a substring test).
+- **Data** shows the gap in % and σ (it rounded a log gap to 0.0) and exports the
+  joined Mūla + Swayam + Convergence record.
+- The chart window shows only where it frames the charts; snapshot panels say
+  "full history". One freshness reading feeds both the notices and the chip
+  ("CURRENT", not "LIVE").
+
+### Removed
+- `engines/fvo/`, `ui/tabs/tab_fvo.py`, `tab_aarambh.py`, `tab_nirnay.py`,
+  `data/constituents.py`, the constituent scrapers and ETF basket,
+  `analytics/hurst.py`, `analytics/structural_breaks.py`, and the dead config
+  they left behind. These deletions were announced below but never reached the
+  repository: the GitHub web upload adds and overwrites files and cannot delete
+  them, so delete locally and push (or delete in the web UI) when publishing.
+- Sixteen NSE sector indices yfinance serves 1–2 bars for (they could only fail);
+  "India Sector ETFs" is the **Nifty 500** under India Indices.
+- `scikit-learn`, `lxml`, `html5lib` (nothing imports them).
+
+### Added
+- `core/semantics.py` — the one sign vocabulary and valuation-state classifier.
+- `tests/` — offline assertions: causality (`data[:T]` vs `data[:T−200]` exact),
+  the ECM's sign and horizon, edge recovery, the learners' signs, the chain's
+  rules. `python -m pytest tests -q`.
+
+### Docs
+- README, LICENSE citations and the landing page rewritten to the system as it
+  is: the conviction chain as the headline, Mūla as a valuation (not a
+  forecast), Swayam as self-views, counts from the catalogue that can run.
+
+---
+
+## [2.8.0-dev.2] — Mūla · Swayam consolidation (development notes)
+
+*Recorded before the 2.8.0 audit. Several deletions below did not reach the
+repository until 2.8.0 (see its Removed section).*
+
 
 ### Removed
 - **The "V2 valuation core" rail selector.** With Mūla as the only valuation

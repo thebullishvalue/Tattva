@@ -7,55 +7,11 @@ ANALYTICS — Stateless, side-effect free functions operating on NumPy arrays an
 
 from __future__ import annotations
 
-from typing import Literal
-
 import numpy as np
 import pandas as pd
 from scipy import stats
 
 # ─── Array operations ────────────────────────────────────────────────────────
-
-
-def _safe_array_operation(
-    arr: np.ndarray,
-    operation: Literal["mean", "std", "min", "max", "sum"],
-    default: float = 0.0,
-) -> float:
-    """Compute common array operations with NaN/Inf handling.
-
-    Parameters
-    ----------
-    arr : np.ndarray
-        Input array.
-    operation : str
-        One of ``mean``, ``std``, ``min``, ``max``, ``sum``.
-    default : float
-        Value returned when no valid data exists.
-    """
-    arr = np.asarray(arr)
-    valid = np.isfinite(arr)
-    if not np.any(valid):
-        return default
-    clean = arr[valid]
-    ops: dict[str, callable] = {
-        "mean": lambda c: float(np.mean(c)),
-        "std": lambda c: float(np.std(c)) if len(c) > 1 else default,
-        "min": lambda c: float(np.min(c)),
-        "max": lambda c: float(np.max(c)),
-        "sum": lambda c: float(np.sum(c)),
-    }
-    fn = ops.get(operation)
-    return fn(clean) if fn else default
-
-
-# ─── Transformations ─────────────────────────────────────────────────────────
-# CANONICAL versions of Swayam's private helpers (audit finding F11): this
-# module previously carried its OWN copies of sigmoid/zscore/ATR that were
-# dead (engines/swayam.py always called its private _sigmoid/_zscore_clipped/
-# _calculate_atr instead) and, worse, NOT equivalent — zscore_clipped here
-# lacked Swayam's ffill/min_periods=1/causal-shift(1) semantics, so a future
-# caller picking THIS module's version would silently get different numbers.
-# Swayam now imports these; there is exactly one implementation of each.
 
 
 def sigmoid(x: np.ndarray | float, scale: float = 1.0) -> np.ndarray | float:

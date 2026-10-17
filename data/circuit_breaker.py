@@ -2,15 +2,27 @@
 Tattva — Circuit Breaker + Retry-with-Backoff fault tolerance.
 तत्त्व (Tattva) — "Principle / Essence"
 
-Fault-tolerance primitives for external service calls (yfinance, NSE/Wikipedia
-constituent scrapes). Adapted from Pragyam's circuit_breaker.py, using stdlib
-logging instead of Pragyam's logger_config.
+Fault-tolerance primitives for external service calls (yfinance, the published
+Google Sheets). Adapted from Pragyam's circuit_breaker.py, using stdlib logging
+instead of Pragyam's logger_config.
 
 State machine:
-    CLOSED → OPEN: when failure_count >= failure_threshold
+    CLOSED → OPEN: after failure_threshold CONSECUTIVE failures
     OPEN → HALF_OPEN: after recovery_timeout elapses since last failure
     HALF_OPEN → CLOSED: on the next successful call
     HALF_OPEN → OPEN: if the test call also fails
+
+Two kinds of "nothing came back" are kept apart, because they call for opposite
+responses. A SERVICE failure (rate limit, timeout, connection error, an empty
+answer nobody explained) is what the breaker exists for: retry it, count it, and
+stop hammering the service once it is plainly down. An ANSWER that says there is
+no data — an unknown or delisted symbol, a window with no prints — is the service
+working correctly. It is raised as :class:`NoDataError`, never retried (asking
+again will not create the symbol) and never counted against the service; it
+counts as a success, since the service evidently answered. Conflating the two
+meant three mistyped stock symbols (each probed as .NS then .BO, each retried
+three times) opened the process-wide yfinance circuit and blocked every user's
+macro fetch for a minute.
 """
 
 from __future__ import annotations
@@ -33,6 +45,15 @@ class CircuitState(Enum):
 
 class CircuitBreakerError(Exception):
     """Raised when a call is blocked because the circuit is OPEN."""
+
+
+class NoDataError(Exception):
+    """The service answered, and there is no data for what was asked.
+
+    An unknown or delisted symbol, or a window with no prints. Not a service
+    failure: :class:`RetryWithBackoff` re-raises it immediately and
+    :class:`CircuitBreaker` records the call as a success (the service is up).
+    """
 
 
 class CircuitBreaker:
@@ -84,6 +105,12 @@ class CircuitBreaker:
             result = func(*args, **kwargs)
             self._on_success()
             return result
+        except NoDataError:
+            # The service answered — "there is nothing for that symbol" is a
+            # correct response, not an outage. Counts toward recovery, not
+            # toward opening the circuit.
+            self._on_success()
+            raise
         except Exception:
             self._on_failure()
             raise
@@ -93,9 +120,14 @@ class CircuitBreaker:
             prev_state = self.state
             self.success_count += 1
             self.last_success_time = time.time()
+            # CONSECUTIVE failures open the circuit, so any success clears the
+            # count. Without this reset (the previous behaviour) failures
+            # accumulated for the life of the process: five transient errors
+            # spread over a day of otherwise healthy fetches opened the circuit
+            # as surely as five in a row, which is not what a breaker measures.
+            self.failure_count = 0
             if self.state == CircuitState.HALF_OPEN:
                 self.state = CircuitState.CLOSED
-                self.failure_count = 0
                 self.half_open_calls = 0
         if prev_state == CircuitState.HALF_OPEN:
             log.info("Circuit '%s' CLOSED — service recovered", self.name)
@@ -116,13 +148,6 @@ class CircuitBreaker:
                         self.failure_count,
                         self.failure_threshold,
                     )
-
-    def protect(self, func: Callable) -> Callable:
-        """Decorator form: wraps `func` with circuit breaker protection."""
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            return self.call(func, *args, **kwargs)
-        return wrapper
 
     def get_state(self) -> dict:
         return {
@@ -148,7 +173,11 @@ class CircuitBreaker:
 
 
 class RetryWithBackoff:
-    """Exponential-backoff retry decorator (1s → 2s → 4s → … capped)."""
+    """Exponential-backoff retry decorator (1s → 2s → 4s → … capped).
+
+    :class:`NoDataError` is never retried: it is an answer, not a transient
+    failure, and repeating the question cost ~4.5 s per mistyped symbol.
+    """
 
     def __init__(
         self,
@@ -172,6 +201,8 @@ class RetryWithBackoff:
             for attempt in range(self.max_retries + 1):
                 try:
                     return func(*args, **kwargs)
+                except NoDataError:
+                    raise
                 except self.exceptions as e:
                     last_exc = e
                     if attempt < self.max_retries:

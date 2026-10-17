@@ -9,10 +9,17 @@ universe. This module fetches such a series with the same resilience contract as
 
   1. **Two-tier cache** (memory + disk, TTL) — ``sheets_cache``.
   2. **Circuit breaker** (CLOSED → OPEN → HALF_OPEN) — ``sheets_circuit``.
-  3. **Retry-with-backoff** for transient HTTP failures.
-  4. **Stale fallback** — last-good cache snapshot, then a *committed* CSV
-     snapshot under ``data/snapshots/`` so the series survives even a cold start
-     with the sheet offline / made private.
+  3. **Retry-with-backoff** for transient HTTP failures, and a short negative
+     cache so a sheet that is down is not re-tried (~4.5 s each) on every rerun.
+  4. **Stale fallback** — the last-good cache entry, then an OPTIONAL committed
+     CSV under ``data/snapshots/``.
+
+On (4), plainly: no snapshot is committed today — ``data/snapshots/`` does not
+exist in the repository — so a cold start with the sheet unreachable (offline,
+made private, or a network that blocks Google) has no series, and the target
+reports "source fetch failed". The code path stays because dropping a file named
+in ``SHEET_SOURCES`` into that directory is all it takes to turn it on; until
+then it is a no-op, and nothing here claims otherwise.
 
 The returned object is a single ``pd.Series`` (datetime index, float values)
 named after the target, ready to be reindexed onto the macro calendar and
@@ -23,6 +30,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 import urllib.request
 from pathlib import Path
 
@@ -38,8 +46,9 @@ from data.circuit_breaker import (
 log = logging.getLogger(__name__)
 
 # ─── Source registry ─────────────────────────────────────────────────────────
-# Each exogenous sheet target → (spreadsheet_id, gid, committed-snapshot file).
-# The snapshot is the cold-start fallback shipped in the repo (data/snapshots/).
+# Each exogenous sheet target → (spreadsheet_id, gid, optional snapshot file).
+# A snapshot, if one is ever committed under data/snapshots/, is the cold-start
+# fallback; the directory is absent today (see the module docstring).
 _SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots"
 
 SHEET_SOURCES: dict[str, dict[str, str]] = {
@@ -70,6 +79,12 @@ sheets_circuit = CircuitBreaker(
     failure_threshold=3,
     recovery_timeout=60.0,
 )
+
+#: After a failed live fetch, how long to skip retrying that sheet. Every rerun
+#: on a sheet target used to pay the full retry budget again, and the app's
+#: freshness block asked a second time on the same rerun.
+_FAIL_BACKOFF_SECONDS = 120.0
+_fail_until: dict[str, float] = {}
 
 
 # ─── Parsing ─────────────────────────────────────────────────────────────────
@@ -117,7 +132,8 @@ def _download_sheet_csv(url: str) -> str:
 
 
 def _load_snapshot(name: str) -> pd.Series | None:
-    """Parse the committed CSV snapshot for ``name`` (cold-start fallback)."""
+    """Parse the committed CSV snapshot for ``name``, or None — which is the
+    answer today, since no snapshot is committed (see the module docstring)."""
     meta = SHEET_SOURCES.get(name)
     if not meta:
         return None
@@ -137,12 +153,14 @@ def fetch_sheet_series(
     name: str,
     start_date: pd.Timestamp | str | None = None,
     end_date: pd.Timestamp | str | None = None,
+    force: bool = False,
 ) -> pd.Series | None:
     """Fetch an exogenous price Series with cache + circuit + stale + snapshot.
 
     ``name`` must be registered in :data:`SHEET_SOURCES`. ``start_date`` /
-    ``end_date`` (optional) clip the returned series. Returns ``None`` only if
-    every tier — live, cache, committed snapshot — is unavailable.
+    ``end_date`` (optional) clip the returned series. ``force`` skips the
+    fresh-cache read (and the failure back-off) for this call only. Returns
+    ``None`` only if every tier — live, cache, snapshot — is unavailable.
     """
     meta = SHEET_SOURCES.get(name)
     if not meta:
@@ -151,20 +169,24 @@ def fetch_sheet_series(
 
     url = _EXPORT_URL.format(sheet_id=meta["sheet_id"], gid=meta["gid"])
 
-    cached = sheets_cache.get(name, url)
-    series: pd.Series | None = cached if cached is not None else None
+    series: pd.Series | None = None if force else sheets_cache.get(name, url)
 
     if series is None:
-        try:
-            text = sheets_circuit.call(_download_sheet_csv, url)
-            series = _parse_price_csv(text, name, meta.get("value_col", "Price"))
-            sheets_cache.put(name, url, value=series)
-        except CircuitBreakerError as e:
-            log.warning("%s sheet circuit open: %s", name, e)
+        if not force and time.monotonic() < _fail_until.get(name, 0.0):
             series = sheets_cache.get_stale(name, url)
-        except Exception as e:  # noqa: BLE001
-            log.warning("%s sheet fetch failed: %s", name, e)
-            series = sheets_cache.get_stale(name, url)
+        else:
+            try:
+                text = sheets_circuit.call(_download_sheet_csv, url)
+                series = _parse_price_csv(text, name, meta.get("value_col", "Price"))
+                sheets_cache.put(name, url, value=series)
+                _fail_until.pop(name, None)
+            except CircuitBreakerError as e:
+                log.warning("%s sheet circuit open: %s", name, e)
+                series = sheets_cache.get_stale(name, url)
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s sheet fetch failed: %s", name, e)
+                _fail_until[name] = time.monotonic() + _FAIL_BACKOFF_SECONDS
+                series = sheets_cache.get_stale(name, url)
 
     if series is None:
         series = _load_snapshot(name)
@@ -179,11 +201,3 @@ def fetch_sheet_series(
     if end_date is not None:
         series = series[series.index <= pd.Timestamp(end_date)]
     return series
-
-
-def fetch_jeera_series(
-    start_date: pd.Timestamp | str | None = None,
-    end_date: pd.Timestamp | str | None = None,
-) -> pd.Series | None:
-    """Convenience wrapper: NCDEX Jeera daily price as a ``Jeera`` Series."""
-    return fetch_sheet_series("Jeera", start_date, end_date)

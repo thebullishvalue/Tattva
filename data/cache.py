@@ -8,6 +8,16 @@ fails (so the UI can keep working even if APIs are down).
 
 Cache keys are derived from a (version, *args) tuple via MD5 hashing; bumping
 the `version` parameter atomically invalidates a whole namespace.
+
+A forced refresh is NOT a property of the cache. It used to be: a per-session
+five-minute window during which every ``get`` from that session missed. That
+re-pulled the whole ~240-ticker universe twice per Refresh (the handler's own
+fetch, then the rerun's), made every target switch inside the window download
+everything again, and bypassed caches nobody had asked to refresh (symbol
+resolution included). A caller that wants live data now says so at the call —
+``fetch_commodity_dataset(..., force=True)`` skips ``get`` for exactly that
+fetch, still ``put``s the result, and still falls back to ``get_stale`` if the
+live pull fails. One request, one pull.
 """
 
 from __future__ import annotations
@@ -29,40 +39,6 @@ DEFAULT_TTL_SECONDS = 3600  # 1 hour
 # these; keep enough that a multi-day gap still has something to fall back to
 # without the namespace growing forever — see B3 in the audit).
 _SNAPSHOT_RETENTION_DAYS = 7
-
-# Force-refresh window, PER SESSION. While a session's entry here is unexpired,
-# that session's ``Cache.get`` calls return None (-> live re-fetch) but the disk
-# snapshot is preserved as a fallback. Set via ``begin_force_refresh()`` from the
-# UI "Refresh Data" action.
-#
-# Streamlit serves every concurrent session from ONE process, so a single global
-# deadline (the previous implementation) meant one user's "Refresh Data" click
-# forced EVERY other concurrent session's next fetch to bypass cache too —
-# amplifying rate-limit exposure across unrelated users for no benefit to them
-# (audit finding B2). Keying by session ID scopes the bypass to the session that
-# actually asked for it. Falls back to a single shared key outside a Streamlit
-# run context (e.g. the research/ scripts, which don't have one) — identical to
-# the old global-window behaviour there, since there's only ever one "session".
-_FORCE_UNTIL: dict[str, float] = {}
-
-
-def _current_session_key() -> str:
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-        try:
-            # suppress_warning=True silences Streamlit's "missing ScriptRunContext"
-            # log noise when called outside a script run (the research/ scripts run
-            # bare — they legitimately have no session). Kwarg exists in current
-            # Streamlit; fall back if a version ever drops it.
-            ctx = get_script_run_ctx(suppress_warning=True)
-        except TypeError:
-            ctx = get_script_run_ctx()
-        if ctx is not None:
-            return ctx.session_id
-    except Exception:
-        pass
-    return "_no_session_"
-
 
 class Cache:
     """TTL cache with memory tier, disk tier, and stale-fallback.
@@ -103,20 +79,10 @@ class Cache:
     def get(self, *args: Any) -> Any | None:
         """Return cached value if fresh (within TTL), else None.
 
-        During a user-triggered force-refresh window (``begin_force_refresh``) this
-        returns ``None`` so the caller re-fetches live — WITHOUT deleting the disk
-        snapshot, so ``get_stale`` still serves last-good data if the live fetch
-        fails (rate limit / circuit open). That's the safety the naive "clear cache"
-        lacks: a failed forced refresh degrades to stale, never to empty. The window
-        is scoped to the CALLING SESSION (see ``_current_session_key``), so one
-        user's forced refresh doesn't force every concurrent session's fetches to
-        bypass cache too.
+        A caller forcing a live pull simply does not call this (see the module
+        docstring); the disk snapshot is untouched either way, so ``get_stale``
+        still serves last-good data if that live pull fails.
         """
-        _deadline = _FORCE_UNTIL.get(_current_session_key(), 0.0)
-        if time.time() < _deadline:
-            with self._lock:
-                self.misses += 1
-            return None
         key = self._key(*args)
         with self._lock:
             if key in self._memory:
@@ -207,17 +173,6 @@ class Cache:
         except Exception as e:  # noqa: BLE001
             log.debug("Cache prune skipped for %s: %s", self._disk_dir, e)
 
-    def invalidate(self, *args: Any) -> None:
-        key = self._key(*args)
-        with self._lock:
-            self._memory.pop(key, None)
-        disk_path = self._disk_dir / f"{key}.pkl"
-        if disk_path.exists():
-            try:
-                disk_path.unlink()
-            except Exception:
-                pass
-
     def clear(self) -> None:
         with self._lock:
             self._memory.clear()
@@ -249,24 +204,8 @@ ohlcv_cache = Cache(ttl=3600, version="v1", namespace="ohlcv")
 macro_cache = Cache(ttl=3600, version="v1", namespace="macro")
 
 
-def begin_force_refresh(window: float = 300.0) -> None:
-    """Open a force-refresh window for the CALLING SESSION: for ``window`` seconds,
-    every ``Cache.get`` call made from this session misses (→ live re-fetch) while
-    disk snapshots stay intact as a failure fallback. Self-clearing — covers one
-    full pipeline re-pull, then normal TTL resumes. Scoped per-session so it
-    doesn't force concurrent Streamlit sessions to bypass cache too (see
-    ``_current_session_key``).
-    """
-    # Opportunistic cleanup of expired entries so this dict doesn't grow
-    # unbounded across many sessions over a long-running server process.
-    now = time.time()
-    for k in [k for k, deadline in _FORCE_UNTIL.items() if deadline < now]:
-        del _FORCE_UNTIL[k]
-    _FORCE_UNTIL[_current_session_key()] = now + window
-
-
 def all_caches() -> list[Cache]:
-    """Return all module-level cache instances for diagnostics + force-refresh."""
+    """Return all module-level cache instances, for the diagnostics view."""
     from data.sheets import sheets_cache       # local imports avoid an import cycle
-    from data.universe import _constituent_cache
-    return [ohlcv_cache, macro_cache, sheets_cache, _constituent_cache]
+    from data.universe import _symbol_cache
+    return [ohlcv_cache, macro_cache, sheets_cache, _symbol_cache]

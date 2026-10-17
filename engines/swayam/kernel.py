@@ -33,16 +33,6 @@ import numpy as np
 import pandas as pd
 
 from analytics.regime import run_regime_loop
-# NOTE (audit finding F12): analytics.regime also exposes object-oriented
-# reference implementations (AdaptiveKalmanFilter, AdaptiveHMM, GARCHDetector,
-# CUSUMDetector) that mirror run_regime_loop's njit kernel step-for-step. This
-# module only ever called the kernel — the object classes were imported but
-# dead code, and (being a hand-maintained duplicate of the kernel's logic)
-# a maintenance hazard: the HMM label-switching fix had to be applied to BOTH
-# independently. Kept as the readable reference (not deleted) but no longer
-# imported here; research/regime_equivalence_check.py asserts the two stay
-# numerically identical so a future edit to either side fails loudly instead
-# of silently drifting.
 
 # ─── Utility functions ───────────────────────────────────────────────────────
 # sigmoid / zscore_clipped / calculate_atr moved to analytics.utils (audit
@@ -189,7 +179,7 @@ def calculate_mmr(
     2016, RFS 29(1)), so a "high quality" reading is NOT evidence the macro
     fit is real. The selection stays causal (shift(1) correlations), so the
     deviation oscillator itself is usable, and since the inflation applies
-    ~uniformly across constituents the cross-sectional breadth signal is
+    ~uniformly across views the breadth signal is
     mostly unharmed — but do not repurpose ``mmr_quality`` as an absolute
     confidence measure without benchmarking it against a same-row max-R² of
     permuted candidates.
@@ -515,16 +505,17 @@ def run_full_analysis(
     return df, drivers
 
 
-# ─── Constituent Aggregation ─────────────────────────────────────────────────
+# ─── View aggregation ────────────────────────────────────────────────────────
 
 
 #: How much of the raw skill differential to keep, 0.0 = equal weight,
-#: 1.0 = the unshrunk estimator. Set from measurement, not taste: split-half
-#: rank correlation of the weights is -0.379 / -0.007 / -0.054 on Gold /
-#: Copper / Silver, i.e. no evidence the ranking persists, while raw spreads
-#: reach 9x. Halving keeps the differentiation where it is real (Bitcoin
-#: measures +0.744 persistence) and halves the cost where it is not.
-#: See the note in view_skill_weights and research/test_swayam_invariants.py.
+#: 1.0 = the unshrunk estimator. Re-measured 2026-10-17 with the skill scored on
+#: the contrarian call (see view_skill_weights): weighting is no longer a cost —
+#: it is within noise of equal weight everywhere, a little ahead on Gold and
+#: Copper and a little behind on Silver — and per-view skill still does not
+#: persist reliably (split-half rank corr +0.04 / -0.27 / +0.12 / +0.18 on
+#: Gold / Copper / Silver / Bitcoin). Half-way is the honest setting for
+#: evidence that neither condemns nor licenses a full skill differential.
 SKILL_WEIGHT_SHRINK: float = 0.5
 
 
@@ -533,6 +524,7 @@ def view_skill_weights(
     horizon: int = 10,
     halflife: float = 252.0,
     floor: float = 0.02,
+    shrink: float | None = None,
 ) -> pd.DataFrame:
     """Causal per-date weight for each view, from its own realised skill.
 
@@ -588,45 +580,53 @@ def view_skill_weights(
     fwd = (close.shift(-h) / close - 1.0).to_numpy(dtype=np.float64)
     S = sig.to_numpy(dtype=np.float64)
 
+    # THE CALL IS THE BULLISH LEAN, -osc — not the oscillator itself.
+    #
+    # Every consumer of Swayam reads it contrarian: a view with Unified_Osc
+    # below the oversold line votes "Oversold", and oversold breadth is the
+    # BULLISH reading in the convergence direction dimension, the hero's
+    # breadth gate and the divergence detector (core.semantics). Scoring the
+    # raw oscillator against the forward move instead credited a view when a
+    # HIGH reading preceded a RISE — momentum skill, the opposite of what its
+    # vote means. Measured on a planted contrarian world, the view whose call
+    # was right under the system's reading (IC(osc, fwd10) = -0.73) was weighted
+    # 0.52 and the one that was wrong (+0.49) 1.48: the learner was promoting
+    # exactly the views the aggregate should have been discounting.
     skill = OnlineSkillWeights(names, halflife=halflife, floor=floor)
     n = len(names)
     W = np.empty((len(idx), n), dtype=np.float64)
     for t in range(len(idx)):
         s = t - h
         if s >= 0:
-            skill.observe(S[s], fwd[s])   # resolved at t; never before
+            skill.observe(-S[s], fwd[s])  # resolved at t; never before
         W[t] = skill.weights() * n        # rows sum to n, preserving count scale
 
     # SHRINK TOWARD EQUAL WEIGHT.
     #
-    # The weights above are causal and never revised — that part is sound. What
-    # was never checked is whether the skill they measure PERSISTS, and measured
-    # on the app path (with macro, so MMR live) it does not:
+    # The weights above are causal and never revised. Whether the skill they
+    # measure PERSISTS is a separate question, and it was first answered with
+    # the call scored on the wrong sign (momentum, +osc), which is what made
+    # skill weighting look harmful: "equal weight 3x better" on Gold. Measured
+    # again on the app path (macro live, so MMR runs; 10d, non-overlapping
+    # offset-averaged IC from convergence.intelligence.series_edge, SE ~0.07)
+    # with the contrarian call the system actually reads:
     #
-    #   split-half rank corr of view weights   Gold -0.379 · Copper -0.007 · Silver -0.054
-    #   raw spread between best and worst view Gold  9.0x  · Copper  4.4x  · Silver  4.9x
+    #   IC of net view breadth    equal    shrink 0.5   unshrunk   persistence
+    #   Gold                     +0.045      +0.052      +0.053        +0.04
+    #   Copper                   +0.030      +0.029      +0.029        -0.27
+    #   Silver                   +0.010      +0.009      +0.008        +0.12
+    #   Bitcoin                  -0.014      -0.012      -0.010        +0.18
     #
-    # Negative persistence means a view that scored well in the first half tends
-    # to score WORSE in the second, so a 9x weight differential is being assigned
-    # on evidence that does not survive out of sample. Comparing the aggregate
-    # against a plain equal-weighted one at h=10 confirms the cost:
-    #
-    #   Gold   skill IC -0.0104 (0.1σ)  vs equal -0.0324 (0.5σ)   equal 3x better
-    #   Copper skill IC -0.0380 (0.5σ)  vs equal -0.0493 (0.7σ)   equal better
-    #   Silver skill IC -0.0121 (0.2σ)  vs equal -0.0107 (0.2σ)   tie
-    #
-    # Neither IC is individually significant, so that comparison alone would be
-    # weak — but it agrees in direction with the independent persistence
-    # measurement, and two independent readings pointing the same way is what
-    # justifies acting.
-    #
-    # Shrinkage rather than deletion, because skill weighting is NOT uniformly
-    # useless: Bitcoin measured +0.744 persistence on the same test. A fixed
-    # pull toward 1.0 caps the damage where the ranking is noise while keeping
-    # half the differentiation where it is real. SKILL_WEIGHT_SHRINK = 1.0
-    # restores the previous behaviour exactly.
-    if SKILL_WEIGHT_SHRINK < 1.0:
-        W = 1.0 + SKILL_WEIGHT_SHRINK * (W - 1.0)
+    # (persistence = split-half rank correlation of each view's own contrarian
+    # hit rate; raw best/worst weight spread 3.4-5.5x unshrunk, ~2x at 0.5.)
+    # Every difference between the columns is a fraction of one standard error,
+    # so the measurement neither condemns weighting nor licenses trusting a 5x
+    # differential on evidence that barely persists. A fixed half-way pull
+    # toward 1.0 is the setting that claims neither; ``shrink=1.0`` (or
+    # SKILL_WEIGHT_SHRINK = 1.0) gives the unshrunk estimator, 0.0 equal weight.
+    k = SKILL_WEIGHT_SHRINK if shrink is None else float(shrink)
+    if k < 1.0:
+        W = 1.0 + k * (W - 1.0)
         # Re-normalise so rows still sum to n; aggregate_views relies on that
         # scale for its counts and percentages.
         rs = W.sum(axis=1, keepdims=True)
@@ -652,16 +652,23 @@ def aggregate_views(
     many views actually reported (coverage, which is a count of participation,
     not of skill, and so stays unweighted).
 
-    ``weights=None`` gives the equal-weighted reduction the basket read used.
+    ``weights=None`` gives the equal-weighted reduction.
+
+    NOTE ON COUNTS. With weights, ``Oversold`` / ``Overbought`` /
+    ``Buy_Signals`` / ``Sell_Signals`` and the ``Regime_*`` columns are
+    SKILL-WEIGHTED counts — fractional, and summing to ``Total_Analyzed``
+    across a split — not head counts of views. Display them as weighted
+    counts (one decimal) or, better, as the ``*_Pct`` shares; truncating them
+    to integers turns a 0.7-weight vote into 0.
     """
     if not view_results:
         return pd.DataFrame()
 
     # ── Vectorized aggregation ────────────────────────────────────────────
-    # The previous implementation looped over every (date × constituent) pair
+    # The previous implementation looped over every (date × view) pair
     # with a per-cell ``df.loc[date]`` lookup — O(D·C) Python with a Series
-    # materialization on each step (~12s for an 18-name basket over ~2k days).
-    # We instead stack every constituent's needed columns into one long frame
+    # materialization on each step (~12s for 18 series over ~2k days).
+    # We instead stack every view's needed columns into one long frame
     # and let a single ``groupby(Date)`` do all the reductions in C. The output
     # schema, column order, and values are identical (validated to 1e-6).
     needed = [

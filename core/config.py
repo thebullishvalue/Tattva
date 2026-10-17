@@ -18,7 +18,7 @@ global fallback). See the InstrumentConfig section lower in this file.
 
 # Single source of truth for the app version — ui/theme.py imports these (do not
 # redefine elsewhere; past drift between config and theme is why this is centralized).
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 PRODUCT_NAME = "Tattva"
 COMPANY = "@thebullishvalue"
 
@@ -31,12 +31,26 @@ COMPANY = "@thebullishvalue"
 # ENSEMBLE_MODELS knobs (and every per-instrument tuning of them) are gone
 # rather than retained as inert settings.
 #
-# Tuned/anchored values are study-validated; measurements, run dates and report
-# files live in research/TUNING_COVERAGE.md + CHANGELOG, not here.
+# Where a value below was set by a measurement, the measurement is quoted next
+# to it; the CHANGELOG carries the history of each change.
 
-# Z-score band lengths for the Z_lb/AvgZ/breadth STATE features, applied to the
-# engine's mispricing gap.
-LOOKBACK_WINDOWS = (3, 5, 10)          # fvo_full: "ultra-short(3-10)"
+# Window lengths for the Z_lb / AvgZ / window-breadth STATE features — each a
+# robust z-score of the mispricing gap against its own trailing window.
+#
+# ~1 month, ~1 quarter, ~1 year. These used to be (3, 5, 10) — an "ultra-short"
+# grid that made every reading built on it (the engine's zone labels, its
+# window breadth, ConvictionRaw/Bounded) a measure of how far the gap had moved
+# over the last one-to-two weeks: corr 0.85 with the 5-day CHANGE in the gap,
+# 0.3 with its level. That is a timing read, while every page labels Mūla as
+# "is this cheap or dear?" — so the engine pointed two ways at once (Gold on
+# 2026-10-16: zone stack "OVERSOLD / BUY", oscillator +0.01σ, fair). At these
+# memories the gap (half-life ~1-2 weeks) completes several cycles inside every
+# window, so each Z_lb reads the LEVEL of the mispricing against its own
+# history and the stack describes the same thing the oscillator does. The 10d
+# IC of neither grid was distinguishable from zero on the evidence, so
+# coherence, not a measured edge, decided it. (The 3-day window was also never
+# populated: its min_periods of 5 could not fit in 3 rows.)
+LOOKBACK_WINDOWS = (21, 63, 252)
 
 # Observations absorbed before a valuation is published. One year is where an
 # exponentially weighted correlation matrix over ~200 instruments has enough
@@ -64,7 +78,10 @@ MIN_DATA_POINTS = 1500
 # the precedent analogs and the Intelligence calibrator score against, and the
 # window the UI projects the current mispricing over. Data stays DAILY.
 FORECAST_HORIZON = 10       # scoring / display horizon (trading days)
-HOLD_HORIZONS = (5, 10)     # Intelligence Val-IC / calibration grid (analog 5d+10d pair)
+# Forward-return horizons the convergence calibration frame carries by default
+# (convergence.intelligence._build_calibration_frame). Every published grade —
+# the walk-forward edge of every engine — is scored at FORECAST_HORIZON.
+HOLD_HORIZONS = (5, 10)
 
 # Trailing window for the PRECEDENT analog matcher's state features (momentum,
 # realized vol, and — at 3x this — the rolling Hurst) in analytics.analogs.
@@ -89,14 +106,13 @@ RAW_YIELD_PREDICTORS = frozenset({
 # ~20d). The hero's precedent second-opinion reads at FORECAST_HORIZON (10d).
 PRECEDENT_HORIZONS = (1, 3, 5, 10, 20, 60)
 
-# ENGINE ConvictionBounded → signal mapping (engines/mula/base.py + the tabs that
-# display it). Data-anchored to |ConvictionBounded| p50/p75/p90 (study: ui_anchors).
-# NOT used by conviction_model.py (that bins the DDM-smoothed COMPOSITE on
-# COMPOSITE_THRESHOLDS). Stood pending a confirming run (last ui_anchors saw an
-# unexplained shift on this un-retuned metric).
-CONVICTION_STRONG = 15.13
-CONVICTION_MODERATE = 10.89
-CONVICTION_WEAK = 6.56       # "any lean at all" floor
+# Warm-up priors for the tiers of Mūla's WINDOW AGREEMENT (ConvictionBounded,
+# ±100) — the engine's zone labels and the Mūla page's "broadly / leans" read.
+# p90 / p75 of |ConvictionBounded| on the 21/63/252-session windows, measured
+# 2026-10-17 on Gold / S&P 500 / USD-INR (70.2/57.3, 74.1/59.6, 69.8/54.4).
+# Each instrument's own causal quantiles replace them after a year.
+CONVICTION_STRONG = 70.0
+CONVICTION_MODERATE = 57.0
 
 # Staleness (in TRADING days behind — weekends ignored).
 STALENESS_DAYS = 3
@@ -137,26 +153,18 @@ SWAYAM_OVERBOUGHT = 5
 
 # ─── Convergence Layer Defaults ──────────────────────────────────────────────
 
-# Adaptive weighting base allocation (conv_weights: "direction-heavy .5").
+# PRIOR dimension weights — where the online learner starts (and what stands
+# when the overlap is too short to learn from). Direction-heavy: whether the two
+# engines point the same way is the dimension with a meaning independent of
+# scale.
 CONV_WEIGHT_DIRECTION = 0.50
 CONV_WEIGHT_BREADTH = 0.20
 CONV_WEIGHT_MAGNITUDE = 0.20
 CONV_WEIGHT_REGIME = 0.10
 
-# Adaptive shift limits (±10% based on clarity ratios)
-CONV_ADAPTIVE_SHIFT_MAX = 0.10
-
-# Convergence-score label tiers (CrossValidator signal string, ±100). Data-anchored
-# at p75/p90/p97.5 of |convergence_score| (study: ui_anchors).
-CONV_STRONG_BULLISH = -15.61
-CONV_MODERATE_BULLISH = -9.18
-CONV_WEAK_BULLISH = -4.46
-CONV_WEAK_BEARISH = 4.46
-CONV_MODERATE_BEARISH = 9.18
-CONV_STRONG_BEARISH = 15.61
-
-# CONSENSUS DDM smoothing (hero trend / conviction model). ddm 2026-07-20: leak 0.01.
-# GUARD: sweep leak WITH drift co-scaled (drift = leak × gain 1.20), never alone.
+# The weighted composite's drift-diffusion filter (convergence.conviction_model).
+# ddm 2026-07-20: leak 0.01. GUARD: sweep leak WITH drift co-scaled
+# (drift = leak × gain 1.20), never alone.
 CONV_DDM_LEAK_RATE = 0.01
 CONV_DDM_DRIFT_SCALE = 0.012
 CONV_DDM_LONG_RUN_VAR = 50.0
@@ -164,8 +172,6 @@ CONV_DDM_LONG_RUN_VAR = 50.0
 # Divergence detection
 DIV_LOOKBACK = 20
 DIV_PERSISTENCE_THRESHOLD = 5
-
-# ─── Column Normalization ────────────────────────────────────────────────────
 
 # ─── Global Macro Bond ETF Universe ──────────────────────────────────────────
 # Adapted from Sanket — proxy for global yield dynamics via yfinance-available
@@ -452,12 +458,12 @@ COMMODITY_TARGETS = {
     "Aluminium": "ALI=F",
     "Zinc": "ZNC=F",
     # Crypto trades 7 days a week — 366 daily bars a year against ~252 for a
-    # future — while every macro predictor prints on weekdays only. The model
-    # spine is the target's own sessions intersected with the predictor panel
-    # (data/calendars.py has no calendar for crypto and falls back to a
-    # weekday mask), so weekend bars drop out rather than being carried
-    # against stale macro. A Saturday move is real, but nothing in the
-    # cross-section was open to explain it.
+    # future — while every macro predictor prints on weekdays only. The shared
+    # matrix is a weekday spine (data/fetcher.py drops weekend rows when it
+    # builds it), so weekend bars never reach the model rather than being
+    # valued against stale macro. A Saturday move is real, but nothing in the
+    # cross-section was open to explain it. (calendars.py treats crypto as
+    # 24×7, and counts "days behind" on weekdays to match this spine.)
     "Bitcoin": "BTC-USD",
     "Ethereum": "ETH-USD",
     "Solana": "SOL-USD",
@@ -547,15 +553,38 @@ _US_INDEX_ETFS = ["US Large Cap (S&P 500)", "US Nasdaq 100",
                   "US Small Cap (Russell 2000)", "Global Equity (ACWI)"]
 _INDIA_INDEX_ETFS = ["India Equity"]
 
+# The US equity complex: every US-listed equity ETF in the panel — broad,
+# sector, style and thematic. A US INDEX is a weighted sum of exactly these
+# pieces, so leaving them in rebuilds the target instead of valuing it:
+# measured on 9y of daily returns, VTV + VUG alone explain 99.5% of the S&P
+# 500 (XLK + XLC + XLY: 97.8% of the Nasdaq 100). That is the Dollar Index
+# pathology (see TARGET_EXCLUDED_PREDICTORS above) — an OOS R² near 1.0 and a
+# "mispricing" that is rounding. Excluded, the index is valued against rates,
+# credit, the dollar, commodities, volatility and foreign equity, which is the
+# question Mūla asks. Individual US STOCKS keep these as predictors: a sector
+# ETF is a driver of one of its members, not a replica of it.
+_US_EQUITY_COMPLEX = _US_INDEX_ETFS + [
+    "US Materials Sector", "US Energy Sector", "US Industrials Sector",
+    "US Financials Sector", "US Regional Banks (Credit Stress)",
+    "US Utilities (XLU)", "US Consumer Staples (XLP)",
+    "US Consumer Discretionary (XLY)", "US Technology (XLK)",
+    "US Health Care (XLV)", "US Real Estate Sector (XLRE)",
+    "US Communication Services (XLC)", "US Homebuilders (XHB)",
+    "US Transports (IYT)", "Semiconductors (SMH)", "Metals & Mining (XME)",
+    "US Value (VTV)", "US Growth (VUG)", "US Momentum (MTUM)",
+    "US Low Volatility (USMV)", "US High Beta (SPHB)", "US High Dividend (VYM)",
+    "US REITs (VNQ)",
+]
+
 _INDEX_NAMES = list(INDEX_TARGETS.keys())
 for _name, _meta in INDEX_TARGETS.items():
     # An index must not be "explained" by sibling equity indices → exclude every
     # other index column, plus the same-market broad ETFs, from its predictors.
     _excl = [n for n in _INDEX_NAMES if n != _name]
-    if _meta["kind"] in ("india", "etf"):
+    if _meta["kind"] == "india":
         _excl = _excl + _INDIA_INDEX_ETFS
     elif _meta["kind"] == "us":
-        _excl = _excl + _US_INDEX_ETFS
+        _excl = _excl + _US_EQUITY_COMPLEX
     TARGET_EXCLUDED_PREDICTORS[_name] = _excl
 
 # Full target catalogue (commodities/FX + indices) → friendly name : yf ticker.
@@ -584,6 +613,15 @@ for _sname, _smeta in SHEET_TARGETS.items():
     TARGET_CATEGORIES.setdefault(_smeta["category"], []).append(_sname)
     # Don't let sibling India equity indices / the India ETF "explain" the PE.
     TARGET_EXCLUDED_PREDICTORS.setdefault(_sname, list(_INDEX_NAMES) + _INDIA_INDEX_ETFS)
+
+#: The catalogue, frozen at import: every target that is a column of the shared
+#: model matrix. ALL_TARGETS itself grows at runtime (register_stock_target adds
+#: each free-form symbol a user types), and anything that iterates it to decide
+#: what to FETCH would then pull one user's symbol into every later user's
+#: panel — where it became a predictor of Gold, moved every published fair
+#: value, and changed the panel fingerprint. What the shared matrix contains is
+#: decided here, once, and never by a session.
+CATALOGUE_TARGETS: dict[str, str] = dict(ALL_TARGETS)
 
 # ─── Stock targets (individual equities) ─────────────────────────────────────
 # The Mūla target is the stock's own price; breadth is Swayam on that price —
@@ -753,14 +791,14 @@ class InstrumentConfig:
     fvo_valuation_deltas: tuple[float, ...] = FVO_VALUATION_DELTAS
     fvo_lookback_windows: tuple[int, ...] = LOOKBACK_WINDOWS
 
-    # ── Convergence DDM (consensus filter) ──────────────────────────────────
+    # ── Convergence: the weighted composite's drift-diffusion filter ────────
     ddm_leak: float = CONV_DDM_LEAK_RATE
     ddm_drift: float = CONV_DDM_DRIFT_SCALE
     ddm_lrv: float = CONV_DDM_LONG_RUN_VAR
 
     # ── Convergence dimension weights: PRIOR for the online learner ────────
-    # These seed analytics.adaptive.OnlineSkillWeights, which then moves them
-    # by each dimension's own discounted directional skill. They are a starting
+    # Passed as `prior` to convergence.intelligence.apply_online_weights, which
+    # moves them by each dimension's own discounted signed skill. A starting
     # belief, not a fitted answer.
     conv_weight_direction: float = CONV_WEIGHT_DIRECTION
     conv_weight_breadth: float = CONV_WEIGHT_BREADTH
@@ -783,53 +821,34 @@ class InstrumentConfig:
     # per instrument; these values hold only until it has enough history.
     # Structural cut-points (R²/ADF/KPSS/HMM) stay fixed — they are properties
     # of a statistical test, not of an instrument's distribution.
-    consensus_strong: float = 0.404      # normalized-consensus [-1,1] p90
-    consensus_moderate: float = 0.279    # p75
-    composite_strong: float = 0.159       # directional composite [-1,1] p90
-    composite_moderate: float = 0.092     # p75
-    # Convergence-score display tiers (magnitudes; ×100 scale) + conviction tiers.
-    conv_display_strong: float = 15.61
-    conv_display_moderate: float = 9.18
-    conv_display_weak: float = 4.46
-    conviction_strong: float = 15.13
-    conviction_moderate: float = 10.89
-    conviction_weak: float = 6.56
-    # Unified-Signal plot markers (per row: consensus / ConvictionRaw / Swayam avg).
-    ui_consensus_strong: float = 0.41
-    ui_consensus_moderate: float = 0.28
-    ui_convraw_strong: float = 66.67
-    ui_convraw_moderate: float = 33.33
+    # Mūla window agreement (ConvictionBounded, ±100) — p90 / p75.
+    conviction_strong: float = CONVICTION_STRONG
+    conviction_moderate: float = CONVICTION_MODERATE
+    # Swayam average signal (±10) — p75, the one cut-point both the Swayam and
+    # the Convergence page colour it with.
     ui_swayam_avg_threshold: float = 2.87
-    # Other UI display tiers.
+    # Engine agreement ratio — p90 / p75.
     ui_agreement_strong: float = 0.89
     ui_agreement_moderate: float = 0.799
-    ui_breadth_high: float = 60.0
-    ui_model_spread_low: float = 15.82
-    ui_model_spread_high: float = 29.92
-    ui_swayam_bullish: float = -2.9
-    ui_swayam_bearish: float = 2.9
+    # Model spread (SD of the fair-value level), basis points — p10 / p90. The
+    # spread now measures the fair value's own uncertainty, not the residual
+    # noise around it, and runs ~17-77 bps across instruments (2026-10-17), so
+    # the prior is wide and each instrument's own history takes over.
+    ui_model_spread_low: float = 20.0
+    ui_model_spread_high: float = 80.0
+    # (The consensus and composite tiers are no longer per-instrument fields:
+    # convergence.normalization classifies both at their own causal p90 / p75,
+    # with one shared warm-up prior each. Seven other display fields went with
+    # the cards and markers that read them.)
 
     def weights_seed(self) -> dict[str, float]:
-        """Convergence dimension weights as the CrossValidator/Intelligence seed."""
+        """Prior dimension weights — the CrossValidator's first pass and the learner's start."""
         return {
             "w_direction": self.conv_weight_direction,
             "w_breadth": self.conv_weight_breadth,
             "w_magnitude": self.conv_weight_magnitude,
             "w_regime": self.conv_weight_regime}
 
-    def consensus_thresholds(self) -> dict[str, float]:
-        """Normalized-CONSENSUS classification cut-points (classify_normalized_signal
-        `thresholds=` seed). Symmetric ±strong / ±moderate."""
-        return {
-            "buy_strong": -self.consensus_strong, "buy_moderate": -self.consensus_moderate,
-            "sell_moderate": self.consensus_moderate, "sell_strong": self.consensus_strong}
-
-    def composite_thresholds(self) -> dict[str, float]:
-        """Directional-COMPOSITE classification cut-points (classify_convergence_score
-        `thresholds=` seed / Intelligence calibration seed)."""
-        return {
-            "buy_strong": -self.composite_strong, "buy_moderate": -self.composite_moderate,
-            "sell_moderate": self.composite_moderate, "sell_strong": self.composite_strong}
 
 
 # Per-asset-class DEFAULT tuning. Each class is a NAMED constant so an entire class
@@ -844,9 +863,7 @@ CLASS_CONFIG_DEFAULTS: dict[str, InstrumentConfig] = {
     "commodity":   InstrumentConfig(),
     "fx":          InstrumentConfig(),
     "india_index": InstrumentConfig(),   # == Nifty 50 baseline tuning
-    "us_index":    InstrumentConfig(),   # per_asset us_index MSF (18) was n=3 targets vs a NaN default — not
-    "etf":         InstrumentConfig(),   # credible; etf (12) was n=1. Both inert (members carry their own MSF), so
-                                         # kept at the global default rather than pinning a degenerate class-level best.
+    "us_index":    InstrumentConfig(),
     # per_asset 2026-07-21 (asset-level, pooled Nifty100 / Nasdaq100 universes):
     # Crypto starts on the global default: it has not been through a tuning
     # sweep, and a hand-picked knob would be a guess wearing a number. A swept
@@ -868,8 +885,7 @@ _CATEGORY_TO_CLASS: dict[str, str] = {
     "Currency (FX)": "fx",
     "Crypto":        "crypto",
     "India Indices": "india_index",
-    "US Indices":    "us_index",
-    "ETF Universe":  "etf"}
+    "US Indices":    "us_index"}
 
 # ── PER-INSTRUMENT vs ASSET-LEVEL tuning ─────────────────────────────────────
 # The 5 catalogue classes are tuned PER INSTRUMENT (each target carries its own
@@ -922,8 +938,6 @@ _PER_INSTRUMENT_OVERRIDES: dict[str, dict] = {
     'USD/INR': {},
     # -- India Indices --
     'Nifty Pharma': {},
-    'Nifty PSU Bank': {},
-    'Nifty Realty': {},
     # -- US Indices --
     'S&P 500': {},
     'Nasdaq 100': {}}
@@ -981,11 +995,6 @@ def get_instrument_config(target: str) -> "InstrumentConfig":
 
 # ─── Chart Theme ─────────────────────────────────────────────────────────────
 
-CHART_BG = "rgba(0,0,0,0)"
-CHART_GRID = "rgba(255,255,255,0.05)"
-CHART_ZEROLINE = "rgba(255,255,255,0.10)"
-CHART_FONT_COLOR = "#8B95A6"   # == --ink-tertiary
-
 # ── Chart palette — SINGLE SOURCE OF TRUTH ───────────────────────────────────
 # Every chart colour derives from these RGB triples (COLOR_* + inline rgba() via
 # the rgba() helper), and each one now EQUALS its CSS token in ui/theme.css.
@@ -1025,57 +1034,17 @@ def rgba(name: str, alpha) -> str:
 
 COLOR_GREEN = _palette_hex("emerald")   # #2CA36B
 COLOR_RED = _palette_hex("rose")        # #DD5A5A
-COLOR_GOLD = _palette_hex("amber")      # #D79A3C
 COLOR_CYAN = _palette_hex("cyan")       # #4E9FC4
 COLOR_AMBER = _palette_hex("amber")     # #D79A3C
 COLOR_ACCENT = _palette_hex("accent")   # #4C7DF0 — primary/interactive; use for featured
                                          # series & emphasis, never for warning semantics.
 COLOR_PURPLE = _palette_hex("violet")   # #9B8FD4
-COLOR_MUTED = rgba("slate", 0.4)        # rgba(148,163,184,0.4)
 
-# ─── UI Thresholds (centralized magic numbers) ──────────────────────────────
-# NOTE (audit finding F15): UI_CONVICTION_* / UI_Z_* previously duplicated
-# CONVICTION_* (above) / a dead Z_EXTREME-Z_THRESHOLD pair with identical
-# values and no independent tuning need. UI callers now import CONVICTION_*
-# directly; Z_EXTREME/Z_THRESHOLD had zero consumers anywhere and were
-# removed rather than consolidated.
-
-# Breadth percentage thresholds — high-breadth ALERT tier (fires on ~p96 of
-# pooled breadth obs; the distribution is quantized in 20% steps by the 5
-# lookback bands). Study: `ui_anchors`.
-UI_BREADTH_HIGH = 60
-
-# Agreement ratio tiers (hero INTERNALS row + convergence metric card).
-# Data-anchored at p75/p90 of the pooled agreement_ratio distribution
-# (study: `ui_anchors`) — "strong" must mean strong.
-UI_AGREEMENT_STRONG = 0.89    # = p90
-UI_AGREEMENT_MODERATE = 0.799  # = p75
-
-# Swayam avg-signal lean tier (metric-card coloring). Data-anchored at p75 of
-# pooled |Avg_Signal|, matching UI_SWAYAM_AVG_THRESHOLD — one anchor for the
-# same series everywhere (study: `ui_anchors`).
-UI_SWAYAM_BULLISH = -2.9
-UI_SWAYAM_BEARISH = 2.9
-
-# ── Unified-Signal plot marker thresholds (data-anchored) ────────────────────
-# The 3-row Unified Signal plot's reference lines + marker-color tiers, set to
-# the p90 (strong) / p75 (moderate) quantiles of each signal's OWN pooled
-# distribution (study: `markers`) so "strong/moderate" means the same
-# extremeness on every row. EXTREMENESS markers, not actionable edges.
-UI_CONSENSUS_STRONG = 0.41      # Row 1 · norm_avg (consensus, [-1,1]) = p90 (markers 2026-07-20)
-UI_CONSENSUS_MODERATE = 0.28    #                                       = p75 (markers 2026-07-20)
-UI_CONVRAW_STRONG = 66.67       # Row 2 · ConvictionRaw (Mūla, ~[-100,100]) = p90 (markers 2026-07-20)
-UI_CONVRAW_MODERATE = 33.33     #                                              = p75 (markers 2026-07-20)
-UI_SWAYAM_AVG_THRESHOLD = 2.87   # Row 3 · Avg_Signal (Swayam, [-10,10]) —
-                                # single tier at p75, matching the other rows'
-                                # moderate tier
-
-# Model spread tiers — BASIS POINTS (tab_fvo converts the raw
-# log-return-std column ×1e4 before comparing). Data-anchored at ~p75/p90.
-# GUARD: anchor these only from the LIVE ols+huber basket — the fast
-# ridge+ols research basket's spread is ~2× tighter and would mis-anchor.
-UI_MODEL_SPREAD_LOW = 15.82
-UI_MODEL_SPREAD_HIGH = 29.92
+# ─── UI Thresholds ───────────────────────────────────────────────────────────
+# Display tiers that belong to an INSTRUMENT (agreement, Swayam signal, model
+# spread, window agreement) live on InstrumentConfig as warm-up priors for that
+# instrument's own causal quantiles. What stays here are properties of a
+# statistic or of the layout, the same for every instrument.
 
 # OOS R² thresholds
 UI_R2_STRONG = 0.7
@@ -1085,20 +1054,8 @@ UI_R2_ACCEPTABLE = 0.4
 # mean-reverting variance — measured degenerate, the tiers could never fire.
 # The band itself is still drawn on the conviction chart.)
 
-# HMM probability threshold
-UI_HMM_CONFIDENT = 0.5
-
-# ADF/KPSS p-value thresholds
-UI_ADF_SIGNIFICANT = 0.05
-UI_KPSS_NOT_SIGNIFICANT = 0.05
-
 # Chart height defaults
-UI_CHART_HEIGHT_SMALL = 280
 UI_CHART_HEIGHT_MEDIUM = 340
 UI_CHART_HEIGHT_LARGE = 380
 UI_CHART_HEIGHT_XLARGE = 540
 UI_CHART_HEIGHT_STACKED = 680
-
-# Data table defaults
-UI_TABLE_HEIGHT = 520
-UI_TABLE_HISTORY_ROWS = 10

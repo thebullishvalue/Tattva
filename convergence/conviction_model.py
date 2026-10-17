@@ -1,99 +1,49 @@
 """
-Tattva — UnifiedConvictionModel: DDM filtering on convergence scores.
+Tattva — CompositeDDM: the drift-diffusion trend of the weighted composite.
 तत्त्व (Tattva) — "Principle / Essence"
 
-CONVERGENCE — Adaptive-weighted composite of 4 dimensions: Direction, Breadth, Magnitude, Regime — with DDM.
+CONVERGENCE — the same leaky drift-diffusion primitive the Mūla engine runs on
+its window-agreement score, applied to the cross-system ``convergence_score``
+once its dimension weights have been learned. The result is the composite's
+TREND: a bounded, smoothed series with a heuristic uncertainty band, drawn on
+the Convergence page beside the raw composite it filters.
 
-Applies the same Drift-Diffusion Model (DDM) primitive used by the
-Mūla engine on raw conviction, but operates on the cross-system
-convergence score time-series. The result is a bounded, smoothed
-signal with confidence bands reflecting agreement between both
-analytical engines.
+It is evidence, not a verdict. The class used to be ``UnifiedConvictionModel``
+and its output ``nishkarsh_conviction`` (a name inherited from a sibling
+fork), classified STRONG BUY … STRONG SELL — a third BUY/SELL source next to
+the hero's action and the consensus card, and it was fitted twice per run
+(before and after the weights were learned) to produce numbers no page showed.
+It now runs once, on the learned composite, and its words are leans
+(``convergence.normalization.lean_label``) at the smoothed series' own causal
+tiers — "conviction" and BUY/SELL belong to the hero's chain alone.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 
-from core.config import (
-    CONV_DDM_LEAK_RATE,
-    CONV_DDM_DRIFT_SCALE,
-    CONV_DDM_LONG_RUN_VAR,
-)
-from convergence.normalization import COMPOSITE_THRESHOLDS
 from analytics.ddm_filter import drift_diffusion_filter
 from analytics.utils import _apply_conviction_bounds
-
-# Classification cut-points for the DDM-filtered CONVERGENCE SCORE (±100
-# composite scale) — the composite's OWN data-anchored factory set, ×100
-# (single source: convergence.normalization.COMPOSITE_THRESHOLDS; p75/p90 of
-# pooled |composite|). This model previously binned with the ENGINE's
-# CONVICTION_MODERATE/STRONG (40/60) — thresholds anchored on a DIFFERENT
-# distribution (ConvictionBounded); on the composite's honest distribution
-# those sat at ~p98/p100, so the conviction card read NEUTRAL on ~96% of days
-# and never printed STRONG (F1 threshold-distribution pairing violation,
-# found by research/ui_anchors_study.py 2026-07-12). WEAK is the measured p50
-# of pooled |convergence_score| (5.76 → 6.0) — the "any lean at all" floor.
-_TIER_STRONG = abs(COMPOSITE_THRESHOLDS["sell_strong"]) * 100.0    # 33 (p90)
-_TIER_MODERATE = abs(COMPOSITE_THRESHOLDS["sell_moderate"]) * 100.0  # 19 (p75)
-_TIER_WEAK = 6.0
+from convergence.normalization import COMPOSITE_PRIOR, causal_tiers, lean_label
+from core.config import (
+    CONV_DDM_DRIFT_SCALE,
+    CONV_DDM_LEAK_RATE,
+    CONV_DDM_LONG_RUN_VAR,
+)
 
 
-@dataclass
-class UnifiedConvictionResult:
-    """Output of the unified conviction model for a single date.
-
-    NOTE on naming (audit finding F22): the ``nishkarsh_*`` field/session-key
-    prefix is inherited from Tattva's sibling fork (Nishkarsh) this engine was
-    ported from — it is NOT a Tattva product concept (Tattva's own terms are
-    "convergence" / "conviction" / "calibrated signal"; see convergence's
-    module docstrings). Left as-is rather than mechanically renamed: this
-    exact field name is a dataclass public API read across 4 files
-    (convergence/conviction_model.py, app.py, ui/components.py,
-    ui/tabs/tab_convergence.py — grep ``nishkarsh`` before touching any of
-    them), and Tattva/Nishkarsh actively cross-port audit fixes between the
-    two forks' engines, where a renamed field is exactly the kind of surface
-    a port might silently miss. If this is ever renamed, do it as one
-    dedicated, grep-verified pass across all 4 files in the same commit —
-    not incrementally.
-
-    Attributes
-    ----------
-    nishkarsh_conviction : float
-        DDM-filtered convergence score, bounded to [-100, +100].
-    nishkarsh_signal : str
-        Classified signal (``STRONG BUY`` → ``STRONG SELL``).
-    confidence_upper : float
-        Upper bound of the DDM uncertainty band (heuristic — see
-        ``drift_diffusion_filter``'s docstring; NOT a statistical confidence
-        interval with a validated coverage property).
-    confidence_lower : float
-        Lower bound of the DDM uncertainty band (heuristic, see above).
-    confidence_bandwidth : float
-        Width of the uncertainty band (upper - lower).
-    """
-
-    nishkarsh_conviction: float
-    nishkarsh_signal: str
-    confidence_upper: float
-    confidence_lower: float
-    confidence_bandwidth: float
-
-
-class UnifiedConvictionModel:
-    """Applies DDM filtering to a convergence score time-series.
+class CompositeDDM:
+    """Drift-diffusion filter over a convergence-score series.
 
     Parameters
     ----------
     leak_rate : float
         DDM memory decay rate. Higher = faster forgetting.
     drift_scale : float
-        Scaling factor for new evidence contribution.
+        Weight on each new observation (steady-state gain = drift / leak).
     long_run_var : float
-        Long-run variance toward which the filter mean-reverts.
+        Long-run variance the band mean-reverts toward.
     """
 
     def __init__(
@@ -105,113 +55,36 @@ class UnifiedConvictionModel:
         self.leak_rate = leak_rate
         self.drift_scale = drift_scale
         self.long_run_var = long_run_var
-        self._filtered: np.ndarray = np.array([])
-        self._variances: np.ndarray = np.array([])
-        self._dates: list[str] = []
 
-    def fit(
-        self, convergence_scores: list[float], dates: list[str]
-    ) -> list[UnifiedConvictionResult]:
-        """Filter a series of convergence scores through the DDM.
+    def fit_series(self, scores: pd.Series) -> pd.DataFrame:
+        """Filter ``scores`` (±100, reading-oriented: negative = bullish).
 
-        Parameters
-        ----------
-        convergence_scores : list[float]
-            Raw convergence scores from ``CrossValidator``.
-        dates : list[str]
-            Corresponding date strings.
-
-        Returns
-        -------
-        list[UnifiedConvictionResult]
-            One result per observation.
+        Returns a frame on the same index with ``smoothed`` (tanh-bounded to
+        ±100), ``upper`` / ``lower`` (±1.96 filter SD — a heuristic band, not a
+        calibrated interval; see ``drift_diffusion_filter``), and ``label`` —
+        the lean word at that row's own causal p90 / p75 of ``|smoothed|``,
+        built from strictly earlier rows. Empty frame for empty input.
         """
-        scores = np.array(convergence_scores, dtype=np.float64)
-        self._dates = dates
-
+        cols = ["smoothed", "upper", "lower", "label"]
+        if scores is None or len(scores) == 0:
+            return pd.DataFrame(columns=cols)
+        x = pd.to_numeric(pd.Series(scores), errors="coerce").ffill().fillna(0.0)
         filtered, _gains, variances = drift_diffusion_filter(
-            scores,
+            x.to_numpy(dtype=np.float64),
             leak_rate=self.leak_rate,
             drift_scale=self.drift_scale,
             long_run_var=self.long_run_var,
         )
-        self._filtered = filtered
-        self._variances = variances
-
-        results: list[UnifiedConvictionResult] = []
-        for i in range(len(scores)):
-            ddm_std = float(np.sqrt(max(self._variances[i], 0)))
-            bounded = _apply_conviction_bounds(filtered[i])
-            upper = _apply_conviction_bounds(filtered[i] + 1.96 * ddm_std)
-            lower = _apply_conviction_bounds(filtered[i] - 1.96 * ddm_std)
-            results.append(
-                UnifiedConvictionResult(
-                    nishkarsh_conviction=round(bounded, 2),
-                    nishkarsh_signal=self._classify_signal(bounded),
-                    confidence_upper=round(upper, 2),
-                    confidence_lower=round(lower, 2),
-                    confidence_bandwidth=round(upper - lower, 2),
-                )
-            )
-        return results
-
-    def get_latest(self) -> UnifiedConvictionResult | None:
-        """Return the most recent conviction result, or ``None``."""
-        if len(self._filtered) == 0:
-            return None
-        i = len(self._filtered) - 1
-        ddm_std = float(np.sqrt(max(self._variances[i], 0)))
-        bounded = _apply_conviction_bounds(self._filtered[i])
-        upper = _apply_conviction_bounds(self._filtered[i] + 1.96 * ddm_std)
-        lower = _apply_conviction_bounds(self._filtered[i] - 1.96 * ddm_std)
-        return UnifiedConvictionResult(
-            nishkarsh_conviction=round(bounded, 2),
-            nishkarsh_signal=self._classify_signal(bounded),
-            confidence_upper=round(upper, 2),
-            confidence_lower=round(lower, 2),
-            confidence_bandwidth=round(upper - lower, 2),
-        )
-
-    def get_series(self) -> pd.DataFrame:
-        """Return the full filtered series as a DataFrame indexed by date."""
-        if len(self._filtered) == 0:
-            return pd.DataFrame()
-        rows: list[dict[str, object]] = []
-        for i in range(len(self._filtered)):
-            ddm_std = float(np.sqrt(max(self._variances[i], 0)))
-            bounded = _apply_conviction_bounds(self._filtered[i])
-            upper = _apply_conviction_bounds(self._filtered[i] + 1.96 * ddm_std)
-            lower = _apply_conviction_bounds(self._filtered[i] - 1.96 * ddm_std)
-            rows.append(
-                {
-                    "date": self._dates[i] if i < len(self._dates) else "",
-                    "nishkarsh_conviction": round(bounded, 2),
-                    "signal": self._classify_signal(bounded),
-                    "confidence_upper": round(upper, 2),
-                    "confidence_lower": round(lower, 2),
-                    "confidence_bandwidth": round(upper - lower, 2),
-                }
-            )
-        return pd.DataFrame(rows).set_index("date")
-
-    @staticmethod
-    def _classify_signal(conviction: float) -> str:
-        """Classify a conviction score into a human-readable signal label.
-
-        Cut-points are the composite's own anchored set (see _TIER_* above) —
-        this series IS the DDM-smoothed composite, so it must be binned on its
-        own distribution, not the engine's.
-        """
-        if conviction < -_TIER_STRONG:
-            return "STRONG BUY"
-        if conviction < -_TIER_MODERATE:
-            return "BUY"
-        if conviction < -_TIER_WEAK:
-            return "WEAK BUY"
-        if conviction > _TIER_STRONG:
-            return "STRONG SELL"
-        if conviction > _TIER_MODERATE:
-            return "SELL"
-        if conviction > _TIER_WEAK:
-            return "WEAK SELL"
-        return "NEUTRAL"
+        sd = np.sqrt(np.maximum(np.asarray(variances, dtype=np.float64), 0.0))
+        smoothed = _apply_conviction_bounds(filtered)
+        out = pd.DataFrame({
+            "smoothed": np.round(smoothed, 2),
+            "upper": np.round(_apply_conviction_bounds(filtered + 1.96 * sd), 2),
+            "lower": np.round(_apply_conviction_bounds(filtered - 1.96 * sd), 2),
+        }, index=x.index)
+        # The smoothed series has its own scale (the filter's gain is
+        # drift/leak, not 1), so it is classified on its OWN distribution —
+        # the composite's priors only warm it up.
+        strong, moderate = causal_tiers(out["smoothed"].to_numpy(), COMPOSITE_PRIOR, scale=100.0)
+        out["label"] = [lean_label(v, s, m) for v, s, m in zip(out["smoothed"], strong, moderate)]
+        return out

@@ -37,6 +37,10 @@ from __future__ import annotations
 
 import re
 
+from core.config import (COMMODITY_TARGETS, GLOBAL_MACRO_MAP, INDEX_TARGETS_MAP,
+                         MACRO_SYMBOLS_YF)
+from core.instruments import ticker_class_map
+
 # Blocks, in the order they are reported. Ordering is cosmetic (the engine
 # sorts the names it is given) but keeping it economic makes the block-beta
 # and block-importance tables readable.
@@ -58,56 +62,11 @@ BLOCKS = (
 # ---------------------------------------------------------------------------
 # Pass 1 — explicit ticker table
 # ---------------------------------------------------------------------------
-# Only tickers whose class is NOT recoverable from the display name need an
-# entry here; the rest fall through to the keyword pass, which is exercised on
-# every Tattva macro column by the self-test in tests below.
-_TICKER_CLASS: dict[str, str] = {
-    # ── Rates: government curve ────────────────────────────────────────────
-    **{t: "Rates" for t in (
-        "BIL", "SHV", "SGOV", "SHY", "VGSH", "IEI", "IEF", "VGIT", "TLH",
-        "TLT", "VGLT", "GOVT", "BSV", "BLV", "AGG", "BND", "BNDW", "BNDX",
-        "IGOV", "BWX", "IEGA.L", "IBGL.L", "SDEU.L", "IGLT.L", "VGB.AX",
-        "XBB.TO", "IIND.L", "LTGILTBEES.NS", "GILT5YBEES.NS",
-        "LIQUIDBEES.NS", "CBON", "CNYB.L",
-        "^IRX", "^FVX", "^TNX", "^TYX",
-    )},
-    # ── Credit ─────────────────────────────────────────────────────────────
-    **{t: "Credit" for t in (
-        "LQD", "VCSH", "VCIT", "VCLT", "HYG", "JNK", "GHYG", "BGRN", "PFF",
-        "CWB", "FALN", "MBB", "VMBS", "BKLN", "MUB", "VTEB", "FLOT",
-        "IEAC.L", "SLXX.L", "IBND", "EMB", "PCY", "EMLC", "EMHY",
-        "EBBETF0430.NS",
-    )},
-    # ── Inflation-linked ───────────────────────────────────────────────────
-    **{t: "Inflation" for t in (
-        "TIP", "VTIP", "SCHP", "WIP", "INXG.L", "RINF",
-    )},
-    # ── Commodity: broad indices ───────────────────────────────────────────
-    **{t: "Commodity Broad" for t in ("DBC", "GSG")},
-    # ── Commodity: metals (incl. mining/thematic-metal equity proxies) ─────
-    **{t: "Metals" for t in (
-        "DBB", "GLTR", "PALL", "LIT", "URA", "SLX", "REMX", "XME", "PICK",
-        "XLB", "GC=F", "SI=F", "HG=F", "PL=F", "PA=F",
-    )},
-    # ── Commodity: energy ──────────────────────────────────────────────────
-    **{t: "Energy" for t in (
-        "XLE", "CL=F", "BZ=F", "NG=F", "RB=F", "HO=F",
-    )},
-    # ── Commodity: agriculture ─────────────────────────────────────────────
-    **{t: "Agriculture" for t in (
-        "DBA", "ZC=F", "ZW=F", "ZS=F", "ZL=F", "CT=F", "KC=F", "SB=F",
-        "CC=F", "JEERA.NCDEX",
-    )},
-    # ── Volatility ─────────────────────────────────────────────────────────
-    **{t: "Volatility" for t in ("^VIX", "VIXM", "^MOVE")},
-    # ── Real assets ────────────────────────────────────────────────────────
-    **{t: "Real Assets" for t in ("VNQ", "VNQI", "REET", "XLRE", "WOOD", "IGF")},
-    # ── Currency ───────────────────────────────────────────────────────────
-    **{t: "Currency" for t in (
-        "DX-Y.NYB", "UUP", "UDN", "USDU", "FXE", "FXY", "FXB", "FXF",
-        "FXA", "FXC", "CEW",
-    )},
-}
+# Generated from the instrument registry (core.instruments), which holds the
+# one definition of each instrument's asset class. Only tickers whose class is
+# NOT recoverable from the display name have an entry; the rest fall through
+# to the keyword pass.
+_TICKER_CLASS: dict[str, str] = ticker_class_map()
 
 # Everything else in Tattva's macro universe is equity (broad, sector, style,
 # regional, single-country). Listing the exceptions above and defaulting the
@@ -151,26 +110,9 @@ _COMPILED_RULES = tuple((re.compile(p, re.IGNORECASE), b) for p, b in _NAME_RULE
 
 
 def _name_to_ticker_map() -> dict[str, str]:
-    """Display name → yfinance ticker, from Tattva's own macro config.
-
-    Imported lazily so this module stays importable in isolation (the research
-    harness and the unit tests build panels without touching core.config).
-    """
-    try:
-        from core.config import (COMMODITY_TARGETS, GLOBAL_MACRO_MAP,
-                                 MACRO_SYMBOLS_YF)
-    except Exception:  # pragma: no cover — config-free contexts
-        return {}
-    m: dict[str, str] = {}
-    m.update(GLOBAL_MACRO_MAP)
-    m.update(MACRO_SYMBOLS_YF)
-    m.update(COMMODITY_TARGETS)
-    try:
-        from data.universe import INDEX_TARGETS_MAP
-        m.update(INDEX_TARGETS_MAP)
-    except Exception:
-        pass
-    return m
+    """Display name → yfinance ticker, from Tattva's own macro config."""
+    return {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF, **COMMODITY_TARGETS,
+            **INDEX_TARGETS_MAP}
 
 
 _NAME_TO_TICKER: dict[str, str] | None = None

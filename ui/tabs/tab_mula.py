@@ -141,11 +141,11 @@ def _series_tier(col: str, prior: float, q: float = 0.90) -> float:
 
 
 def _active_tiers() -> InstrumentConfig:
-    """This render's instrument config (per-instrument display priors)."""
-    try:
-        return get_instrument_config(st.session_state.get("active_target", ""))
-    except KeyError:
-        return InstrumentConfig()
+    """This render's instrument config (per-instrument display priors).
+
+    No fallback: app.py resolved this target's config before any page ran.
+    """
+    return get_instrument_config(st.session_state.get("active_target", ""))
 
 
 def _num(d: dict, key: str):

@@ -104,8 +104,10 @@ from ui.tabs.tab_data import render_data_tab
 from ui.tabs.tab_precedent import render_precedent_tab
 
 # ── Data ─────────────────────────────────────────────────────────────────────
-from data.fetcher import fetch_ohlcv, fetch_commodity_dataset, fetch_stock_target_series, is_yfinance_ticker
-from data.calendars import trading_days_behind, is_session, session_mask, resolve_exchange
+from data.fetcher import (fetch_ohlcv, fetch_commodity_dataset, fetch_stock_target_series,
+                          fetch_sheet_series)
+from data.calendars import trading_days_behind, session_bars, resolve_exchange, session_today
+from data.prep import PrepError, prepare_panel
 from data.universe import resolve_stock_symbol
 
 # ── Engines ──────────────────────────────────────────────────────────────────
@@ -124,14 +126,13 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
-from core.config import MIN_DATA_POINTS, STALENESS_DAYS, SESSION_FRESH_FLOOR, ALL_TARGETS, TARGET_CATEGORIES, is_stock_target, STOCK_TARGET_MARKETS, FORECAST_HORIZON, RAW_YIELD_PREDICTORS, DIV_LOOKBACK, TIMEFRAME_TRADING_DAYS, swayam_macro_columns, FREEFORM_STOCK_CATEGORIES, register_stock_target, get_instrument_config
+from core.config import (MIN_DATA_POINTS, STALENESS_DAYS, ANALYSIS_EPOCH, ALL_TARGETS,
+                         TARGET_CATEGORIES, is_stock_target, STOCK_TARGET_MARKETS,
+                         RAW_YIELD_PREDICTORS, DIV_LOOKBACK, TIMEFRAME_TRADING_DAYS,
+                         swayam_macro_columns, FREEFORM_STOCK_CATEGORIES,
+                         register_stock_target, get_instrument_config)
+from core.instruments import SHEET_SERIES, instrument, predictor_universe
 from engines.swayam import build_swayam_frames, effective_member_count, default_swayam_members
-from core.config import GLOBAL_MACRO_MAP, MACRO_SYMBOLS_YF, INDEX_TARGETS_MAP
-
-# Friendly column name → ticker, for resolving each predictor/target column to its
-# exchange (holiday-aware data freshness + target-session spine filtering). Targets
-# (incl. sheet/NCDEX sentinels) are merged last so they win any name collision.
-_COLUMN_TICKERS = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF, **INDEX_TARGETS_MAP, **ALL_TARGETS}
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -145,12 +146,16 @@ _COLUMN_TICKERS = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF, **INDEX_TARGETS_MAP, 
 # copy, so a cached switch-back showed the PREVIOUS target's error-correction
 # read on the hero — the ECM gate, and so the conviction, belonged to the
 # wrong instrument. It is now read off the bundled engine.
+#
+#: ``asof`` (d*, Mūla's as-of session), ``horizon`` (h, resolved once from the
+#: instrument's config), ``epoch`` and ``fingerprint`` (which history was
+#: valued) travel with the result they describe.
 _BUNDLE_KEYS = (
     "engine", "fvo_ts", "swayam_daily", "swayam_view_dfs", "swayam_view_weights",
     "swayam_n_eff", "swayam_native_last",
     "convergence_df", "divergence_events", "hero_series",
     "intelligence_active_weights", "intelligence_active_profile",
-    "edges",
+    "edges", "asof", "horizon", "epoch", "fingerprint",
 )
 # Keep the last N configs. Each entry is a full pipeline result; 6 covers a
 # session that browses a handful of targets without recomputing.
@@ -195,48 +200,41 @@ def _clear_results() -> None:
         st.session_state.pop(_k, None)
 
 
-def _ensure_stock_target_column(df: pd.DataFrame, active_target: str) -> pd.DataFrame:
-    """Inject a target's Close into the model matrix when the batch has not.
+def _ensure_target_column(df: pd.DataFrame, active_target: str) -> pd.DataFrame:
+    """Join a target's price to a private copy of the panel when the batch has not.
 
     The macro batch fetches exactly the columns in GLOBAL_MACRO_MAP +
-    MACRO_SYMBOLS_YF (+ the index levels merged into it). A target whose
-    ticker is in one of those maps therefore arrives for free — which is true
-    of every commodity and FX target that predates this, because each is also
-    a PREDICTOR under the same name (Gold, Copper, Dollar Index …). A target
-    that is not in those maps has no column at all, and the guard downstream
-    reports it as a failed source fetch.
+    MACRO_SYMBOLS_YF (+ the index levels merged into it), and
+    ``data.fetcher._fetch_catalogue_targets`` adds the yfinance catalogue
+    targets outside those maps (Aluminium, Zinc, the crypto bank) upstream,
+    once, for every consumer. Two kinds of target are deliberately kept OUT of
+    that shared frame and joined here, for the run that selects them only:
 
-    Catalogue targets outside the macro maps — Aluminium, Zinc, the crypto
-    bank — are handled UPSTREAM, by ``data.fetcher._fetch_catalogue_targets``,
-    so their column is already present by the time this runs. That is
-    deliberate: the shared matrix is read by the app, by the research
-    preflight and by each tuning study independently, and injecting per
-    consumer is how the suite ended up seeing "36/45 targets" while the app
-    saw all 45. One injection, upstream, for everyone.
+      * free-form STOCK symbols — a per-target ticker set would break the
+        batch's (start, end) cache key, and a stock in the shared frame was
+        one more predictor of every other target;
+      * Google-Sheet series (Jeera, Nifty 50 - PE) — in the shared frame they
+        were predictors of every target while the sheet answered and vanished
+        when it did not, so a Sheets outage rewrote everyone's history.
 
-    This helper therefore stays narrow, covering only the free-form STOCK
-    targets that are deliberately kept OUT of the batch for cache coherence
-    (a per-target ticker set would break the batch's (start, end) key). If a
+    Fetched from ANALYSIS_EPOCH, aligned to the panel's DATE spine and
+    forward-filled; leading NaNs are left for the prep's target dropna. If a
     catalogue target's column is missing here, that is a real fetch failure
-    and the guard downstream should say so — not be papered over by a second
-    silent fetch.
-
-    Aligned to the matrix's DATE spine, ffilled, leading NaNs left for the
-    per-target dropna downstream. Joined to a LOCAL copy only: it used to be
-    written back into st.session_state['data'], after which every later
-    target in the session — Gold included — carried the stock as a predictor
-    and every one of its published fair values moved. The series fetch is
-    cached, so re-joining on each rerun costs nothing.
+    and the guard downstream says so — not papered over by a second fetch.
+    The series fetches are cached, so re-joining on each rerun costs nothing.
     """
-    if active_target in df.columns or not is_stock_target(active_target):
-        return df
-    ticker = ALL_TARGETS.get(active_target)
-    if not ticker:
+    if active_target in df.columns:
         return df
     end = pd.Timestamp.today()
-    s = fetch_stock_target_series(ticker, end - pd.DateOffset(days=365 * 9), end)
-    if s is None:
-        return df                      # the guard right after this call fires cleanly
+    if is_stock_target(active_target):
+        ticker = ALL_TARGETS.get(active_target)
+        s = fetch_stock_target_series(ticker, ANALYSIS_EPOCH, end) if ticker else None
+    elif active_target in SHEET_SERIES:
+        s = fetch_sheet_series(active_target, ANALYSIS_EPOCH, end)
+    else:
+        return df
+    if s is None or not len(s):
+        return df                      # the guard downstream fires cleanly
     spine = pd.to_datetime(df["DATE"], errors="coerce").dt.normalize()
     s.index = pd.DatetimeIndex(s.index).normalize()
     s = s[~s.index.duplicated(keep="last")]
@@ -337,9 +335,10 @@ def _render_landing_page() -> None:
             {"label": "Catalogue Targets", "value": str(_n_tgt),
              "subtext": "Every one runnable on free data; each carries its own "
                         "configuration, defaulting to its asset class's"},
-            {"label": "Daily History Per Run", "value": "~9y",
-             "subtext": "Every published value uses only data available on its own "
-                        "date, so re-running extends the record instead of rewriting it"},
+            {"label": "Daily History", "value": f"Since {ANALYSIS_EPOCH:%Y}",
+             "subtext": "One fixed start for every run, and every published value uses "
+                        "only data available on its own date, so re-running extends the "
+                        "record instead of rewriting it"},
         ],
         max_cols=3,
         key="landing-coverage",
@@ -394,21 +393,23 @@ def _render_landing_page() -> None:
     )
 
 
-def _recent_divergences(window: int) -> int:
-    """Divergence events within the last ``window`` SCORED sessions.
+def _recent_divergences(events, cdf, window: int, asof=None) -> int:
+    """Divergence events within the last ``window`` SCORED sessions up to d*.
 
-    Anchored on the newest scored session, not on the newest event: the count
-    used to run 1.5×window calendar days back from the latest EVENT, so a
-    burst two years ago was reported as "N events in the last 20 sessions".
+    Anchored on the newest scored session at or before ``asof``, not on the
+    newest event: the count used to run 1.5×window calendar days back from the
+    latest EVENT, so a burst two years ago was reported as "N events in the
+    last 20 sessions".
     """
-    events = st.session_state.get("divergence_events")
-    cdf = st.session_state.get("convergence_df")
     if events is None or not len(events) or cdf is None or cdf.empty:
         return 0
     sessions = pd.DatetimeIndex(pd.to_datetime(cdf.index, errors="coerce")).dropna().sort_values()
+    if asof is not None:
+        sessions = sessions[sessions <= pd.Timestamp(asof)]
     if not len(sessions):
         return 0
     start = sessions[max(0, len(sessions) - int(window))]
+    end = sessions[-1]
     if "date" in getattr(events, "columns", ()):
         when = pd.to_datetime(events["date"], errors="coerce")
     elif isinstance(events.index, pd.DatetimeIndex) or events.index.inferred_type in (
@@ -418,48 +419,103 @@ def _recent_divergences(window: int) -> int:
         when = pd.to_datetime(pd.Series(events.index), errors="coerce")
     else:
         return 0
-    return int((when >= start).sum())
+    return int(((when >= start) & (when <= end)).sum())
 
 
-def _compute_hero_verdict(signal: dict) -> dict:
-    """Gather the run's readings and build the conviction chain. Pure assembly.
+def _row_at(frame, asof):
+    """``(date, row)`` of ``frame``'s newest row dated ≤ ``asof``, else ``(None, None)``.
 
-    All interpretation lives in ``ui.components.build_hero_verdict`` (pure,
-    unit-tested in tests/test_hero_verdict.py); this only collects inputs.
-    Computed once per rerun, so every page's command bar and KPI strip read
-    the identical object Overview renders and cannot disagree with it.
+    The one way a verdict input is read: by date at d*, never by position. A
+    frame that runs past d* (a Swayam row on a session whose valuation was
+    withheld) is read where the call is, not where the frame ends.
+    """
+    if frame is None or getattr(frame, "empty", True) or asof is None:
+        return None, None
+    idx = pd.DatetimeIndex(pd.to_datetime(frame.index, errors="coerce"))
+    ok = np.flatnonzero(np.asarray(idx <= pd.Timestamp(asof)))
+    if not len(ok):
+        return None, None
+    i = int(ok[-1])
+    return pd.Timestamp(idx[i]), frame.iloc[i]
+
+
+def _compute_hero_verdict(signal: dict, *, swayam_daily, convergence_df, divergence_events,
+                          edges, precedent, horizon: int) -> dict:
+    """Gather the run's readings AT d* and build the conviction chain.
+
+    INTERIM (until the composer moves into the pipeline): all interpretation
+    lives in ``ui.components.build_hero_verdict`` (pure, unit-tested in
+    tests/test_hero_verdict.py); this only collects inputs — every one read at
+    ``signal['asof']`` (d*), Mūla's as-of session. When the newest valuation is
+    withheld but Swayam has a row on that session, the Swayam row read is
+    d*'s, not the newest. ``horizon`` is THE h, passed in; nothing here
+    re-resolves it. The returned verdict carries the readings it used and
+    their dates (``asof``, ``swayam_asof``, ``swayam_breadth``, ``agreement``,
+    ``agreement_asof``), so Overview shows exactly what the chain read.
     """
     from analytics.analogs import MIN_EFFECTIVE_N
-    try:
-        horizon = get_instrument_config(st.session_state.get("active_target", "")).forecast_horizon
-    except KeyError:
-        horizon = FORECAST_HORIZON
+    asof = signal.get("asof")
 
-    # Swayam's current breadth — read from the same frame the Swayam page
-    # shows. A tail that is carried forward (no native Swayam row) still
-    # counts: the Convergence page discloses the carry.
-    _sw = st.session_state.get("swayam_daily")
+    # Swayam's breadth at d* — from the same frame the Swayam page shows. A
+    # row carried forward onto d* (no native Swayam row) still counts: the
+    # Convergence page discloses the carry.
+    sw_date, sw_row = _row_at(swayam_daily, asof)
     swayam_breadth = None
-    if _sw is not None and not _sw.empty:
-        _last = _sw.iloc[-1]
-        swayam_breadth = {"oversold_pct": float(_last.get("Oversold_Pct", 0.0)),
-                          "overbought_pct": float(_last.get("Overbought_Pct", 0.0))}
-    _cdf = st.session_state.get("convergence_df")
-    agreement = (float(_cdf["agreement_ratio"].dropna().iloc[-1])
-                 if _cdf is not None and not _cdf.empty and "agreement_ratio" in _cdf.columns
-                 and _cdf["agreement_ratio"].notna().any() else None)
+    if sw_row is not None:
+        swayam_breadth = {"oversold_pct": float(sw_row.get("Oversold_Pct", 0.0)),
+                          "overbought_pct": float(sw_row.get("Overbought_Pct", 0.0))}
+    agreement = ag_date = None
+    if (convergence_df is not None and not convergence_df.empty
+            and "agreement_ratio" in convergence_df.columns):
+        ag_date, ag_row = _row_at(convergence_df[["agreement_ratio"]].dropna(), asof)
+        agreement = float(ag_row["agreement_ratio"]) if ag_row is not None else None
 
-    return build_hero_verdict(
+    verdict = build_hero_verdict(
         mula=signal,
         swayam_breadth=swayam_breadth,
         agreement=agreement,
-        edge=(st.session_state.get("edges") or {}).get("mula"),
-        precedent=st.session_state.get("precedent_summary"),
-        n_divergences=_recent_divergences(DIV_LOOKBACK),
+        edge=(edges or {}).get("mula"),
+        precedent=precedent,
+        n_divergences=_recent_divergences(divergence_events, convergence_df, DIV_LOOKBACK, asof),
         horizon_days=int(horizon),
         div_window=DIV_LOOKBACK,
         min_precedent_n=MIN_EFFECTIVE_N,
     )
+    verdict.update(asof=asof, swayam_asof=sw_date, swayam_breadth=swayam_breadth,
+                   agreement=agreement, agreement_asof=ag_date)
+    return verdict
+
+
+def _asof_status(signal: dict, ticker: str | None, today) -> dict:
+    """The command bar's as-of reading: d*, how far behind today it is, its chip.
+
+    ``as_of`` is d* — the session the call is about — never the panel's newest
+    date. ``behind`` counts the target's sessions after d* up to ``today``
+    (``data.calendars.session_today``). The chip is the data-recency read
+    (CURRENT / kD BEHIND / STALE), or PROVISIONAL when d* is a session still
+    forming — which is today's by construction, so it is current as well.
+    ``valued_as_of`` is set when the newest row was withheld and d* is older.
+    """
+    asof = signal.get("asof")
+    out = {"as_of": asof, "behind": None, "label": "", "tone": "neutral",
+           "provisional": bool(signal.get("provisional")), "valued_as_of": None}
+    if asof is None:
+        return out
+    behind = trading_days_behind(ticker, pd.Timestamp(asof).date(), pd.Timestamp(today).date())
+    out["behind"] = behind
+    if out["provisional"]:
+        out.update(label="PROVISIONAL", tone="warning")
+    elif behind >= STALENESS_DAYS:
+        out.update(label="STALE", tone="danger")
+    elif behind >= 1:
+        out.update(label=f"{behind}D BEHIND", tone="warning")
+    else:
+        # "Current", not "live": this is end-of-day data that can be hours
+        # old; it is the newest session the source has.
+        out.update(label="CURRENT", tone="success")
+    if signal.get("asof_row_withheld"):
+        out["valued_as_of"] = asof
+    return out
 
 
 def _render_model_passport_sidebar() -> None:
@@ -754,12 +810,11 @@ def main():
                 # (3%) and after it (15%); the analysis picks the bar up from there on
                 # the rerun, so the experience reads as one continuous progress bar.
                 progress_bar(progress_container, 3, "Fetching Market Data",
-                             "yfinance · global macro universe · ~9y daily history")
-                _end = pd.Timestamp.today()
-                # Walk-forward needs MIN_DATA_POINTS (1500) daily observations.
-                # ~9 years of calendar history clears that with headroom.
-                _start = _end - pd.DateOffset(days=365 * 9)
-                df, error = fetch_commodity_dataset(_start, _end)
+                             f"yfinance · global macro universe · daily since "
+                             f"{ANALYSIS_EPOCH:%b %Y}")
+                # From the fixed epoch, never "today minus N years": a rolling
+                # window moved every published value by one session a day.
+                df, error = fetch_commodity_dataset(ANALYSIS_EPOCH, pd.Timestamp.today())
                 if error or df is None:
                     progress_container.empty()
                     st.error(f"Failed: {error}")
@@ -814,10 +869,10 @@ def main():
         _render_footer()
         return
 
-    # A stock target's price column is joined here — BEFORE numeric_cols are
-    # computed below — so the target resolves to itself on its first render
-    # instead of falling back to some other column. Local to this run.
-    df = _ensure_stock_target_column(df, st.session_state.get("active_target", ""))
+    # A stock or sheet target's price column is joined here — BEFORE
+    # numeric_cols are computed below — so the target resolves to itself on its
+    # first render instead of falling back to some other column. Local to this run.
+    df = _ensure_target_column(df, st.session_state.get("active_target", ""))
 
     # ─── Sidebar: Model Configuration ──────────────────────────────────────
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -872,9 +927,8 @@ def main():
             if _do_refresh:
                 progress_bar(progress_container, 3, "Re-fetching Live Market Data",
                              "yfinance · full universe · bypassing cache · ~30–60s")
-                _rend = pd.Timestamp.today()
                 _rdf, _rerr = fetch_commodity_dataset(
-                    _rend - pd.DateOffset(days=365 * 9), _rend, force=True)
+                    ANALYSIS_EPOCH, pd.Timestamp.today(), force=True)
                 _src = ((_rdf.attrs or {}).get("source") if _rdf is not None else None)
                 if _rdf is not None and _src != "stale-snapshot":
                     progress_bar(progress_container, 15, "Live Data Refreshed",
@@ -903,41 +957,43 @@ def main():
 
         _render_appearance_control()
 
-    # ─── Resolve active configuration ──────────────────────────────────────
+    # ─── Resolve the instrument — once ─────────────────────────────────────
+    # How it is tuned (core.config.INSTRUMENT_CONFIGS), what it is
+    # (core.instruments) and THE horizon h are resolved here and passed
+    # explicitly to everything below; nothing downstream re-reads them. An
+    # unregistered target is a registration bug, so it fails loudly here —
+    # there is no default config to fall back to (a default carried no leakage
+    # exclusions and would have valued Gold against GLTR).
     active_target = st.session_state.get("active_target", target_col)
-    # Per-instrument config — every engine knob (Swayam, Mūla forecast,
-    # DDM, convergence weights, precedent) is read from THIS target's own config
-    # (core.config.INSTRUMENT_CONFIGS), so an instrument can be retuned in
-    # isolation. Falls back to the base defaults for any target that somehow
-    # isn't registered (shouldn't happen — catalogue targets register at import,
-    # stocks via register_stock_target before analysis).
     try:
         _icfg = get_instrument_config(active_target)
-    except KeyError:
-        from core.config import InstrumentConfig as _IC
-        _icfg = _IC()
-    # The valuation panel is the WHOLE macro cross-section, minus the target,
-    # its self-replicating near-duplicates (e.g. GLTR for a precious metal,
-    # the US equity complex for a US index) and any free-form stock. There is
-    # no predictor picker: the Mūla engine prices the target against the
-    # traded opportunity set, and hand-deselecting instruments from that set
-    # does not make it a better opportunity set — it makes it a smaller one
-    # with an undocumented reason. The exclusions are read from ONE place, the
-    # instrument's own config (`excluded_predictors`); the parallel global map
-    # it is built from is no longer consulted here.
-    _excluded_feats = {active_target, *_icfg.excluded_predictors}
-    active_features = [c for c in numeric_cols
-                       if c not in _excluded_feats and c not in STOCK_TARGET_MARKETS]
+        _inst = instrument(active_target)
+    except KeyError as _ke:
+        console.failure("Unregistered target", str(_ke.args[0]))
+        st.error(str(_ke.args[0]))
+        return
+    FWD_HORIZON = int(_icfg.forecast_horizon)   # THE horizon h (trading days)
+    _tgt_ticker = _inst.ticker
+    _tgt_exch = resolve_exchange(_tgt_ticker)
+    # The valuation panel is the REGISTERED cross-section
+    # (core.instruments.predictor_universe): the macro universe and the
+    # registered catalogue predictors, minus the raw yield levels, the sheet
+    # series, the target, its self-replicating near-duplicates (GLTR for a
+    # precious metal, the US equity complex for a US index) and its declared
+    # same-exposure twins (INDA and IIND.L for USD/INR). There is no predictor
+    # picker: Mūla prices the target against the traded opportunity set, and
+    # hand-deselecting instruments from it makes a smaller set with an
+    # undocumented reason, not a better one.
+    active_features = predictor_universe(active_target, numeric_cols)
     active_date = st.session_state.get("active_date_col", date_col)
 
-    # ─── Data freshness notices ─────────────────────────────────────────────
+    # ─── Notices ────────────────────────────────────────────────────────────
     # QUEUED, not rendered. These used to paint straight onto the top of the
     # page, above the command bar — so on a lagging source the first thing on
     # screen was three stacked apology boxes and the instrument was pushed
     # below the fold, on precisely the days the numbers most needed scrutiny.
-    # They are collected here and rendered by the page shell (render_notice_
-    # rail) directly BENEATH the chrome they qualify. Same notices, same
-    # wording, same triggers — different place, a third of the height.
+    # They are collected and rendered by the page shell (render_notice_rail)
+    # directly BENEATH the chrome they qualify.
     _notices: list[dict] = []
 
     def _notice(kind: str, title: str, body: str) -> None:
@@ -950,359 +1006,152 @@ def main():
     for _pn in st.session_state.get("_pending_notices") or []:
         _notice(_pn["kind"], _pn["title"], _pn["body"])
 
-    # ONE freshness reading, shared by these notices and the command bar's
-    # status chip. They used to be computed separately — the notice from the
-    # panel's newest date (any market), the chip from the model spine (the
-    # target's sessions only) — so on a target-market holiday the notice said
-    # "as of 16 Oct" while the chip said 15 Oct. The signal is as of the
-    # target's last session, so that is the date both read.
-    #
-    # Measured in TRADING days behind on the target's own exchange calendar
-    # (holiday-aware when exchange_calendars is installed, Mon–Fri otherwise),
-    # so Friday data read on a Sunday is current, not stale. "Today" is the
-    # EARLIER of UTC and machine-local: a UTC-hosted deploy rolls past midnight
-    # ahead of an IST/EST exchange, and taking the earlier date means a
-    # time-zone skew can never overstate staleness.
-    _tgt_ticker = ALL_TARGETS.get(active_target)
-    today = min(datetime.now(timezone.utc).date(), datetime.now().date())
-    _fresh = {"as_of": None, "behind": None, "label": "", "tone": "neutral"}
-    if active_date != "None" and active_date in df.columns:
-        try:
-            _all_dates = pd.to_datetime(df[active_date], errors="coerce", dayfirst=True)
-            _mask = _all_dates.notna()
-            if active_target in df.columns:
-                _mask &= pd.to_numeric(df[active_target], errors="coerce").notna()
-            _cand = _all_dates[_mask]
-            _sm = session_mask(_tgt_ticker, _cand) if len(_cand) else np.zeros(0, dtype=bool)
-            _dates = _cand[_sm] if _sm.any() else _cand
-            if len(_dates):
-                latest_date = _dates.max().to_pydatetime().replace(tzinfo=None)
-                behind = trading_days_behind(_tgt_ticker, latest_date.date(), today)
-                _fresh.update(as_of=latest_date, behind=behind)
-                if behind >= STALENESS_DAYS:
-                    _fresh.update(label="STALE", tone="danger")
-                elif behind >= 1:
-                    _fresh.update(label=f"{behind}D BEHIND", tone="warning")
-                else:
-                    # "Current", not "live": this is end-of-day data that can be
-                    # hours old; it is the newest session the source has.
-                    _fresh.update(label="CURRENT", tone="success")
-                ds = latest_date.strftime("%d %b %Y")
-                if behind >= STALENESS_DAYS:
-                    _notice(
-                        "warning", "Latest data unavailable",
-                        (f"Newest data is {ds} — {behind} trading days behind. The price source "
-                         f"(yfinance) hasn't published more recent data, so every signal below "
-                         f"reflects {ds}, not today. Use Refresh data in the rail once the "
-                         f"source updates."),
-                    )
-                elif behind >= 1:
-                    _notice(
-                        "info", "Data freshness",
-                        f"Signals are as of {ds} ({behind} trading day"
-                        f"{'s' if behind > 1 else ''} behind — today's bar may not be published yet).",
-                    )
-
-                # Predictors refilled from a cached snapshot (data.fetcher's
-                # rate-limit recovery). Read off the frame itself, so a frame
-                # served from cache carries its own warning — it used to live in
-                # a per-session registry that a cached frame arrived without.
-                _stale_backfills = (df.attrs or {}).get("stale_backfills") or {}
-                if _stale_backfills:
-                    _sb_items = sorted(_stale_backfills.items(), key=lambda kv: kv[1])
-                    _sb_preview = ", ".join(f"{k} (as of {v})" for k, v in _sb_items[:5])
-                    _sb_more = f" +{len(_sb_items) - 5} more" if len(_sb_items) > 5 else ""
-                    _notice(
-                        # WARNING, not info: a snapshot-reconstructed column is
-                        # reindexed onto this run's calendar and ffilled, so it is
-                        # a DIFFERENT SERIES from a live pull, not a staler one —
-                        # and every published date can move with it.
-                        "warning", "Predictors carried from snapshot — history differs",
-                        f"{len(_sb_items)} predictor(s) were rate-limited this fetch and refilled "
-                        f"from a prior cached snapshot: {_sb_preview}{_sb_more}. A rebuilt column "
-                        f"is not merely staler than a live one — it is a different series, so "
-                        f"this run's published history may differ from a run that fetched "
-                        f"cleanly. Compare the panel fingerprint before treating past values as "
-                        f"final; refresh once the source is healthy for an authoritative record.",
-                    )
-
-                # Session completeness (exchange-aware): of the inputs whose market
-                # was OPEN on the panel's newest date, how many actually posted a
-                # fresh value rather than a carried-forward one? Markets that were
-                # closed that day are legitimately carried and excluded, so a
-                # foreign holiday does not trip a false "partial session".
-                num = df.select_dtypes(include=[np.number])
-                _panel_last = _all_dates.max()
-                if len(num) >= 2 and pd.notna(_panel_last):
-                    cols = list(num.columns)
-                    last_r = num.iloc[-1].to_numpy(dtype=np.float64)
-                    prev_r = num.iloc[-2].to_numpy(dtype=np.float64)
-                    finite = np.isfinite(last_r) & np.isfinite(prev_r)
-                    should_post = np.array(
-                        [is_session(_COLUMN_TICKERS.get(c), _panel_last.date()) for c in cols])
-                    judged = finite & should_post
-                    denom = int(judged.sum())
-                    if denom >= 3:
-                        fresh_frac = float(((last_r != prev_r) & judged).sum() / denom)
-                        # A session still in progress is expected to be mostly
-                        # carried forward — that is not a data problem.
-                        if fresh_frac < SESSION_FRESH_FLOOR and _panel_last.date() < today:
-                            _notice(
-                                "warning", "Partial latest session",
-                                (f"Only {fresh_frac:.0%} of the markets open on "
-                                 f"{_panel_last:%d %b %Y} have posted — the rest are forward-filled "
-                                 f"from the prior session, so the inputs behind the latest reading "
-                                 f"are stale. Treat it as provisional; refresh once those markets post."),
-                            )
-
-                # The target's own last genuine print. Its column is forward-filled
-                # across days it did not post, and continuous prices do not repeat
-                # exactly, so a run of identical closes at the tail is a carried
-                # value. One rule for every source — the sheet targets used to be
-                # re-fetched here, on every rerun, to answer the same question.
-                if active_target in df.columns:
-                    tv = pd.to_numeric(df[active_target], errors="coerce").to_numpy()
-                    j = len(tv) - 1
-                    while j > 0 and np.isfinite(tv[j]) and tv[j] == tv[j - 1]:
-                        j -= 1
-                    t_last = (pd.Timestamp(_all_dates.iloc[j]).to_pydatetime()
-                              if j < len(tv) - 1 and pd.notna(_all_dates.iloc[j]) else None)
-                    if t_last is not None:
-                        t_behind = trading_days_behind(_tgt_ticker, t_last.date(), today)
-                        if t_behind >= 1:
-                            if is_session(_tgt_ticker, today) and t_behind == 1:
-                                _notice(
-                                    "info", f"{active_target} price not yet updated",
-                                    (f"Today's bar is carried forward from {t_last:%d %b %Y} — the "
-                                     f"market is open but the last fetch did not return a new price "
-                                     f"for it. Refresh data in the rail to pull the latest."),
-                                )
-                            else:
-                                _notice(
-                                    "warning", f"{active_target} data is lagging",
-                                    (f"This target last updated {t_last:%d %b %Y} ({t_behind} trading "
-                                     f"day{'s' if t_behind > 1 else ''} behind the macro universe) — "
-                                     f"later rows carry that value forward, so its latest reading may "
-                                     f"be stale."),
-                                )
-        except Exception as _fe:                      # noqa: BLE001 - never break a run to report
-            console.warning(f"Freshness check skipped: {type(_fe).__name__}: {_fe}")
-
     # ─── Clean & Fit Engine ────────────────────────────────────────────────
     # Guard: a selected target whose column failed to fetch (e.g. a sheet/source
-    # outage on a later run, while it stays selected) is silently dropped by the
-    # column filter below and would KeyError at the per-column coercion. Fail clean.
-    # Stock targets (archetype 'self') are never IN the macro batch fetch to begin
-    # with — inject their price column here (single-ticker fetch, cached) before
-    # the guard checks for it.
-    df = _ensure_stock_target_column(df, active_target)
+    # outage on a later run, while it stays selected) has no column to value.
+    # Fail clean. Stock and sheet targets were joined above if their fetch
+    # answered at all.
     if active_target not in df.columns:
-        _tgt_ticker_guard = ALL_TARGETS.get(active_target, "?")
         if is_stock_target(active_target):
-            console.failure("Stock target fetch failed", f"'{active_target}' (ticker {_tgt_ticker_guard}) — yfinance returned no usable data.")
-            st.error(f"'{active_target}' price fetch failed (ticker {_tgt_ticker_guard}) — yfinance returned no data. "
+            console.failure("Stock target fetch failed", f"'{active_target}' (ticker {_tgt_ticker}) — yfinance returned no usable data.")
+            st.error(f"'{active_target}' price fetch failed (ticker {_tgt_ticker}) — yfinance returned no data. "
                      f"Check the symbol, or try again once yfinance recovers.")
         else:
             console.failure("Target column missing", f"'{active_target}' not in fetched dataset — its source fetch failed.")
             st.error(f"'{active_target}' data is currently unavailable (its source fetch failed). "
                      f"Pick another target, or re-run once the source is back online.")
         return
-    # Data-preparation diagnostics — collected at each stage so the terminal can
-    # show exactly how the row count evolves (no "dark spots"), and so a failure
-    # explains itself instead of a bare "Need 1500+". Emitted via _log_prep() below.
-    _prep = {"target": active_target, "min_required": MIN_DATA_POINTS}
-    _tgt_ticker_prep = ALL_TARGETS.get(active_target)
-    _tgt_exch_prep = resolve_exchange(_tgt_ticker_prep) or "weekday"
-
-    def _log_prep(stage: str = "complete") -> None:
-        """Print the data-prep pipeline to the terminal (visible on success & failure)."""
-        console.section("DATA PREPARATION")
-        console.item("Target", f"{active_target}  (ticker={_tgt_ticker_prep or 'n/a'}, exch={_tgt_exch_prep})")
-        console.item("Scoring Horizon", f"{_prep.get('fwd_h','?')}d "
-                     "(convergence / analogs / display — the engine is fit to no label)")
-        console.item("Rows · fetched", _prep.get("rows_initial", "?"))
-        console.item("Rows · after session spine", f"{_prep.get('rows_session','?')}  ({_prep.get('sessions_dropped','?')} non-session rows removed)")
-        console.item("Instruments · requested", _prep.get("feats_requested", "?"))
-        console.item("Instruments · dropped (short history)", f"{len(_prep.get('feats_dropped', []))}"
-                     + (f" → {', '.join(_prep['feats_dropped'][:6])}{'…' if len(_prep.get('feats_dropped', [])) > 6 else ''}" if _prep.get("feats_dropped") else ""))
-        if _prep.get("yield_cols_dropped"):
-            # Raw yield LEVELS are rate series, not prices: they print at/near/
-            # below zero and the engine's log transform is undefined there. The
-            # tradeable expression of the curve is already in the panel as the
-            # Treasury ETF complex, so they are excluded rather than transformed.
-            console.item("Instruments · dropped (raw yield levels, not prices)",
-                         _prep["yield_cols_dropped"])
-        console.item("Instruments · in valuation panel", _prep.get("feats_kept", "?"))
-        # The fingerprint makes a composition change visible. Same digest across
-        # two runs = same cross-section, so any difference in output came from
-        # the data's VALUES or the code. A changed digest says the panel itself
-        # moved, which rewrites every published date — see the note in
-        # data/fetcher.py::_panel_fingerprint.
-        _fp = (df.attrs or {}).get("panel_fingerprint") if hasattr(df, "attrs") else None
-        if _fp:
-            console.item("Panel fingerprint", _fp)
-        console.item("Rows · after dropna (final spine)", _prep.get("rows_final", "?"))
-        if "burn_in" in _prep and isinstance(_prep.get("rows_final"), int):
-            # Unlike a rolling momentum window there is no warm-up head to trim
-            # here — every row carries a finite level for the target and every
-            # surviving instrument. The engine applies its own burn-in
-            # internally and flags those rows `Valid = False`.
-            _pub = max(0, _prep["rows_final"] - _prep["burn_in"])
-            console.item("Rows · valued (after engine burn-in)",
-                         f"{_pub}  ({_prep['burn_in']} burn-in rows published as Valid=False)")
-        if stage == "complete":
-            console.checkpoint(f"Data spine ≥ {MIN_DATA_POINTS}", "OK")
-
-    cols = [active_target] + active_features + ([active_date] if active_date != "None" and active_date in df.columns else [])
-    data = df[[c for c in cols if c in df.columns]].copy()
-    _prep["rows_initial"] = len(data)
-    _prep["feats_requested"] = len(active_features)
-    if active_date != "None" and active_date in data.columns:
-        data[active_date] = pd.to_datetime(data[active_date], errors="coerce", dayfirst=True)
-        data = data.dropna(subset=[active_date]).sort_values(active_date)
-    for col in [active_target] + active_features:
-        data[col] = pd.to_numeric(data[col], errors="coerce")
-    _rows_pre_session = len(data)
-    # Phase 3 — target-exchange session spine, applied FIRST so every filter below
-    # operates in the target's real trading-session space (not the US-weekday spine).
-    # The fetched matrix is a Mon–Fri spine (FX trades every weekday), so a row on the
-    # TARGET's own market holiday carries its last close forward: a fake no-change bar
-    # with stale predictors. Restricting to genuine sessions up front matters because
-    # the feature-history guard and dropna below count rows — measuring them on the US
-    # spine while the walk-forward actually runs on (fewer) India/exchange sessions can
-    # leave a target just under MIN_DATA_POINTS (India indices have more holidays, so
-    # ~1582 US weekdays = ~1496 NSE sessions). No-op for 24×5 FX and under the weekday
-    # fallback (lib absent); the `.any()` guard refuses to blank the frame on misfire.
-    if active_date != "None" and active_date in data.columns and len(data):
-        _smask = session_mask(ALL_TARGETS.get(active_target), data[active_date])
-        if _smask.any():
-            data = data[_smask].reset_index(drop=True)
-    _prep["rows_session"] = len(data)
-    _prep["sessions_dropped"] = max(0, _rows_pre_session - len(data))
-    # NOTE on the Mūla print mask. The engine admits an instrument to the
-    # cross-section only on days it genuinely traded — a carried-forward quote
-    # otherwise enters as a fabricated zero return and drags whatever factor it
-    # loads on toward zero on every foreign holiday. The exact answer is the
-    # vendor's own NaN mask, but it no longer exists by the time this runs:
-    # data/fetcher.py forward-fills the combined frame at source (see its
-    # `combined.ffill()`), so a mask taken here would be all-True and would
-    # silently assert that a Nikkei quote on a Tokyo holiday is a real print.
-    # Rather than pass a mask that looks exact and is not, the panel is handed
-    # over without one and the engine infers prints from where values actually
-    # change (FairValueEngine._infer_printed) — conservative in the same
-    # direction as the gate itself. Threading the true mask would mean
-    # returning it from the fetcher alongside the prices, through the cache
-    # layer; the `printed=` parameter on fit() is there for when that happens.
-    data[[active_target] + active_features] = data[[active_target] + active_features].ffill()
-    # Drop features with insufficient real history. We ffill (causal: carry last known
-    # value forward) but deliberately do NOT bfill — backfilling leading NaNs would inject
-    # future values into the past (look-ahead bias). The consequence is that a young or
-    # near-empty series (e.g. a just-listed ETF, or a ticker yfinance returned ~nothing for)
-    # keeps its leading NaNs, and dropna(subset=all features) would then collapse the whole
-    # window to the intersection — as little as 1 row. So drop any feature still carrying a
-    # NaN within the most recent MIN_DATA_POINTS *target-session* rows: those can't support
-    # the walk-forward window without backfilled fakery. Measuring the tail in session space
-    # (after the restriction above) means a feature too young for THIS target's calendar
-    # (e.g. SGOV, listed 2020, vs an NSE target) is dropped, extending the usable window back
-    # rather than capping it. Survivors are non-null over the tail, so the dropna below
-    # retains >= MIN_DATA_POINTS rows whenever the target itself has the history.
-    _win = min(MIN_DATA_POINTS, len(data)) if len(data) else 0
-    _feats_before_guard = list(active_features)
-    active_features = [
-        f for f in active_features
-        if f in data.columns and _win and data[f].tail(_win).notna().all()
-    ]
-    _prep["feats_dropped"] = [f for f in _feats_before_guard if f not in active_features]
-    _prep["feats_kept"] = len(active_features)
-    data = data.dropna(subset=[active_target] + active_features).reset_index(drop=True)
-    _prep["rows_final"] = len(data)
-    if len(data) < MIN_DATA_POINTS:
-        # Explain the shortfall on the terminal — which stage cost the rows.
-        _log_prep(stage="fail")
-        console.failure(
-            "Insufficient data spine for walk-forward",
-            f"{active_target}: {len(data)} usable {_tgt_exch_prep} sessions after cleaning, "
-            f"need ≥{MIN_DATA_POINTS}. Fetched {_prep['rows_initial']} rows → "
-            f"{_prep['rows_session']} after session spine → {len(data)} after dropna "
-            f"({_prep['feats_kept']} features kept, {len(_prep['feats_dropped'])} dropped for short history).",
-        )
-        st.error(
-            f"Need {MIN_DATA_POINTS}+ data points for walk-forward analysis — "
-            f"'{active_target}' yielded only {len(data)} usable {_tgt_exch_prep} trading sessions "
-            f"after cleaning. Try a longer history, a target with more data, or fewer young predictors."
-        )
+    if active_date == "None" or active_date not in df.columns:
+        st.error("The panel has no date column; every published value is dated, so it cannot be valued.")
         return
-    active_features = [f for f in active_features if f in data.columns]
+
+    # ─── The target's own OHLCV and Swayam's driver pool ───────────────────
+    # Read BEFORE prep: the spine keeps the sessions the TARGET printed, and
+    # the target's own bars are the record of that (data.calendars.
+    # target_printed). Swayam reads the same bars. Cached per target and
+    # panel fingerprint, so a rerun or a horizon change reuses them.
+    #
+    # ONE panel feeds both engines. Swayam's MMR driver pool used to be a
+    # second fetch of the macro universe, keyed by TICKER — so its leakage
+    # guard, which drops the target and its near-replicas by NAME, matched
+    # nothing, and after the cache's hour the two engines read two different
+    # pulls. The drivers are the same friendly-named frame Mūla values against
+    # (Mūla admits a subset of it: no yields, no near-replicas or twins).
+    _fp = (df.attrs or {}).get("panel_fingerprint", "")
+    _swayam_fetch_key = f"swayam_fetch::{active_target}|{_fp}"
+    _nf_cache = st.session_state.get("_swayam_fetch_cache")
+    if _nf_cache is not None and _nf_cache.get("key") == _swayam_fetch_key:
+        target_ohlcv = _nf_cache["target_ohlcv"]
+        swayam_macro_df = _nf_cache["swayam_macro_df"]
+        macro_cols_list = _nf_cache["macro_cols_list"]
+        _ohlcv_rows_dropped = _nf_cache.get("rows_dropped", 0)
+    else:
+        target_ohlcv = None
+        _ohlcv_rows_dropped = 0
+        if _inst.has_ohlcv:
+            progress_bar(progress_container, 16, "Fetching Target OHLCV", f"yfinance · {_tgt_ticker}")
+            _ohlcv = fetch_ohlcv([_tgt_ticker], ANALYSIS_EPOCH, pd.Timestamp.today(),
+                                 force=bool(st.session_state.pop("_force_ohlcv", False)))
+            target_ohlcv = _ohlcv.get(_tgt_ticker)
+        if target_ohlcv is not None and not target_ohlcv.empty:
+            # Only the target's own weekday sessions, keeping the pre-spine
+            # warm-up bars (data.calendars.session_bars).
+            _n_bars = len(target_ohlcv)
+            target_ohlcv = session_bars(target_ohlcv, _tgt_ticker)
+            _ohlcv_rows_dropped = _n_bars - len(target_ohlcv)
+        _dcols = [c for c in df.select_dtypes(include=[np.number]).columns
+                  if c not in STOCK_TARGET_MARKETS or c == active_target]
+        swayam_macro_df = df[["DATE"] + _dcols].copy()
+        swayam_macro_df.index = pd.to_datetime(swayam_macro_df.pop("DATE"), errors="coerce").dt.normalize()
+        swayam_macro_df = swayam_macro_df[~swayam_macro_df.index.isna()]
+        swayam_macro_df = swayam_macro_df[~swayam_macro_df.index.duplicated(keep="last")]
+        macro_cols_list = list(swayam_macro_df.columns)
+        st.session_state["_swayam_fetch_cache"] = {
+            "key": _swayam_fetch_key,
+            "target_ohlcv": target_ohlcv,
+            "swayam_macro_df": swayam_macro_df,
+            "macro_cols_list": macro_cols_list,
+            "rows_dropped": _ohlcv_rows_dropped,
+        }
+
+    # ─── Prepare the panel (data.prep — pure, as-of invariant) ─────────────
+    # From the fixed epoch, on the sessions the target printed; features
+    # forward-filled, never back-filled; only the TARGET's missing rows
+    # dropped. A young feature enters the cross-section causally through the
+    # engine's print floor (FVO_MIN_PRINTS) and can no longer move the start.
+    try:
+        prep = prepare_panel(df, active_target, active_features, active_date,
+                             epoch=ANALYSIS_EPOCH, min_target_rows=MIN_DATA_POINTS,
+                             bars=target_ohlcv)
+    except PrepError as _pe:
+        progress_container.empty()
+        console.failure("Insufficient target history", str(_pe))
+        st.error(f"{_pe} Pick another target, or re-run once its source has more history.")
+        return
+    data = prep.data
+    active_features = prep.features
     if not active_features:
-        _log_prep(stage="fail")
-        console.failure("No valid features", f"{active_target}: every predictor was dropped for short history.")
-        st.error("No valid features found after data cleaning.")
+        progress_container.empty()
+        console.failure("Empty valuation panel", f"{active_target}: no registered predictor is in the panel.")
+        st.error("No price-level predictors remain — the valuation engine needs a cross-section of prices.")
         return
     # The valuation regression models LOG price → the target must be strictly
     # positive. Every shipped target is a price/level/ratio, but a future target
     # (a spread, a net position, a yield differential) could go ≤0; fail clean
     # rather than silently producing all-NaN valuations.
-    if (pd.to_numeric(data[active_target], errors="coerce") <= 0).any():
-        _log_prep(stage="fail")
+    if (data[active_target] <= 0).any():
+        progress_container.empty()
         console.failure("Non-positive target", f"{active_target}: contains values ≤ 0; the log-level valuation engine needs a strictly positive series.")
         st.error(f"'{active_target}' has non-positive values — the valuation engine models "
                  f"log price and needs a strictly positive series.")
         return
 
-    # ── Valuation representation: price the target against the traded
-    # opportunity set, rather than forecasting its next move.
-    #   • Panel   = the LEVEL of every macro predictor. The Mūla engine takes
-    #     its own logs and differences internally, integrates the resulting
-    #     factors back into levels, and regresses log price on them with
-    #     time-varying coefficients. It therefore wants prices, not the
-    #     pre-engineered momentum features the previous engine consumed.
-    #   • Target  = the target's own price level. There is no forward label
-    #     and so no forward-label overlap, no purge gap, and no zero-filled
-    #     tail: the newest row is valued the same way every other row is.
-    # FWD_HORIZON survives as a SCORING horizon only — the convergence layer,
-    # the precedent analogs and the Intelligence calibrator all score against
-    # the h-day forward return, and the UI projects the current mispricing
-    # over it. Daily bars throughout.
-    FWD_HORIZON = _icfg.forecast_horizon   # scoring / display horizon (trading days)
-    _prep["fwd_h"] = FWD_HORIZON
-    # RAW_YIELD_PREDICTORS (^IRX/^FVX/^TNX/^TYX) are percent-point RATE series,
-    # not prices: they print at/near/below zero (2020-21 zero-rate era), and
-    # the engine's log transform is undefined there. A yield LEVEL is also not
-    # an instrument the target can be valued against — the tradeable expression
-    # of the curve is already in the panel as the Treasury ETF complex
-    # (SHY/IEF/TLT/…), which the block map classifies as "Rates". So they are
-    # dropped from the valuation panel rather than transformed.
-    _yield_feats = [f for f in active_features if f in RAW_YIELD_PREDICTORS]
-    if _yield_feats:
-        active_features = [f for f in active_features if f not in RAW_YIELD_PREDICTORS]
-        _prep["yield_cols_dropped"] = len(_yield_feats)
-        # Re-stamp the kept count: it was recorded after the short-history guard
-        # but before this exclusion, so the prep log would otherwise report a
-        # panel four instruments wider than the one the engine is handed.
-        _prep["feats_kept"] = len(active_features)
-    if not active_features:
-        _log_prep(stage="fail")
-        console.failure("Empty valuation panel", f"{active_target}: no price-level predictors survived.")
-        st.error("No price-level predictors remain — the valuation engine needs a cross-section of prices.")
-        return
-    # No warm-up head to trim, and no row-validity mask: every surviving row
-    # already carries a finite level for the target and every instrument (the
-    # dropna above). The predecessor needed both — a rolling momentum window
-    # left a NaN head, and its forward labels left a zero-filled tail — so the
-    # prep log reported "usable rows" and "real labels" as separate counts.
-    # Here the only exclusion is the engine's own burn-in, applied internally
-    # and reported as `Valid`.
-    _prep["burn_in"] = int(_icfg.fvo_burn_in)
-    # Date-range fingerprint for the cache key. `data` carries a RangeIndex (reset at
-    # load), so the real dates live in the active_date column, not the index — using
-    # the index here would be integers (AttributeError on .date()). Fall back to a
-    # row-count surrogate when there's no date column.
-    if active_date != "None" and active_date in data.columns:
-        _vd = pd.to_datetime(data[active_date], errors="coerce").dropna()
-        _date_range = f"{_vd.iloc[0].date()}_{_vd.iloc[-1].date()}" if len(_vd) else f"n{len(data)}"
-    else:
-        _date_range = f"n{len(data)}"
-    cache_key = f"fvo{FWD_HORIZON}|{active_target}|{'|'.join(sorted(active_features))}|{_date_range}"
+    def _log_prep() -> None:
+        """Print the data-prep trace to the terminal (row evolution, start, fingerprints)."""
+        r = prep.report
+        console.section("DATA PREPARATION")
+        console.item("Target", f"{active_target}  (ticker={_tgt_ticker or 'n/a'}, exch={_tgt_exch or 'weekday'})")
+        console.item("Horizon h", f"{FWD_HORIZON}d (the instrument config's; the engine is fit to no label)")
+        console.item("Analysis epoch", f"{ANALYSIS_EPOCH:%Y-%m-%d} (structural — the history starts "
+                     f"at max(epoch, the target's first print))")
+        console.item("Rows · fetched", r["rows_initial"])
+        console.item("Rows · from the epoch", r["rows_epoch"])
+        console.item("Rows · target-printed sessions",
+                     f"{r['rows_session']}  ({r['sessions_dropped']} non-session rows, "
+                     f"{r['target_not_printed']} sessions the target did not print · {r['printed_source']})")
+        _yields = [c for c in numeric_cols if c in RAW_YIELD_PREDICTORS]
+        if _yields:
+            # Raw yield LEVELS are rate series, not prices: they print at/near/
+            # below zero and the engine's log transform is undefined there. The
+            # tradeable expression of the curve is already in the panel as the
+            # Treasury ETF complex, so they are excluded rather than transformed.
+            console.item("Instruments · excluded (raw yield levels, not prices)", len(_yields))
+        if _inst.twins:
+            console.item("Instruments · excluded (same-exposure twins)", ", ".join(_inst.twins))
+        if r["feats_absent"]:
+            console.item("Instruments · registered, absent from this panel", len(r["feats_absent"]))
+        console.item("Instruments · in valuation panel", r["feats_kept"])
+        # Same panel digest across two runs = same cross-section, so any
+        # difference in output came from the VALUES or the code (see
+        # data/fetcher.py::_panel_fingerprint). The history fingerprint hashes
+        # the settled prepared rows the engine values.
+        if _fp:
+            console.item("Panel fingerprint", _fp)
+        console.item("History fingerprint", prep.fingerprint)
+        console.item("History start", f"{prep.start:%Y-%m-%d}")
+        console.item("Rows · final spine", r["rows_final"])
+        # The engine applies its own burn-in internally and flags those rows
+        # `Valid = False`; there is no warm-up head to trim here.
+        _pub = max(0, r["rows_final"] - int(_icfg.fvo_burn_in))
+        console.item("Rows · valued (after engine burn-in)",
+                     f"{_pub}  ({_icfg.fvo_burn_in} burn-in rows published as Valid=False)")
+        console.checkpoint(f"Target history ≥ {MIN_DATA_POINTS}", "OK")
+
+    # The run's identity: target, h, the prepared history's fingerprint (which
+    # covers the cross-section's membership and every settled value) and its
+    # span, whose end carries the newest, still-unsettled row.
+    _date_range = f"{prep.start.date()}_{data.index[-1].date()}"
+    cache_key = f"fvo{FWD_HORIZON}|{active_target}|{prep.fingerprint}|{_date_range}"
     if st.session_state.get("engine_cache") != cache_key:
         # ── Restore from the per-config result cache if this exact config was
         # already computed this session (e.g. the user switched commodities and
@@ -1327,99 +1176,40 @@ def main():
             "Predictors": f"{len(active_features)} columns",
             "Date Range": f"{data.shape[0]} observations",
         })
-        # Full data-preparation trace (row evolution, session spine, dropped features)
+        # Full data-preparation trace (row evolution, spine, start, fingerprints)
         # so the pipeline has no dark spots — printed once per new computation.
-        _log_prep(stage="complete")
+        _log_prep()
 
         # Reuse the hoisted main-area progress slot (created at the top of main())
         # so the bar continues from where the fetch left it (~15%) with no gap.
 
         # ── Phase 1: Data Acquisition ─────────────────────────────────────
-        # HORIZON-INDEPENDENT: Swayam's inputs depend on the target and on the
-        # panel in session, never on the scoring horizon, so they are cached
-        # separately and survive a horizon change. The key carries the data's
-        # identity (date range + panel fingerprint): it used to carry the target
-        # alone, so Swayam frames from an earlier pull were reused against a
-        # newer Mūla panel after any re-run that did not go through Refresh.
-        #
-        # ONE panel feeds both engines. Swayam's MMR driver pool used to be a
-        # second fetch of the macro universe, keyed by TICKER — so the leakage
-        # guard below, which drops the target and its near-replicas by NAME,
-        # matched nothing (0 drivers dropped for every target; GLTR at r = 0.985
-        # stayed in Gold's pool), and after the cache's hour the two engines
-        # read two different pulls. The drivers are now the same friendly-named
-        # frame Mūla values against.
-        _fp = (df.attrs or {}).get("panel_fingerprint", "")
-        _swayam_fetch_key = f"swayam_fetch::{active_target}|{_date_range}|{_fp}"
-        _nf_cache = st.session_state.get("_swayam_fetch_cache")
+        # HORIZON-INDEPENDENT: the target's OHLCV and Swayam's driver pool were
+        # read above, before prep, keyed by target and panel fingerprint.
         console.start_phase("DATA ACQUISITION", 1, 5)
-        if _nf_cache is not None and _nf_cache.get("key") == _swayam_fetch_key:
-            target_ohlcv = _nf_cache["target_ohlcv"]
-            swayam_macro_df = _nf_cache["swayam_macro_df"]
-            macro_cols_list = _nf_cache["macro_cols_list"]
-            console.item("Target OHLCV / drivers", "reused (same target, same panel)")
-            progress_bar(progress_container, 19, "Data Acquisition Reused", f"{len(macro_cols_list)} drivers (cached)")
+        console.section("Target OHLCV")
+        if target_ohlcv is not None and not target_ohlcv.empty:
+            console.item("Symbol", _tgt_ticker)
+            console.item("Rows", f"{len(target_ohlcv)} target sessions "
+                                 f"({_ohlcv_rows_dropped} non-session bars dropped)")
+            console.item("Has Volume", bool("Volume" in target_ohlcv.columns
+                                            and target_ohlcv["Volume"].fillna(0).abs().sum() > 0))
+            console.success(f"Target OHLCV: {len(target_ohlcv)} rows")
+        elif not _inst.has_ohlcv:
+            console.warning(f"{active_target} has no OHLCV source ({_tgt_ticker}) — Swayam unavailable")
         else:
-            progress_bar(progress_container, 16, "Resolving Swayam Source",
-                         f"{active_target} · own OHLCV (self-referential view bank)")
-            end_date = pd.Timestamp.today()
-            start_date = end_date - pd.DateOffset(days=365 * 9)
-
-            console.section("Target OHLCV")
-            # Swayam reads the target's own OHLC (and volume where it exists —
-            # the volume-dependent views abstain when it does not). A
-            # sheet-sourced target has no OHLCV feed at all; it is said once,
-            # here, instead of being sent to yfinance as a guaranteed failure.
-            _tgt_ticker = ALL_TARGETS[active_target]
-            target_ohlcv = None
-            if is_yfinance_ticker(_tgt_ticker):
-                progress_bar(progress_container, 18, "Fetching Target OHLCV", f"yfinance · {_tgt_ticker}")
-                _ohlcv = fetch_ohlcv([_tgt_ticker], start_date, end_date,
-                                     force=bool(st.session_state.pop("_force_ohlcv", False)))
-                target_ohlcv = _ohlcv.get(_tgt_ticker)
-            if target_ohlcv is not None and not target_ohlcv.empty:
-                console.item("Symbol", _tgt_ticker)
-                console.item("Rows", len(target_ohlcv))
-                console.item("Has Volume", bool("Volume" in target_ohlcv.columns
-                                                and target_ohlcv["Volume"].fillna(0).abs().sum() > 0))
-                console.success(f"Target OHLCV: {len(target_ohlcv)} rows")
-            elif not is_yfinance_ticker(_tgt_ticker):
-                console.warning(f"{active_target} has no OHLCV source ({_tgt_ticker}) — Swayam unavailable")
-            else:
-                console.warning(f"No OHLCV for {_tgt_ticker} — Swayam breadth will be unavailable")
-
-            console.section("Swayam Drivers")
-            _dcols = [c for c in df.select_dtypes(include=[np.number]).columns
-                      if c not in STOCK_TARGET_MARKETS or c == active_target]
-            if "DATE" in df.columns:
-                swayam_macro_df = df[["DATE"] + _dcols].copy()
-                swayam_macro_df.index = pd.to_datetime(swayam_macro_df.pop("DATE"), errors="coerce").dt.normalize()
-                swayam_macro_df = swayam_macro_df[~swayam_macro_df.index.isna()]
-                swayam_macro_df = swayam_macro_df[~swayam_macro_df.index.duplicated(keep="last")]
-            else:
-                swayam_macro_df = pd.DataFrame()
-            macro_cols_list = list(swayam_macro_df.columns)
-            console.item("Driver pool", f"{len(macro_cols_list)} panel columns (the panel Mūla reads)")
-            progress_bar(progress_container, 19, "Data Acquisition Complete", f"{len(macro_cols_list)} drivers")
-            st.session_state["_swayam_fetch_cache"] = {
-                "key": _swayam_fetch_key,
-                "target_ohlcv": target_ohlcv,
-                "swayam_macro_df": swayam_macro_df,
-                "macro_cols_list": macro_cols_list,
-            }
+            console.warning(f"No OHLCV for {_tgt_ticker} — Swayam breadth will be unavailable")
+        console.section("Swayam Drivers")
+        console.item("Driver pool", f"{len(macro_cols_list)} panel columns (the panel Mūla reads)")
+        progress_bar(progress_container, 19, "Data Acquisition Complete", f"{len(macro_cols_list)} drivers")
         console.end_phase("DATA ACQUISITION")
 
         # ── Phase 2: Mūla (FairValueEngine) ─────────────────────────────────
         console.start_phase("MŪLA ENGINE", 2, 5)
         progress_bar(progress_container, 20, "Running Mūla Engine", f"Valuation · {len(active_features)} Instruments · {len(data)} Rows")
 
-        _price_level = data[active_target].to_numpy(dtype=np.float64)
-        _cal = (pd.to_datetime(data[active_date].values)
-                if active_date != "None" and active_date in data.columns
-                else pd.RangeIndex(len(data)))
-        _tgt_px = pd.Series(_price_level, index=_cal, name=active_target)
+        _tgt_px = data[active_target].astype(float)
         _expl_px = data[active_features].astype(float)
-        _expl_px.index = _cal
 
         _blk_names, _blk_map = block_membership(active_features)
 
@@ -1451,17 +1241,15 @@ def main():
             engine = MulaEngine()
             console.item("Valuation Core", "Mūla — cointegrating core + error-correction layer")
             # `config=_icfg` threads this instrument's own Mūla knobs (burn-in,
-            # print floor, discount grid, lookback windows, horizon).
+            # print floor, discount grid, lookback windows) and THE horizon h.
+            # The engine publishes `Price` itself; its output is not edited here.
             engine.fit(
                 _tgt_px, _expl_px,
-                feature_names=active_features, config=_icfg,
+                feature_names=active_features, config=_icfg, exchange=_tgt_exch,
+                epoch=ANALYSIS_EPOCH, fingerprint=prep.fingerprint,
                 progress_callback=lambda pct, msg: progress_bar(
                     progress_container, int(20 + pct * 20), "Running Mūla Engine", msg),
             )
-            # Carry the raw price LEVEL on the engine output too. `Actual` is
-            # already the price here, but the analog matcher and the edge
-            # scorer both key off a column literally named "Price".
-            engine.ts_data["Price"] = _price_level
             st.session_state["fvo_engine"] = engine
             st.session_state["fvo_fit_key"] = cache_key
 
@@ -1510,7 +1298,7 @@ def main():
                     console.item("Gaps in the trace", " · ".join(f"{k}: {int(v)}" for k, v in _c.items()))
                 _bad = int(_c.get("incomplete fetch", 0))
                 if _bad:
-                    _dates = pd.DatetimeIndex(_cal)[np.asarray(_wr == "incomplete fetch")]
+                    _dates = data.index[np.asarray(_wr == "incomplete fetch")]
                     _shown = ", ".join(f"{d:%Y-%m-%d}" for d in list(_dates)[-3:])
                     console.warning(
                         f"{_bad} session(s) withheld as INCOMPLETE FETCH ({_shown}). The calendar "
@@ -1538,6 +1326,9 @@ def main():
         # _swayam_fetch_key as Phase 1; only the target-calendar reindex below
         # (cheap — no yfinance calls) re-runs.
         console.start_phase("SWAYAM ENGINE", 3, 5)
+        # d*, Mūla's as-of session. Swayam's stored readings (the view weights
+        # and the last native date) are dated at or before it, never after.
+        _d_star = engine.asof
         # Per-target: reset before this target fills it, so a target with no
         # Swayam read never bundles the previous target's date.
         st.session_state["swayam_native_last"] = None
@@ -1600,6 +1391,8 @@ def main():
                 # no grid had to be chosen for that to happen.
                 _view_w = view_skill_weights(swayam_view_dfs, horizon=FWD_HORIZON)
                 swayam_daily_pre_reindex = aggregate_views(swayam_view_dfs, weights=_view_w)
+                if _d_star is not None and not _view_w.empty:
+                    _view_w = _view_w[pd.DatetimeIndex(_view_w.index) <= _d_star]
                 if not _view_w.empty:
                     _last = _view_w.iloc[-1].sort_values(ascending=False)
                     st.session_state["swayam_view_weights"] = {k: float(v) for k, v in _view_w.iloc[-1].items()}
@@ -1629,26 +1422,24 @@ def main():
             # before the panel does (yfinance publishes the OHLCV feed and the
             # close feed on different schedules). Reindexing onto the spine
             # (ff-fill) lets every page reach the latest valued session; the
-            # true last-native date is recorded so the UI can say how much of
-            # the tail is carried rather than observed.
-            st.session_state["swayam_native_last"] = pd.Timestamp(swayam_daily.index.max())
-            if active_date in data.columns:
-                _cal = pd.DatetimeIndex(sorted(pd.to_datetime(
-                    data[active_date], errors="coerce").dropna().dt.normalize().unique()))
-                _nd = swayam_daily.copy()
-                _nd.index = pd.to_datetime(_nd.index).normalize()
-                _nd = _nd[~_nd.index.duplicated(keep="last")].sort_index()
-                # _Native marks rows that are a genuine basket observation
-                # (present in _nd BEFORE the reindex) vs carried forward by
-                # the ffill below (the basket's market was closed/hadn't
-                # posted that day). Carried through so the calibration
-                # overlap gate can require NATIVE overlap, not ffilled
-                # rows masquerading as fresh Swayam signal (audit finding
-                # F21) — the UI's own "breadth carried forward" notice
-                # already discloses this to the user; the gate didn't.
-                _native_dates = set(_nd.index)
-                swayam_daily = _nd.reindex(_cal, method="ffill").dropna(how="all")
-                swayam_daily["_Native"] = swayam_daily.index.isin(_native_dates)
+            # true last-native date at or before d* is recorded so the UI can
+            # say how much of the tail is carried rather than observed.
+            _nd = swayam_daily.copy()
+            _nd.index = pd.to_datetime(_nd.index).normalize()
+            _nd = _nd[~_nd.index.duplicated(keep="last")].sort_index()
+            _native_idx = _nd.index if _d_star is None else _nd.index[_nd.index <= _d_star]
+            st.session_state["swayam_native_last"] = (pd.Timestamp(_native_idx.max())
+                                                      if len(_native_idx) else None)
+            # _Native marks rows that are a genuine view-bank observation
+            # (present in _nd BEFORE the reindex) vs carried forward by the
+            # ffill below (the target's OHLCV had not posted that day).
+            # Carried through so the calibration overlap gate can require
+            # NATIVE overlap, not ffilled rows masquerading as fresh Swayam
+            # signal (audit finding F21) — the UI's own "breadth carried
+            # forward" notice already discloses this to the user; the gate didn't.
+            _native_dates = set(_nd.index)
+            swayam_daily = _nd.reindex(data.index.rename(None), method="ffill").dropna(how="all")
+            swayam_daily["_Native"] = swayam_daily.index.isin(_native_dates)
             console.item("Trading Days", len(swayam_daily))
             if len(swayam_daily) > 0:
                 last = swayam_daily.iloc[-1]
@@ -1677,13 +1468,10 @@ def main():
         validator = CrossValidator(active_weights=_icfg.weights_seed())
         divergence_detector = CrossSystemDivergenceDetector()
 
-        fvo_ts = engine.ts_data.copy()  # carries "Price" (set after fit)
-        if active_date != "None" and active_date in data.columns:
-            fvo_ts["Date"] = pd.to_datetime(data[active_date].values)
-            fvo_ts = fvo_ts.set_index("Date")
-        else:
-            fvo_ts["Date"] = np.arange(len(fvo_ts))
-        fvo_ts = fvo_ts[~fvo_ts.index.duplicated(keep="last")]
+        # Mūla's published frame, date-indexed. The prepared spine has one row
+        # per session, so the engine's row positions and these dates agree.
+        fvo_ts = engine.ts_data.copy()
+        fvo_ts.index = pd.DatetimeIndex(data.index, name="Date")
 
         swayam_by_date = {}
         if not swayam_daily.empty:
@@ -1840,6 +1628,11 @@ def main():
         st.session_state["convergence_df"] = convergence_df
         st.session_state["divergence_events"] = events
         st.session_state["edges"] = _edges
+        # Which session, which h and which history this result is about.
+        st.session_state["asof"] = engine.asof
+        st.session_state["horizon"] = FWD_HORIZON
+        st.session_state["epoch"] = ANALYSIS_EPOCH
+        st.session_state["fingerprint"] = prep.fingerprint
         # The consensus's full history — the Convergence page's chart and the
         # Data page's export read it.
         st.session_state["hero_series"] = (
@@ -1877,10 +1670,100 @@ def main():
     signal = engine.get_current_signal()
     model_stats = engine.get_model_stats()
     ts = engine.ts_data.copy()
-    if active_date != "None" and active_date in data.columns:
-        ts["Date"] = pd.to_datetime(data[active_date].values)
-    else:
-        ts["Date"] = np.arange(len(ts))
+    ts["Date"] = data.index.to_numpy()
+
+    # ─── Data freshness — measured from d* ──────────────────────────────────
+    # ONE reading, shared by these notices and the command bar's status chip:
+    # the target's own sessions from d* (Mūla's as-of session) to today on the
+    # target's exchange (data.calendars.session_today), holiday-aware, so
+    # Friday's valuation read on a Sunday is current, not stale. A withheld
+    # newest row is data, not a valuation — it cannot make the call fresher.
+    _status = _asof_status(signal, _tgt_ticker, session_today(_tgt_exch))
+    _d_star = _status["as_of"]
+    _ds = f"{_d_star:%d %b %Y}" if _d_star is not None else ""
+    try:
+        if _d_star is not None and not _status["provisional"]:
+            _behind = _status["behind"]
+            if _behind >= STALENESS_DAYS:
+                _notice(
+                    "warning", "Latest data unavailable",
+                    (f"Mūla's latest valuation is {_ds} — {_behind} trading days behind. The price "
+                     f"source (yfinance) hasn't published more recent data, so every signal below "
+                     f"reflects {_ds}, not today. Use Refresh data in the rail once the source updates."),
+                )
+            elif _behind >= 1:
+                _notice(
+                    "info", "Data freshness",
+                    f"Signals are as of {_ds} ({_behind} trading day"
+                    f"{'s' if _behind > 1 else ''} behind — today's bar may not be published yet).",
+                )
+
+        # Predictors refilled from a cached snapshot (data.fetcher's rate-limit
+        # recovery). Read off the frame itself, so a frame served from cache
+        # carries its own warning.
+        _stale_backfills = (df.attrs or {}).get("stale_backfills") or {}
+        if _stale_backfills:
+            _sb_items = sorted(_stale_backfills.items(), key=lambda kv: kv[1])
+            _sb_preview = ", ".join(f"{k} (as of {v})" for k, v in _sb_items[:5])
+            _sb_more = f" +{len(_sb_items) - 5} more" if len(_sb_items) > 5 else ""
+            _notice(
+                # WARNING, not info: a snapshot-reconstructed column is reindexed
+                # onto this run's calendar and ffilled, so it is a DIFFERENT SERIES
+                # from a live pull, not a staler one — and every published date can
+                # move with it.
+                "warning", "Predictors carried from snapshot — history differs",
+                f"{len(_sb_items)} predictor(s) were rate-limited this fetch and refilled "
+                f"from a prior cached snapshot: {_sb_preview}{_sb_more}. A rebuilt column "
+                f"is not merely staler than a live one — it is a different series, so "
+                f"this run's published history may differ from a run that fetched "
+                f"cleanly. Compare the history fingerprint before treating past values as "
+                f"final; refresh once the source is healthy for an authoritative record.",
+            )
+
+        # Session completeness. The engine's gate is the ONE definition of a
+        # complete session (it counts the instruments whose markets were open);
+        # these notices only read what it decided about the newest row. (The app
+        # used to re-derive completeness with a threshold of its own over every
+        # column, which agreed with the gate only by coincidence.)
+        if signal.get("provisional"):
+            _pr = signal.get("published_row")
+            _nsch = (engine.ts_data["NScheduled"].iloc[_pr]
+                     if _pr is not None and "NScheduled" in engine.ts_data.columns else np.nan)
+            _nsch_txt = f" of {int(_nsch)}" if np.isfinite(_nsch) else ""
+            _notice(
+                "info", "Session still forming",
+                (f"{_ds} is today's session and has not closed: {signal.get('n_available', 0)}"
+                 f"{_nsch_txt} instruments whose markets are open have printed. The reading is "
+                 f"PROVISIONAL — published, never learned from, and settled when the session closes."),
+            )
+        elif signal.get("asof_row_withheld") and signal.get("withheld_reason") == "incomplete fetch":
+            _notice(
+                "warning", "Partial latest session",
+                (f"The newest session ({data.index[-1]:%d %b %Y}) failed the engine's completeness "
+                 f"gate: its markets were open, but too few of them posted in this fetch, so it is "
+                 f"not valued. The call is as of {_ds}; refresh once those markets post."),
+            )
+
+        # The target lagging the panel: the spine keeps only sessions the TARGET
+        # printed, so panel rows after its last print are not valued until it
+        # does. Only the target's FINISHED sessions count — the panel can carry
+        # a row dated by a market whose day has already rolled (Asia's
+        # tomorrow) while the target's own session of that date has not begun.
+        _panel_last = pd.to_datetime(df[active_date], errors="coerce").max()
+        _tgt_last = data.index[-1]
+        _upto = (min(_panel_last.normalize(), session_today(_tgt_exch) - pd.Timedelta(days=1))
+                 if pd.notna(_panel_last) else _tgt_last)
+        if _upto > _tgt_last:
+            _t_behind = trading_days_behind(_tgt_ticker, _tgt_last.date(), _upto.date())
+            if _t_behind >= 1:
+                _notice(
+                    "warning", f"{active_target} data is lagging",
+                    (f"This target last printed {_tgt_last:%d %b %Y}, {_t_behind} of its sessions "
+                     f"behind the macro universe (which runs to {_panel_last:%d %b %Y}). Sessions "
+                     f"it has not printed are not valued until it does."),
+                )
+    except Exception as _fe:                          # noqa: BLE001 - never break a run to report
+        console.warning(f"Freshness notices skipped: {type(_fe).__name__}: {_fe}")
 
     # ─── Precedent base rate (the hero's sixth gate) ────────────────────────
     # Computed ONCE over the instrument's fixed precedent term structure and
@@ -1898,16 +1781,13 @@ def main():
             _cached_analogs = _fsp(ts, active_target, hold_horizons=_display_hold,
                                    mom_window=_icfg.analog_mom_window) or []
             _ps = _sf(_cached_analogs, _display_hold) if _cached_analogs else {}
-            # The gate reads at this instrument's forecast horizon (a member of
-            # its precedent term structure); the nearest shorter one otherwise.
-            _hp = int(_icfg.forecast_horizon)
-            if _hp not in _ps:
-                _cands = [h for h in _display_hold if h <= _hp]
-                _hp = max(_cands) if _cands else min(_display_hold)
-            _row = _ps.get(int(_hp))
+            # The gate reads at h and at no other horizon: with no precedent
+            # row at h it has nothing to say (InstrumentConfig guarantees h is
+            # in the term structure; a missing row means too few analogs).
+            _row = _ps.get(FWD_HORIZON)
             if _row:
                 _prec_summary = {
-                    "horizon": int(_hp), "median": float(_row["median"]),
+                    "horizon": FWD_HORIZON, "median": float(_row["median"]),
                     "positive_pct": float(_row["positive_pct"]),
                     # n_eff, not n: ten analogs carried by one episode are one
                     # observation.
@@ -1923,10 +1803,18 @@ def main():
         st.session_state["_precedent_analogs_cache"] = {"pkey": _pkey, "periods": _cached_analogs}
         st.session_state["_prec_key"] = _pkey
 
-    # ─── Hero verdict — computed once. Rendered in full only on Overview;
-    # every page's command bar reads the SAME object, so nothing can disagree
-    # with what Overview shows.
-    verdict = _compute_hero_verdict(signal)
+    # ─── Hero verdict — computed once, every input read at d*. Rendered in
+    # full only on Overview; every page's command bar reads the SAME object,
+    # so nothing can disagree with what Overview shows.
+    verdict = _compute_hero_verdict(
+        signal,
+        swayam_daily=st.session_state.get("swayam_daily"),
+        convergence_df=st.session_state.get("convergence_df"),
+        divergence_events=st.session_state.get("divergence_events"),
+        edges=st.session_state.get("edges"),
+        precedent=st.session_state.get("precedent_summary"),
+        horizon=FWD_HORIZON,
+    )
 
     # ─── Chart window — read here, RENDERED in a chart panel header ────────
     # Read here (the filtered series below needs it) but drawn inside the panel
@@ -1945,17 +1833,26 @@ def main():
             ts_filtered = ts.iloc[max(0, len(ts) - TIMEFRAME_TRADING_DAYS.get(selected_tf, 252)):]
     x_axis = ts_filtered["Date"]
 
-    # ─── Command-bar status (price / change / freshness chip) ──────────────
+    # ─── Command-bar status (price / change at d*, recency chip) ───────────
+    # The price and its change are d*'s, the session the call is about — not
+    # the newest row's, which may be a session the engine withheld.
     _cb_price = _cb_chg = None
-    if "Price" in ts.columns and len(ts) >= 2:
-        _cb_tail = pd.to_numeric(ts["Price"], errors="coerce").tail(2)
-        if pd.notna(_cb_tail.iloc[-1]):
+    if _d_star is not None:
+        _cb_tail = pd.Series(pd.to_numeric(engine.ts_data["Price"], errors="coerce").to_numpy(),
+                             index=data.index).loc[:_d_star].tail(2)
+        if len(_cb_tail) and pd.notna(_cb_tail.iloc[-1]):
             _cb_price = float(_cb_tail.iloc[-1])
-            if pd.notna(_cb_tail.iloc[-2]) and _cb_tail.iloc[-2] != 0:
+            if len(_cb_tail) == 2 and pd.notna(_cb_tail.iloc[-2]) and _cb_tail.iloc[-2] != 0:
                 # PERCENT POINTS, not a fraction.
                 _cb_chg = float(_cb_tail.iloc[-1] / _cb_tail.iloc[-2] - 1.0) * 100.0
-    _cb_status_label, _cb_status_tone = _fresh["label"], _fresh["tone"]
-    _cb_asof = _fresh["as_of"].strftime("%d %b %Y") if _fresh["as_of"] is not None else ""
+    _cb_status_label, _cb_status_tone = _status["label"], _status["tone"]
+    # 'As of d*'. When the newest row was withheld it says so: the call is
+    # VALUED as of d*, and the newer session is named with the engine's reason.
+    if _status["valued_as_of"] is not None:
+        _cb_asof_items = [("Valued as of", _ds),
+                          ("Newest", f"{data.index[-1]:%d %b} · {signal.get('withheld_reason') or 'withheld'}")]
+    else:
+        _cb_asof_items = [("As of", _ds)]
     _edges = st.session_state.get("edges") or {}
 
     def _top_bar(*, windowed: bool = False) -> None:
@@ -1968,8 +1865,13 @@ def main():
         changed nothing and still claimed "Window 6M".
         """
         render_ticker(data)
+        # 'k of h sessions elapsed': how much of the call's horizon has run
+        # since d*, the session it was made on.
+        _elapsed = _status["behind"] or 0
         _meta = [("Call", f"{verdict['signal']} · {format_conviction(verdict)}"),
-                 ("Horizon", f"{FWD_HORIZON}D"), ("As of", _cb_asof)]
+                 ("Horizon", f"{FWD_HORIZON}D" + (f" · {min(_elapsed, FWD_HORIZON)} of "
+                                                  f"{FWD_HORIZON} elapsed" if _elapsed else "")),
+                 *_cb_asof_items]
         if windowed:
             _meta.insert(1, ("Window", selected_tf))
         render_top_bar(
@@ -1998,14 +1900,11 @@ def main():
         wants it. They are built from the same objects, so they cannot disagree.
         """
         _top_bar()
-        _swd = st.session_state.get("swayam_daily")
-        _os = _ob = None
-        if _swd is not None and not _swd.empty and {"Oversold_Pct", "Overbought_Pct"} <= set(_swd.columns):
-            _os, _ob = float(_swd["Oversold_Pct"].iloc[-1]), float(_swd["Overbought_Pct"].iloc[-1])
-        _cdf = st.session_state.get("convergence_df")
-        _agree = (float(_cdf["agreement_ratio"].dropna().iloc[-1])
-                  if _cdf is not None and not _cdf.empty and "agreement_ratio" in _cdf.columns
-                  and _cdf["agreement_ratio"].notna().any() else None)
+        # The breadth and agreement the chain read at d* — never re-derived
+        # here by position, so the strip and the chain cannot disagree.
+        _swb = verdict.get("swayam_breadth")
+        _os, _ob = ((_swb["oversold_pct"], _swb["overbought_pct"]) if _swb else (None, None))
+        _agree = verdict.get("agreement")
         _val = verdict["valuation"]
         _fvo_v = _val.get("fvo")
         _trust = verdict["trust"]
@@ -2069,7 +1968,7 @@ def main():
         _cached_periods = (_prec_cache["periods"]
                            if _prec_cache and _prec_cache.get("pkey") == _pkey else None)
         _safe_render("Precedent", lambda: render_precedent_tab(
-            ts, active_target, _icfg.precedent_horizons, _icfg.analog_mom_window, _icfg.forecast_horizon,
+            ts, active_target, _icfg.precedent_horizons, _icfg.analog_mom_window, FWD_HORIZON,
             precomputed_periods=_cached_periods))
 
     def _page_system() -> None:

@@ -30,7 +30,7 @@ import streamlit as st
 
 from analytics.adaptive import tier_now
 from core.config import DIV_LOOKBACK, UI_CHART_HEIGHT_STACKED, UI_CHART_HEIGHT_MEDIUM
-from core.config import get_instrument_config, InstrumentConfig
+from core.config import get_instrument_config
 from core.semantics import CLAIM_SIGMA, valuation_state
 from convergence.normalization import consensus_series, lean_label
 from ui.theme import chart_layout, style_axes, chart_color, chart_rgba, grid_rgba, panel_bg
@@ -214,10 +214,7 @@ def render_convergence_tab(ts_filtered=None, edge: dict | None = None, horizon: 
             eyebrow="Convergence",
         )
         return
-    try:
-        _icfg = get_instrument_config(st.session_state.get("active_target", ""))
-    except KeyError:
-        _icfg = InstrumentConfig()
+    _icfg = get_instrument_config(st.session_state.get("active_target", ""))
 
     cs = consensus_series(fvo_ts, swayam_daily)
     cdf = cdf.copy()

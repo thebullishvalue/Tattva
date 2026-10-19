@@ -65,7 +65,6 @@ from core.config import (
     DDM_DRIFT_SCALE,
     DDM_LEAK_RATE,
     DDM_LONG_RUN_VAR,
-    FORECAST_HORIZON,
     LOOKBACK_WINDOWS,
     OU_PROJECTION_DAYS,
 )
@@ -156,14 +155,22 @@ class MulaEngine:
         #: all their branches are gone rather than pinned to constants.
         #: Likewise `purge`: nothing here is a forward-window label, so there
         #: is no overlapping-label leakage to gap out.
-        # Per-instrument knobs — default to the global config constants;
-        # fit() overrides any the instrument's InstrumentConfig supplies.
+        # Per-instrument knobs — placeholders until fit() reads them from the
+        # instrument's InstrumentConfig.
         self.burn_in: int = int(BURN_IN)
         self.min_prints: int = int(MIN_PRINTS)
         self.valuation_deltas: tuple = tuple(VALUATION_DELTAS)
         self.lookback_windows: tuple = tuple(LOOKBACK_WINDOWS)
-        #: The scoring horizon the error-correction read projects over.
-        self.horizon: int = int(FORECAST_HORIZON)
+        #: THE horizon h (InstrumentConfig.forecast_horizon) — the error-
+        #: correction read projects over it. Set by fit(); there is no default.
+        self.horizon: int | None = None
+        #: d*, Mūla's as-of session: the date of the newest published
+        #: valuation. Every verdict input is read at this date.
+        self.asof: pd.Timestamp | None = None
+        #: The run's analysis epoch and the prepared history's fingerprint
+        #: (data.prep), so the fit says which history it valued.
+        self.epoch: pd.Timestamp | None = None
+        self.fingerprint: str = ""
         #: First index carrying a published valuation. Named `min_train_size`
         #: because downstream consumers (OU slicing, the run console) read
         #: that attribute as "where does honest output begin".
@@ -178,7 +185,11 @@ class MulaEngine:
         printed: pd.DataFrame | None = None,
         feature_names: list[str] | None = None,
         progress_callback: Callable | None = None,
-        config: "object | None" = None,
+        *,
+        config,
+        exchange: str = "",
+        epoch: pd.Timestamp | None = None,
+        fingerprint: str = "",
     ) -> "FairValueEngine":
         """Run the full valuation pipeline.
 
@@ -198,20 +209,25 @@ class MulaEngine:
             which is the best available signal once the caller has already
             forward-filled.
 
-        config: an optional InstrumentConfig (or any object exposing the
-            ``fvo_*`` fields). When given, its per-instrument knobs (burn-in,
-            print floor, discount grid, lookback windows, forecast horizon)
-            override the global-constant defaults for THIS fit. Any field it
-            lacks falls back to the global default.
+        config: the instrument's InstrumentConfig — required. Its knobs
+            (burn-in, print floor, discount grid, lookback windows) and its
+            ``forecast_horizon``, the one h, are read from it directly.
+
+        exchange: the target's exchange (``data.calendars.resolve_exchange``);
+            its local date decides whether the newest row is a session still
+            forming (``data.calendars.session_today``).
+
+        epoch / fingerprint: the analysis epoch and the prepared history's
+            fingerprint (``data.prep``), stored on the engine as provenance.
         """
-        if config is not None:
-            self.burn_in = int(getattr(config, "fvo_burn_in", self.burn_in))
-            self.min_prints = int(getattr(config, "fvo_min_prints", self.min_prints))
-            self.valuation_deltas = tuple(
-                getattr(config, "fvo_valuation_deltas", self.valuation_deltas))
-            self.lookback_windows = tuple(
-                getattr(config, "fvo_lookback_windows", self.lookback_windows))
-            self.horizon = int(getattr(config, "forecast_horizon", self.horizon))
+        self.burn_in = int(config.fvo_burn_in)
+        self.min_prints = int(config.fvo_min_prints)
+        self.valuation_deltas = tuple(config.fvo_valuation_deltas)
+        self.lookback_windows = tuple(config.fvo_lookback_windows)
+        self.horizon = int(config.forecast_horizon)
+        self._exchange = str(exchange or "")
+        self.epoch = pd.Timestamp(epoch) if epoch is not None else None
+        self.fingerprint = str(fingerprint or "")
 
         target_px = pd.Series(target_px).astype(float)
         expl_px = pd.DataFrame(expl_px).astype(float)
@@ -296,6 +312,11 @@ class MulaEngine:
         self._compute_block_impacts()
         self._compute_ou_diagnostics()
 
+        r = self._last_published_row()
+        self.asof = (pd.Timestamp(self._row_index[r])
+                     if r is not None and isinstance(self._row_index, pd.DatetimeIndex)
+                     else None)
+
         if progress_callback:
             progress_callback(1.0, "Done")
 
@@ -320,7 +341,8 @@ class MulaEngine:
         number the engine had declined to publish. The last valuation the
         engine DID publish is returned instead, flagged so the reader can say
         it is not today's: ``asof_row_withheld`` and ``withheld_reason``
-        describe the newest row, ``published_row`` locates the one returned.
+        describe the newest row, ``asof`` is the returned row's date (d*) and
+        ``provisional`` says whether that row is a session still forming.
         """
         r = self._last_published_row()
         if r is None:
@@ -343,6 +365,7 @@ class MulaEngine:
                 "w_valuation": float("nan"), "w_momentum": float("nan"),
                 "w_full": float("nan"), "asof_row_withheld": True,
                 "withheld_reason": "no valuation published", "published_row": None,
+                "asof": None, "provisional": False,
             }
 
         row = self.ts_data.iloc[r]
@@ -408,6 +431,8 @@ class MulaEngine:
             "asof_row_withheld": bool(withheld),
             "withheld_reason": str(last.get("WithheldReason", "")) if withheld else "",
             "published_row": r,
+            "asof": self.asof,
+            "provisional": bool(row.get("Provisional", False)),
         }
 
     def get_model_stats(self) -> dict:
@@ -591,7 +616,11 @@ class MulaEngine:
         self.ts_data = pd.DataFrame({
             # `Actual` is the observed price level, `FairValue` the level the
             # cross-section implies, `Residual` the log gap between them.
+            # `Price` is the same level under the name the grader, the analog
+            # matcher and the pages key off — published here, by the engine,
+            # rather than written onto its output by the orchestrator.
             "Actual": self.price,
+            "Price": self.price,
             "FairValue": self.predictions,
             "Residual": self.residuals,
             "ModelSpread": self.model_spread,
@@ -704,7 +733,8 @@ class MulaEngine:
         # not become a historical precedent that today gets matched against, so
         # holidays stay Valid=False AND unpublished, exactly as before. Today's
         # forming row is published, flagged `Provisional`, and still excluded
-        # from all of the above.
+        # from all of the above — the error-correction read included: it is
+        # READ from the state at the last Valid row, never absorbed.
         publish = valid_row
         # Pre-gate validity: a row can be withheld because no lookback z-score
         # is finite yet (warm-up) OR because the panel was too thin (the gate
@@ -741,12 +771,10 @@ class MulaEngine:
             # completeness gate.
             forming = np.zeros(len(valid_row), dtype=bool)
             _ix = getattr(self, "_row_index", None)
-            if len(forming) and _ix is not None and len(_ix) == len(forming):
-                try:
-                    _last = pd.Timestamp(_ix[-1]).normalize()
-                    forming[-1] = _last >= pd.Timestamp.today().normalize()
-                except (TypeError, ValueError):
-                    pass                        # non-dated index: never forming
+            if len(forming) and isinstance(_ix, pd.DatetimeIndex) and len(_ix) == len(forming):
+                from data.calendars import session_today
+                forming[-1] = (pd.Timestamp(_ix[-1]).normalize()
+                               >= session_today(getattr(self, "_exchange", "")))
             publish = valid_row & (complete | forming)
             valid_row = valid_row & complete
 
@@ -914,13 +942,16 @@ class MulaEngine:
     def _compute_error_correction(self, series: pd.DataFrame) -> None:
         """Run the price-side ECM read (``ecm.MulaLayer``) over the published gap.
 
-        The layer is stepped ONLY on sessions that carry a valuation (``Valid``
-        or today's ``Provisional`` row). A withheld holiday has a carried price
-        (Δp = 0) and a gap fitted on a tenth of the panel; regressing one on
-        the other would teach the ECM that price ignores the gap exactly on the
-        days the gap is least real. A skipped session simply does not happen
-        from the regression's point of view: the next published session's
-        Δp and lagged regressors are taken against the previous PUBLISHED one.
+        The layer absorbs ONLY trusted (``Valid``) sessions. A withheld holiday
+        has a carried price (Δp = 0) and a gap fitted on a tenth of the panel;
+        regressing one on the other would teach the ECM that price ignores the
+        gap exactly on the days the gap is least real. A skipped session simply
+        does not happen from the regression's point of view: the next absorbed
+        session's Δp and lagged regressors are taken against the previous
+        absorbed one. Today's ``Provisional`` row is published but not learned
+        from: its read comes from the layer's state as of the last Valid row
+        (``MulaLayer.read``), with its own gap used only for the projection —
+        so the live κ̂ is estimated on the population the graded history is.
 
         Publishes MulaKappa / MulaRevProb / MulaHalfLife / MulaDriftPct /
         MulaSdPct / WValuation / WMomentum / WFull, and from them:
@@ -941,13 +972,18 @@ class MulaEngine:
             y = np.asarray(self.y, dtype=np.float64)
             z = pd.to_numeric(self.ts_data["Residual"], errors="coerce").to_numpy(dtype=np.float64)
             phi = pd.to_numeric(series["gap_phi"], errors="coerce").to_numpy(dtype=np.float64)
-            absorb = (self.ts_data["Valid"].to_numpy(dtype=bool)
-                      | self.ts_data["Provisional"].to_numpy(dtype=bool))
+            absorb = self.ts_data["Valid"].to_numpy(dtype=bool)
+            provisional = self.ts_data["Provisional"].to_numpy(dtype=bool)
             layer = MulaLayer(horizon=self.horizon)
             last = prev = None            # newest / second-newest absorbed rows
             last_dp = np.nan
             for t in range(n):
-                if not (absorb[t] and np.isfinite(y[t]) and np.isfinite(z[t])):
+                finite = np.isfinite(y[t]) and np.isfinite(z[t])
+                if provisional[t] and finite and last is not None:
+                    dz_lag = (z[last] - z[prev]) if prev is not None else np.nan
+                    layer.read(z[last], dz_lag, last_dp, z[t], phi[t])
+                    continue
+                if not (absorb[t] and finite):
                     layer.skip()
                     continue
                 if last is None:

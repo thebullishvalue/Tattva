@@ -19,9 +19,17 @@ Each external call is wrapped with:
      frame says so (``attrs["source"] == "stale-snapshot"``).
 
 What the shared model matrix CONTAINS is decided by configuration, never by a
-session: it is the macro universe plus ``core.config.CATALOGUE_TARGETS``, the
-catalogue frozen at import. Free-form stock symbols a user types are fetched one
-at a time (``fetch_stock_target_series``) and never enter this frame.
+session: it is the macro universe plus the yfinance-sourced members of
+``core.config.CATALOGUE_TARGETS``, the catalogue frozen at import. Two kinds of
+series are fetched one at a time and never enter this frame: free-form stock
+symbols a user types (``fetch_stock_target_series``) and the Google-Sheet series
+(``fetch_sheet_series``). Each is joined to a run's private copy of the panel,
+as that run's TARGET only. A sheet column in the shared frame was a predictor of
+every other target while the sheet answered and vanished when it did not, so a
+Sheets outage rewrote everyone's history.
+
+Every fetch takes its start explicitly. The app passes
+``core.config.ANALYSIS_EPOCH``, so the window does not roll with the run date.
 
 Macro data is sourced from Sanket's Global Macro bond-ETF universe via yfinance
 (replaces the broken Stooq direct-yield endpoints, which started returning HTML
@@ -46,6 +54,7 @@ from core.config import (
     CATALOGUE_TARGETS,
 )
 from data.cache import ohlcv_cache, macro_cache
+from data.sheets import fetch_sheet_series  # noqa: F401 — re-exported: the app's one fetch surface
 from data.circuit_breaker import (
     yfinance_circuit,
     CircuitBreakerError,
@@ -625,13 +634,14 @@ def fetch_commodity_dataset(
     ``GLOBAL_MACRO_MAP`` (bond/rates/equity/risk/real-asset ETFs) +
     ``MACRO_SYMBOLS_YF`` (commodities + FX) universe, renames yfinance tickers
     to friendly names (Gold / Silver / Copper / US 10-Year Yield / VIX / …),
-    adds the catalogue targets the batch does not carry, and exposes the
-    DatetimeIndex as a ``DATE`` column. Both engines read this one frame.
+    adds the yfinance catalogue targets the batch does not carry, and exposes
+    the DatetimeIndex as a ``DATE`` column. Both engines read this one frame.
+    Sheet series are NOT in it (see the module docstring).
 
     ``force=True`` re-pulls live for this call (a user Refresh): the macro
-    batch, the catalogue-target OHLCV and the sheet series each skip their
-    fresh-cache read once. Nothing else is affected — the next ordinary call is
-    a cache hit on what this one fetched.
+    batch and the catalogue-target OHLCV each skip their fresh-cache read
+    once. Nothing else is affected — the next ordinary call is a cache hit on
+    what this one fetched.
 
     ``df.attrs`` carries what the frame cannot show in its cells:
       * ``source``           — "live" / "cache" / "stale-snapshot" (the macro batch)
@@ -659,12 +669,11 @@ def fetch_commodity_dataset(
     _backfilled = {ticker_to_name.get(t, t): d for t, d in _backfilled.items()}
 
     # Drop columns yfinance returned empty / near-empty: failed or delisted
-    # tickers (e.g. a renamed ETF) come back as all-NaN. Such a column survives the
-    # app's causal ffill() still all-NaN and would wipe every row at the subsequent
-    # dropna() step. Require ≥20% real coverage; always retain the target columns
-    # regardless (so they stay selectable). NOTE: a retained-but-sparse TARGET
-    # still reaches the predictor set when it is not the active target — the app's
-    # per-feature history guard drops it there.
+    # tickers (e.g. a renamed ETF) come back as all-NaN and carry nothing a
+    # cross-section can use. Require ≥20% real coverage; always retain the target
+    # columns regardless (so they stay selectable). A retained-but-sparse TARGET
+    # can still be another target's predictor: the engine's print floor
+    # (FVO_MIN_PRINTS) keeps it out until it has the history to be estimated.
     coverage = renamed.notna().mean()
     keep = [c for c in renamed.columns if coverage[c] >= 0.20]
     for tgt in CATALOGUE_TARGETS:  # always retain every catalogue target column
@@ -683,22 +692,6 @@ def fetch_commodity_dataset(
     # dropped it). Equities/commodities don't trade weekends, so these rows are pure
     # artifacts — remove them so the latest row is always a real trading day.
     df = df[df.index.dayofweek < 5]
-
-    # Inject exogenous (non-yfinance) target columns — e.g. Jeera (NCDEX cumin)
-    # from a published Google Sheet. Each is reindexed onto the macro (US-
-    # calendar) index and forward-filled so the NCDEX series aligns to the model
-    # matrix; leading dates with no prior price stay NaN and are dropped by the
-    # app's per-target dropna. A fetch failure simply omits the column (the
-    # target then can't be selected) rather than breaking the whole dataset.
-    #
-    # DELIBERATE: the macro index is the calendar SPINE. A sheet date the macro
-    # lacks (an NSE-trading day that's a US holiday) is dropped by the reindex —
-    # measured at ~4 days / 6y for the Nifty PE sheet (negligible). The alternative
-    # (union the sheet's dates in) would re-create partial rows — India fresh, US
-    # ff-filled — i.e. the very thing the partial-session gate flags. So the spine
-    # stays; true per-market alignment would need exchange calendars (future work).
-    for _name, _series in _fetch_exogenous_targets(df.index, force=force).items():
-        df[_name] = _series
 
     # Catalogue targets that are yfinance symbols but NOT members of the macro
     # universe. A target arrives above only if it is also a PREDICTOR — true of
@@ -794,9 +787,9 @@ def _fetch_catalogue_targets(
 ) -> dict[str, pd.Series]:
     """Price columns for catalogue targets the macro universe does not carry.
 
-    Aligned to the macro index and forward-filled, exactly as the exogenous
-    (sheet) targets are — same spine, same treatment, so a target's column
-    means the same thing regardless of which map it came from. A ticker that
+    Aligned to the macro index and forward-filled, exactly as a joined stock or
+    sheet target is — same spine, same treatment, so a target's column means
+    the same thing regardless of which map it came from. A ticker that
     fails to fetch is simply omitted, leaving the existing "target column
     missing" guard to report it, rather than breaking the whole dataset.
 
@@ -829,24 +822,6 @@ def _fetch_catalogue_targets(
         ser.index = pd.DatetimeIndex(ser.index).normalize()
         ser = ser[~ser.index.duplicated(keep="last")]
         out[_name] = ser.reindex(index).ffill()
-    return out
-
-
-def _fetch_exogenous_targets(index: pd.Index, force: bool = False) -> dict[str, pd.Series]:
-    """Fetch non-yfinance target series and align them to the macro ``index``.
-
-    Returns a ``{column_name: aligned_series}`` map. Resilient: any source that
-    fails (live and cache both unavailable) is skipped.
-    """
-    out: dict[str, pd.Series] = {}
-    from data.sheets import SHEET_SOURCES, fetch_sheet_series
-    for _name in SHEET_SOURCES:
-        try:
-            s = fetch_sheet_series(_name, index.min(), index.max(), force=force)
-            if s is not None and not s.empty:
-                out[_name] = s.reindex(index).ffill()
-        except Exception as e:  # noqa: BLE001
-            log.warning("Exogenous %s fetch skipped: %s", _name, e)
     return out
 
 

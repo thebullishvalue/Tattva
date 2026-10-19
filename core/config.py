@@ -8,11 +8,15 @@ The engine-tuning constants below are the DEFAULTS of the per-instrument config
 registry: `InstrumentConfig` (routing + every Mūla / Swayam / DDM /
 convergence knob) → `CLASS_CONFIG_DEFAULTS` (per asset class) → `INSTRUMENT_CONFIGS`
 (one explicit entry per catalogue target). The five catalogue classes (commodity,
-fx, india_index, us_index, etf) are tuned PER INSTRUMENT via `PER_INSTRUMENT_TUNING`
+fx, crypto, india_index, us_index) are tuned PER INSTRUMENT via `PER_INSTRUMENT_TUNING`
 / `_PER_INSTRUMENT_OVERRIDES`; India/US stocks are tuned at ASSET level via
 `STOCK_CONFIGS`. `get_instrument_config(target)` is the single read path (no silent
-global fallback). See the InstrumentConfig section lower in this file.
+global fallback). See the InstrumentConfig section lower in this file. What each
+target IS (ticker, asset class, currency, tradeable, twins) lives in
+`core.instruments`, which is built from the maps below.
 """
+
+import pandas as pd
 
 # ─── Version / Product ───────────────────────────────────────────────────────
 
@@ -71,7 +75,20 @@ FVO_MIN_PRINTS = 250
 FVO_VALUATION_DELTAS = (0.999, 0.9995, 0.9999, 1.0)
 
 OU_PROJECTION_DAYS = 90
+# A TARGET-history precondition, nothing more: a run needs this many sessions
+# of the target's own prints on the prepared spine (data.prep.prepare_panel
+# raises below it). It no longer decides which predictors survive — young
+# instruments enter the cross-section through FVO_MIN_PRINTS instead.
 MIN_DATA_POINTS = 1500
+
+# STRUCTURAL — the first session of the analysis history, fixed for every
+# target, every fetch and every run. It is the first weekday of 2017, the
+# calendar year in which 2.8.0's nine-year window (run date − 9y) began; it was
+# fixed before any IC was computed on it and is never tuned. The published
+# history starts at max(ANALYSIS_EPOCH, the target's first print), so it does
+# not roll forward with the run date. Changing it rewrites every published
+# value: that is a versioned history rewrite, never a tweak.
+ANALYSIS_EPOCH = pd.Timestamp("2017-01-02")
 
 # Evaluation horizons. FORECAST_HORIZON is no longer a label horizon the engine
 # is trained on (nothing is): it is the holding period the convergence layer,
@@ -83,8 +100,8 @@ FORECAST_HORIZON = 10       # scoring / display horizon (trading days)
 # the walk-forward edge of every engine — is scored at FORECAST_HORIZON.
 HOLD_HORIZONS = (5, 10)
 
-# Trailing window for the PRECEDENT analog matcher's state features (momentum,
-# realized vol, and — at 3x this — the rolling Hurst) in analytics.analogs.
+# Trailing window for the PRECEDENT analog matcher's state features (momentum
+# and realized vol) in analytics.analogs.
 # Validated by the `precedent_univ` study, which sweeps it against the horizon.
 # This was formerly FORECAST_MOMENTUM and did double duty as the removed
 # forecast engine's predictor-momentum window; the two uses were never the same
@@ -116,10 +133,6 @@ CONVICTION_MODERATE = 57.0
 
 # Staleness (in TRADING days behind — weekends ignored).
 STALENESS_DAYS = 3
-# Session completeness floor: the latest row is a "real" session only if ≥ this
-# fraction of inputs posted NATIVELY (changed vs the prior row). Full sessions run
-# ~0.95+, partial/weekend rows ~0.03–0.3, so 0.6 separates them.
-SESSION_FRESH_FLOOR = 0.6
 
 # Timeframe filter mapping (trading days)
 TIMEFRAME_TRADING_DAYS = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504}
@@ -249,7 +262,6 @@ GLOBAL_MACRO_MAP = {
     "KOSPI":                             "^KS11",
     "KOSDAQ":                            "^KQ11",
     # ── India Fixed Income ─────────────────────────────────────────────────
-    "India Gov Bonds (LSE Proxy)":       "IIND.L",
     "India 8-13Y G-Sec":                 "LTGILTBEES.NS",
     "India 5Y G-Sec":                    "GILT5YBEES.NS",
     "India AAA PSU Bond (Bharat 2030)":  "EBBETF0430.NS",
@@ -285,6 +297,12 @@ GLOBAL_MACRO_MAP = {
     "Brazil Equity (Commodity)":         "EWZ",
     "Australia Equity (Commodity)":      "EWA",
     "India Equity":                      "INDA",
+    # An MSCI India EQUITY ETF listed in London (USD), not a bond fund: 16-17%
+    # annualised vol, 10d corr 0.87 with INDA and 0.83 with Nifty 50, 0.18 with
+    # India 8-13Y G-Sec. The display name is a historical mislabel kept as the
+    # panel's column key; core.instruments files it under Equity and it is
+    # excluded wherever INDA is (_INDIA_INDEX_ETFS, the USD/INR twins).
+    "India Gov Bonds (LSE Proxy)":       "IIND.L",
     # ── Sectors: Materials / Energy / Industrials / Financials ─────────────
     "US Materials Sector":               "XLB",
     "Metals & Mining (XME)":             "XME",
@@ -437,10 +455,12 @@ MACRO_SYMBOLS_YF = {
     "Cocoa": "CC=F",
     "Soybean Oil": "ZL=F"}
 
-# ─── Commodity Targets & Baskets ─────────────────────────────────────────────
-# User-selectable Mūla targets. Each maps to a yfinance front-month future
-# (already present in MACRO_SYMBOLS_YF). The Mūla predictor pool is the rest
-# of MACRO_SYMBOLS_YF (commodities + FX) with the selected target excluded.
+# ─── Commodity, FX and crypto targets ────────────────────────────────────────
+# User-selectable targets outside the index catalogue, each with its yfinance
+# ticker (a sentinel for the sheet-sourced Jeera). The Mūla predictor pool is
+# NOT built from this map: it is the registered universe of the whole shared
+# panel (core.instruments.predictor_universe) minus RAW_YIELD_PREDICTORS, the
+# sheet series, the target, its TARGET_EXCLUDED_PREDICTORS and its twins.
 
 COMMODITY_TARGETS = {
     "Gold": "GC=F",
@@ -472,10 +492,11 @@ COMMODITY_TARGETS = {
     "Cardano": "ADA-USD",
     "Dogecoin": "DOGE-USD",
     # Jeera (NCDEX cumin) is NOT a yfinance symbol — its daily price is pulled
-    # from a published Google Sheet (data/sheets.py) and injected as a column in
-    # the Mūla matrix. The value here is a non-yfinance sentinel ticker: it
-    # documents the source and is deliberately kept OUT of MACRO_SYMBOLS_YF /
-    # GLOBAL_MACRO_MAP so it is never sent to yf.download.
+    # from a published Google Sheet (data/sheets.py) and joined as the TARGET
+    # column only when Jeera is the target; it is never a predictor. The value
+    # here is a non-yfinance sentinel ticker: it documents the source and is
+    # deliberately kept OUT of MACRO_SYMBOLS_YF / GLOBAL_MACRO_MAP so it is
+    # never sent to yf.download.
     "Jeera": "JEERA.NCDEX"}
 
 # ─── Target metadata ─────────────────────────────────────────────────────────
@@ -541,17 +562,18 @@ TARGET_EXCLUDED_PREDICTORS = {
               "Commodity Index (GSG)", "US Energy Sector",
               "RBOB Gasoline", "Heating Oil"]}
 
-# ─── Index targets (equity indices: India sectoral/broad, US, sector-ETF) ─────
-# The Mūla target is the index price; the Swayam basket is the index's own
-# constituents (resolved live + cached in data/universe.py). Their price tickers
-# are merged into the fetched universe so the index level is an available column.
+# ─── Index targets (equity indices: India broad/sectoral, US benchmarks) ──────
+# The Mūla target is the index price level, and Swayam reads breadth off that
+# same series (its own OHLCV) — there is no constituent basket. The index
+# tickers are merged into the fetched universe so each level is a column.
 from data.universe import INDEX_TARGETS, INDEX_TARGETS_MAP  # noqa: E402
 
 # Equity-index ETFs already in the macro pool that would replicate an index
-# target (so they are excluded from that target's predictor set).
+# target (so they are excluded from that target's predictor set). IIND.L is the
+# London-listed twin of INDA (see GLOBAL_MACRO_MAP), so it goes wherever INDA does.
 _US_INDEX_ETFS = ["US Large Cap (S&P 500)", "US Nasdaq 100",
                   "US Small Cap (Russell 2000)", "Global Equity (ACWI)"]
-_INDIA_INDEX_ETFS = ["India Equity"]
+_INDIA_INDEX_ETFS = ["India Equity", "India Gov Bonds (LSE Proxy)"]
 
 # The US equity complex: every US-listed equity ETF in the panel — broad,
 # sector, style and thematic. A US INDEX is a weighted sum of exactly these
@@ -600,12 +622,14 @@ TARGET_CATEGORIES: dict[str, list[str]] = {
 for _name, _meta in INDEX_TARGETS.items():
     TARGET_CATEGORIES.setdefault(_meta["category"], []).append(_name)
 
-# ─── Sheet-sourced targets (non-yfinance; injected via fetcher exogenous path) ─
+# ─── Sheet-sourced targets (non-yfinance; joined as the target column only) ───
 # Daily series pulled from a published Google Sheet (data/sheets.py SHEET_SOURCES,
-# keyed by the same name) and injected into the model matrix exactly like Jeera.
-# Registered here so they appear in the sidebar under their chosen category, with a
-# sentinel ticker kept OUT of the yfinance maps.
-# (Jeera predates this registry and stays in COMMODITY_TARGETS.)
+# keyed by the same name) and joined to a run's private copy of the panel when
+# selected, exactly like Jeera — never injected into the shared matrix, so a
+# Sheets outage cannot change any other target's panel. Registered here so they
+# appear in the sidebar under their chosen category, with a sentinel ticker kept
+# OUT of the yfinance maps. (Jeera predates this registry and stays in
+# COMMODITY_TARGETS.)
 SHEET_TARGETS: dict[str, dict] = {
     "Nifty 50 - PE": {"ticker": "NIFTY50_PE.SHEET", "category": "India Indices"}}
 for _sname, _smeta in SHEET_TARGETS.items():
@@ -614,8 +638,10 @@ for _sname, _smeta in SHEET_TARGETS.items():
     # Don't let sibling India equity indices / the India ETF "explain" the PE.
     TARGET_EXCLUDED_PREDICTORS.setdefault(_sname, list(_INDEX_NAMES) + _INDIA_INDEX_ETFS)
 
-#: The catalogue, frozen at import: every target that is a column of the shared
-#: model matrix. ALL_TARGETS itself grows at runtime (register_stock_target adds
+#: The catalogue, frozen at import: every selectable catalogue target. The
+#: yfinance-sourced ones are columns of the shared model matrix; the sheet
+#: series are joined per run as the target only. ALL_TARGETS itself grows at
+#: runtime (register_stock_target adds
 #: each free-form symbol a user types), and anything that iterates it to decide
 #: what to FETCH would then pull one user's symbol into every later user's
 #: panel — where it became a predictor of Gold, moved every published fair
@@ -624,15 +650,11 @@ for _sname, _smeta in SHEET_TARGETS.items():
 CATALOGUE_TARGETS: dict[str, str] = dict(ALL_TARGETS)
 
 # ─── Stock targets (individual equities) ─────────────────────────────────────
-# The Mūla target is the stock's own price; breadth is Swayam on that price —
-# Swayam formulates breadth on the stock's own OHLCV
-# (engines/swayam/) instead.
-#
-# STOCK_TARGETS stays EMPTY — individual stocks are entered as free-form symbols
-# (India/US Stocks asset classes), resolved live via resolve_stock_symbol (NSE .NS
-# then BSE .BO for India; bare for US) and registered at runtime by
-# register_stock_target(). The dict stays for any future pinned default stock.
-STOCK_TARGETS: dict[str, dict] = {}
+# The Mūla target is the stock's own price; breadth is Swayam on that stock's
+# own OHLCV (engines/swayam/). Individual stocks are entered as free-form
+# symbols (India/US Stocks asset classes), resolved live via
+# resolve_stock_symbol (NSE .NS then BSE .BO for India; bare for US) and
+# registered at runtime by register_stock_target().
 
 # category label → market key. The Asset Class selector renders these as a
 # free-form "Symbol" text input (app.py) instead of the usual Target
@@ -665,15 +687,14 @@ def register_stock_target(display_name: str, ticker: str, market: str) -> None:
 
     Idempotent — safe to call on every Streamlit rerun (module-level config
     dicts survive reruns within a process but the registration must be
-    replayed from st.session_state on each one; see app.py). Applies the
-    same wiring the old static STOCK_TARGETS loop used: ALL_TARGETS,
-    and the market-based Mūla predictor
-    exclusions (own-market index targets + broad ETFs — the same guard that
-    feeds the Swayam MMR leakage filter via TARGET_EXCLUDED_PREDICTORS,
-    see swayam_macro_columns above). Also installs the instrument's own
-    InstrumentConfig, cloned from the market's STOCK_CONFIGS asset-class config
-    with its market-based exclusions. Does NOT append to TARGET_CATEGORIES —
-    freeform categories render a text input, not a list.
+    replayed from st.session_state on each one; see app.py). Wires
+    ALL_TARGETS and the market-based Mūla predictor exclusions (own-market
+    index targets + broad ETFs — the same guard that feeds the Swayam MMR
+    leakage filter via TARGET_EXCLUDED_PREDICTORS, see swayam_macro_columns
+    below). Also installs the instrument's own InstrumentConfig, cloned from
+    the market's STOCK_CONFIGS asset-class config with its market-based
+    exclusions, and its core.instruments entry. Does NOT append to
+    TARGET_CATEGORIES — freeform categories render a text input, not a list.
     """
     ALL_TARGETS[display_name] = ticker
     STOCK_TARGET_MARKETS[display_name] = market
@@ -685,6 +706,9 @@ def register_stock_target(display_name: str, ticker: str, market: str) -> None:
         STOCK_CONFIGS.get(market, CLASS_CONFIG_DEFAULTS["stock_us"]),
         excluded_predictors=tuple(excl),
     ))
+    # Local import: core.instruments is built FROM this module.
+    from core.instruments import register_stock_instrument
+    register_stock_instrument(display_name, ticker, market)
 
 # ─── Swayam (self-referential ensemble) ───────────────────────────────
 # Timescale axis (log-spaced) + the ROC fraction that derives each member's
@@ -698,14 +722,13 @@ SWAYAM_ROC_FRAC = 0.85                  # swayam 2026-07-21 class-level best (|I
 
 
 def swayam_macro_columns(target: str, macro_cols: list[str]) -> list[str]:
-    """Macro candidates for self-mode MMR: drop the target's own column and
+    """Macro candidates for Swayam's MMR: drop the target's own column and
     its TARGET_EXCLUDED_PREDICTORS near-replicas.
 
-    In basket mode a constituent correlating with the target's own macro
-    column is harmless (|r|<1, a different instrument). In self mode it is
-    fatal: the member's Close correlates ~1.0 with the target's own macro
-    column, MMR's top-N driver selection locks onto it, predicted ≈ actual,
-    deviation ≈ 0, and the MMR half of every macro-anchored member dies
+    Every Swayam view reads the target's own price, so a driver that IS the
+    target is fatal: the view's Close correlates ~1.0 with the target's own
+    macro column, MMR's top-N driver selection locks onto it, predicted ≈
+    actual, deviation ≈ 0, and the MMR half of every macro-anchored view dies
     silently while mmr_quality reads perfect. This reuses the same
     self-explanation guard TARGET_EXCLUDED_PREDICTORS already applies to
     Mūla, applied here to the MMR driver pool instead.
@@ -774,6 +797,8 @@ class InstrumentConfig:
     swayam_overbought: float = SWAYAM_OVERBOUGHT
 
     # ── Scoring / display horizons ──────────────────────────────────────────
+    # THE horizon h of the estimand: resolved once per run from this field and
+    # passed explicitly everywhere (no default, no fallback downstream).
     forecast_horizon: int = FORECAST_HORIZON
     hold_horizons: tuple[int, ...] = HOLD_HORIZONS
     analog_mom_window: int = ANALOG_MOM_WINDOW   # precedent state-feature window
@@ -841,6 +866,17 @@ class InstrumentConfig:
     # with one shared warm-up prior each. Seven other display fields went with
     # the cards and markers that read them.)
 
+    def __post_init__(self) -> None:
+        """The horizon is THE estimand's h, so a config that cannot carry it
+        fails at construction — including every clone register_stock_target
+        makes — rather than somewhere downstream that would substitute another."""
+        h = self.forecast_horizon
+        assert isinstance(h, int) and not isinstance(h, bool), (
+            f"forecast_horizon must be an int, got {h!r}")
+        assert h >= 1, f"forecast_horizon must be >= 1, got {h}"
+        assert h in self.precedent_horizons, (
+            f"forecast_horizon {h} is not in precedent_horizons {self.precedent_horizons}")
+
     def weights_seed(self) -> dict[str, float]:
         """Prior dimension weights — the CrossValidator's first pass and the learner's start."""
         return {
@@ -854,17 +890,16 @@ class InstrumentConfig:
 # Per-asset-class DEFAULT tuning. Each class is a NAMED constant so an entire class
 # can be retuned in one place (e.g. give all commodities a different Swayam grid)
 # without editing every member. The India-index default IS the Nifty 50 baseline —
-# the other India indices copy it (per spec). Values below are the `per_asset`
-# 2026-07-21 class-level bests for the classes it owns (us_index/etf MSF, stock Swayam
-# grids). commodity/fx inherit the global defaults; the self-mode STOCK grids are
-# PINNED to per_asset's stock recommendation so they do NOT drift with the global
-# SWAYAM_* globals (which the `swayam` study tunes on commodities).
+# the other India indices copy it (per spec). The only non-default values below are
+# the `per_asset` 2026-07-21 STOCK Swayam grids; commodity / fx / crypto / index
+# classes inherit the global defaults. The stock grids are PINNED to per_asset's
+# stock recommendation so they do NOT drift with the global SWAYAM_* globals (which
+# the `swayam` study tunes on commodities).
 CLASS_CONFIG_DEFAULTS: dict[str, InstrumentConfig] = {
     "commodity":   InstrumentConfig(),
     "fx":          InstrumentConfig(),
     "india_index": InstrumentConfig(),   # == Nifty 50 baseline tuning
     "us_index":    InstrumentConfig(),
-    # per_asset 2026-07-21 (asset-level, pooled Nifty100 / Nasdaq100 universes):
     # Crypto starts on the global default: it has not been through a tuning
     # sweep, and a hand-picked knob would be a guess wearing a number. A swept
     # value belongs in the per-instrument registry once one exists.

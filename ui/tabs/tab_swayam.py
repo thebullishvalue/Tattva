@@ -40,7 +40,7 @@ from ui.components import (render_kpi_strip, render_section_header, render_empty
                            render_chart_panel, render_table_panel, render_edge_panel,
                            window_cutoff)
 from core.config import (
-    get_instrument_config, InstrumentConfig,
+    get_instrument_config,
     UI_CHART_HEIGHT_MEDIUM,
     UI_CHART_HEIGHT_LARGE,
 )
@@ -81,10 +81,7 @@ def _avg_tier(full: pd.DataFrame) -> float:
     with the same tier, so the two pages cannot call one value bullish and
     neutral at once (the Swayam page used to hard-code ±2).
     """
-    try:
-        prior = get_instrument_config(st.session_state.get("active_target", "")).ui_swayam_avg_threshold
-    except KeyError:
-        prior = InstrumentConfig().ui_swayam_avg_threshold
+    prior = get_instrument_config(st.session_state.get("active_target", "")).ui_swayam_avg_threshold
     if full is None or "Avg_Signal" not in getattr(full, "columns", ()):
         return float(prior)
     return tier_now(pd.to_numeric(full["Avg_Signal"], errors="coerce").to_numpy(dtype=float),

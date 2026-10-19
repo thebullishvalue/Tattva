@@ -63,6 +63,12 @@ Each family is a discounted-DLM bank over a grid of memories, so coefficients
 are time-varying with data-selected adaptation and every one-step predictive
 is Student-t. All regressors are dated t-1; everything published at t uses
 data through t and nothing later.
+
+Only TRUSTED sessions are absorbed (``step``). A provisional session — today's,
+still filling — is never learned from: ``read`` publishes its value from the
+state as of the last absorbed session, with its own gap used only to project
+the move. The live κ̂ and MRProb are therefore estimated on the same population
+the graded history was.
 """
 
 from __future__ import annotations
@@ -134,7 +140,7 @@ def gap_closure_sum(phi_z: float, horizon: int) -> float:
 class MulaLayer:
     """Causal ECM + expert-pooling read on an existing equilibrium gap."""
 
-    def __init__(self, horizon: int = 10, grid: tuple = _ECM_GRID) -> None:
+    def __init__(self, horizon: int, grid: tuple = _ECM_GRID) -> None:
         self.h = max(int(horizon), 1)
         g = tuple(float(x) for x in grid)
         self.val = DynamicModelAverage(k=2, grid=g)    # {1, z_lag}
@@ -210,7 +216,37 @@ class MulaLayer:
         if self.n < WARMUP:
             self.skip()
             return
+        self._publish(preds, vars_, w, sz, sp, z_now, phi_z)
 
+    def read(self, z_lag: float, dz_lag: float, r_lag: float,
+             z_now: float, phi_z: float) -> None:
+        """Publish a session WITHOUT absorbing it — the provisional read.
+
+        Same arguments as :meth:`step` less the outcome: the one-step
+        predictive is taken from the state as of the last absorbed session, the
+        pool weights and κ̂ are that state's, and ``z_now`` only sets where the
+        h-session projection starts. Nothing is updated, so a forming session
+        can never become part of the history the read is estimated on.
+        """
+        if (not all(np.isfinite(v) for v in (z_lag, r_lag))
+                or self._sd_p.n < _SCALE_WARMUP or self.n < WARMUP):
+            self.skip()
+            return
+        sz = max(self._sd_z.mean, _SCALE_FLOOR)
+        sr = max(self._sd_r.mean, _SCALE_FLOOR)
+        sp = max(self._sd_p.mean, _SCALE_FLOOR)
+        dzs = (dz_lag / sz) if np.isfinite(dz_lag) else 0.0
+        preds, vars_ = np.empty(3), np.empty(3)
+        for i, (fam, f) in enumerate((
+                (self.val, np.array([1.0, z_lag / sz])),
+                (self.mom, np.array([1.0, r_lag / sr])),
+                (self.full, np.array([1.0, z_lag / sz, dzs, r_lag / sr])))):
+            preds[i], vars_[i] = fam.forecast(f)
+        self._publish(preds, vars_, _softmax_pool(self.ll), sz, sp, z_now, phi_z)
+
+    def _publish(self, preds: np.ndarray, vars_: np.ndarray, w: np.ndarray,
+                 sz: float, sp: float, z_now: float, phi_z: float) -> None:
+        """Append one session's read from the layer's current coefficients."""
         # ── the price-side response, in log-price units ──────────────────
         b_std = float(self.val.coef[1])
         b_var = float(self.val.coef_var[1])

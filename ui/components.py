@@ -820,12 +820,6 @@ def render_interpretation_card(
     )
 
 
-# (``render_nishkarsh_signal_card`` lived here. It was a thin wrapper that
-# called build_hero_verdict with a signature three rewrites out of date, had no
-# callers anywhere in the app, and would have raised TypeError if one had
-# appeared.)
-
-
 # ── Data-table styling tokens ──────────────────────────────────────────
 # render_data_table renders into an isolated components.v1.html iframe, which
 # does NOT inherit the app's CSS variables — so the theme values it needs are
@@ -880,113 +874,34 @@ _TABLE_FONTS = ("https://fonts.googleapis.com/css2?"
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  HERO VERDICT — the conviction chain
+#  THE CALL — the hero, its grade and its chain
 # ═══════════════════════════════════════════════════════════════════════
 #
-# The system does not produce a "signal" that evidence then votes on. It makes
-# ONE claim and attaches a series of conditions to it, every one of which can
-# independently invalidate it:
-#
-#   the asset is mispriced            (Mūla oscillator — the claim)
-#   ...price, not fair value, closes it  (Mūla ECM: price-side reversion)
-#   ...the whole world agrees on it   (Mūla blocks: cross-sectional consistency)
-#   ...its own internals confirm it   (Swayam net breadth — the convergence)
-#   ...this call has paid before      (the claim's own walk-forward IC)
-#   ...and it paid last time too      (precedent base rate)
-#
-# Every gate answers a question no other gate answers. That is a requirement,
-# not a nicety: conviction is their PRODUCT, so a piece of evidence that sits
-# in two gates is counted twice. The chain used to carry seven, and three of
-# them re-counted each other — Mūla/Swayam agreement sat in the breadth gate,
-# the agreement ratio and the normalized consensus (itself half Mūla), and the
-# reversion gate's detail printed the ECM gate's number. Six questions, each
-# asked once.
-#
-# So conviction is a PRODUCT of gates in [0, 1], not a sum of votes. That
-# distinction is the entire design, and it matters for two reasons.
-#
-# A product cannot be rescued by piling on agreement: three enthusiastic
-# confirmations and one broken precondition is not "3 - 1 = act smaller", it is
-# "the precondition is broken". Additive scoring said the former.
-#
-# And a product has a MINIMUM. Whichever gate is smallest is the binding
-# constraint — the single specific reason conviction is not higher, which is
-# the most useful sentence a card of this kind can produce and which no amount
-# of vote-tallying can express. The card leads with it.
-#
-# Direction comes from Mūla alone. It is the only component that makes a
-# directional claim about the world ("this is cheap relative to the traded
-# opportunity set"); breadth, reversion evidence and historical skill are all
-# statements ABOUT that claim, not rival claims of their own.
-#
-# The words follow the arithmetic. A cheap reading that the gates do not
-# support is a HOLD with the reason attached, never a BUY sitting beside
-# "stand aside" — the card used to print exactly that, and the largest word on
-# the page contradicted the decision under it.
+# Everything here formats ONE object, the verdict (core.call.verdict_from_row
+# on call_ts at d*): nothing is computed, thresholded or re-derived, so the
+# card, the command bar and the rail cannot disagree. The card reads top-down
+# as the decision itself: the action and the sentence that explains it, then
+# what limits it; how the call has done on the sessions it was issued; then
+# the chain that produced it, in decision order, ending in the size's
+# arithmetic. The size is a unitless index and is never printed as a '%'.
 
-from core.semantics import (CLAIM_SIGMA as _CLAIM_SIGMA,  # noqa: E402
-                            DEEP_SIGMA as _DEEP_SIGMA, claim_direction as _claim_direction)
+from core.call import edge_periods, format_size  # noqa: E402
+from core.knobs import knob as _knob  # noqa: E402
+from core.semantics import edge_tier as _t_tier  # noqa: E402
 
 
-def _gate(value: float, lo: float, hi: float) -> float:
-    """Map a raw reading onto [0, 1] with a soft floor and ceiling.
+def edge_tier(edge) -> tuple[str, str]:
+    """The label of a grade — one scale, from ``core.semantics.edge_tier``.
 
-    ``lo`` is where the gate is fully shut, ``hi`` where it is fully open;
-    between them it opens linearly. Never returns exactly 0 — a shut gate
-    should collapse conviction, not erase the reading and its explanation
-    with it.
+    Given a grade dict (``series_edge``'s), its ``(label, tone)`` on the
+    grade's own t: |t| < 1 is never an edge, and a grade measured against a
+    lean leaves it neutral. Given a bare IC (a float, or None) — the System
+    page's engine table, until it is rebuilt — the older ``(tier, chip)`` on
+    the IC's own scale.
     """
-    if value is None or not np.isfinite(value):
-        return 0.5
-    if hi == lo:
-        return 1.0
-    return float(np.clip((value - lo) / (hi - lo), 0.02, 1.0))
-
-
-#: What a gate reads when its evidence is ABSENT (no Swayam row, too few
-#: effective analogs): uninformative, neither opening nor shutting the chain.
-#: The one exception is an UNVALIDATED edge — a call with no scored history
-#: is discounted, because "never measured" is not the same as "measured at
-#: zero" but is not evidence of skill either.
-_GATE_ABSENT = 0.5
-_GATE_UNVALIDATED = 0.25
-
-#: Conviction tiers. Products of SIX gates concentrate hard toward zero, so
-#: these are not evenly spaced: 0.30 already requires every gate to average
-#: ~0.82, and 0.15 requires ~0.73.
-_TIERS = (
-    (0.30, "high", "HIGH CONVICTION", "act on it"),
-    (0.15, "moderate", "MODERATE CONVICTION", "act at reduced size"),
-    (0.06, "low", "LOW CONVICTION", "starter size at most"),
-    (0.00, "standaside", "STAND ASIDE", "the evidence does not support acting"),
-)
-
-#: The signal word per tier, so the word and the action cannot disagree.
-_TIER_WORD = {"high": "STRONG {}", "moderate": "{}", "low": "LEAN {}", "standaside": "HOLD"}
-
-#: Display names for the gates, in chain order.
-GATE_TITLES = {
-    "mispricing": "Mispricing", "reversion": "Reversion", "cross_section": "Cross-section",
-    "convergence": "Convergence", "edge": "Edge", "precedent": "Precedent",
-}
-
-
-def edge_periods(edge: dict | None) -> tuple[int, int]:
-    """``(positive, scored)`` periods of an edge read.
-
-    The denominator is the periods that had enough calls to score
-    (``scored_blocks``), not every period drawn: a short history leaves its
-    first blocks unscored, and dividing by all of them understated durability.
-    """
-    e = edge or {}
-    blocks = [b for b in (e.get("blocks") or [])
-              if b.get("ic") is not None and np.isfinite(b.get("ic"))]
-    scored = int(e.get("scored_blocks", len(blocks)) or 0)
-    return int(e.get("positive_blocks", 0) or 0), scored
-
-
-def edge_tier(ic: float | None) -> tuple[str, str]:
-    """``(tier, chip)`` for a walk-forward IC — the one scale every page uses."""
+    if isinstance(edge, dict):
+        return _t_tier(edge.get("t"))
+    ic = edge
     if ic is None or not np.isfinite(ic):
         return "uncalibrated", "NO READ"
     if ic >= 0.10:
@@ -998,326 +913,104 @@ def edge_tier(ic: float | None) -> tuple[str, str]:
     return "no_edge", "NO EDGE"
 
 
-def _f(d: dict | None, key: str, default=None):
-    """A finite float from a dict, else ``default``."""
-    try:
-        v = float((d or {}).get(key))
-    except (TypeError, ValueError):
-        return default
-    return v if np.isfinite(v) else default
+#: Card class per action: only an issued call is coloured as a direction.
+_ACTION_CLASS = {"BUY": "buy", "SELL": "sell"}
 
 
-def build_hero_verdict(
-    *,
-    mula: dict,
-    swayam_breadth: dict | None,
-    agreement: float | None,
-    edge: dict | None,
-    precedent: dict | None,
-    n_divergences: int,
-    horizon_days: int,
-    div_window: int | None = None,
-    min_precedent_n: int = 8,
-) -> dict:
-    """Build the hero verdict from the conviction chain. Pure data in/out.
+def _render_call_grade(cg: dict, horizon: int) -> None:
+    """The GRADE→call strip: the call graded on the sessions it was issued."""
+    def pct(v):
+        return f"{v * 100:+.2f}%" if v is not None else "—"
 
-    ``mula`` is ``MulaEngine.get_current_signal()``; ``edge`` is the claim's
-    own walk-forward read (``convergence.intelligence.series_edge`` on the
-    oscillator's lean); ``precedent`` the hero's base-rate summary.
-
-    Returns ``{signal, signal_class, direction, conviction, headline, limit,
-    binding, gates, risk, caveat, trust, action, horizon_days, valuation}``
-    where ``gates`` is the ordered chain (each ``{name, title, value, label,
-    detail}``) and ``binding`` names the smallest one. Rendering is separate
-    (``render_hero_card``) so these rules stay unit-testable — see
-    tests/test_hero_verdict.py.
-    """
-    h = int(horizon_days)
-    # ── The claim: Mūla's standardized mispricing ───────────────────────
-    fvo = _f(mula, "fvo")
-    pct = (_f(mula, "pct_mispricing", 0.0) or 0.0) * 100.0
-    dir_ = _claim_direction(fvo)
-    direction = "bullish" if dir_ > 0 else "bearish" if dir_ < 0 else "neutral"
-    verb = "cheap" if dir_ > 0 else "rich" if dir_ < 0 else "fairly valued"
-    side = "below" if pct < 0 else "above"
-
-    gates: list[dict] = []
-
-    def _add(name, value, label, detail):
-        gates.append({"name": name, "title": GATE_TITLES[name], "value": float(value),
-                      "label": label, "detail": detail})
-
-    # ── 1. Is it mispriced at all? ──────────────────────────────────────
-    if fvo is None:
-        _add("mispricing", 0.02, "no valuation",
-             "Mūla has published no valuation yet for this instrument.")
-    elif dir_ == 0:
-        _add("mispricing", _gate(abs(fvo), _CLAIM_SIGMA, _DEEP_SIGMA), "within noise",
-             f"{abs(pct):.1f}% {side} fair value, {fvo:+.2f}σ — inside the normal "
-             f"day-to-day noise of price around fair value (±{_CLAIM_SIGMA:.1f}σ).")
-    else:
-        _add("mispricing", _gate(abs(fvo), _CLAIM_SIGMA, _DEEP_SIGMA), f"{abs(fvo):.2f}σ {verb}",
-             f"{abs(pct):.1f}% {side} the level the macro cross-section implies "
-             f"({fvo:+.2f}σ; fully open at {_DEEP_SIGMA:.0f}σ).")
-
-    # ── 2. Does PRICE close the gap? ────────────────────────────────────
-    # The gap is stationary on every instrument tested, but mostly because
-    # fair value moves toward price, not the other way: a gap that closes that
-    # way is not a trade. The ECM regresses the price change itself on the
-    # lagged gap, so this gate asks the question the trade depends on.
-    rev = _f(mula, "mr_prob")
-    w_led = (_f(mula, "w_valuation", 0.0) or 0.0) + (_f(mula, "w_full", 0.0) or 0.0)
-    kappa = _f(mula, "mula_kappa")
-    hl = _f(mula, "mula_half_life")
-    drift = _f(mula, "expected_drift_pct")
-    dsd = _f(mula, "drift_sd_pct")
-    if rev is None:
-        _add("reversion", _GATE_ABSENT, "no ECM read",
-             "The error-correction layer has not accumulated enough history to read.")
-    else:
-        # The gate is the price-side reversion probability itself. The pool
-        # weight is reported beside it but does not move the gate: measured on
-        # synthetic gaps it separated "price closes the gap" from "fair value
-        # closes it" only weakly (0.82 vs 0.66), where P(κ̂ > 0) separates
-        # them cleanly.
-        g_rev = _gate(rev, 0.5, 0.9)
-        label = ("price reverts" if rev >= 0.8 else
-                 "price does not revert" if rev < 0.55 else "weak reversion")
-        bits = []
-        if kappa is not None:
-            bits.append(f"price-side κ̂ {kappa:+.4f}/d"
-                        + (f" (half-life {hl:.0f}d)" if hl is not None and hl < 2000 else ""))
-        bits.append(f"P(price reverts) {rev:.0%}")
-        bits.append(f"valuation-led forecasts carry {w_led:.0%} of predictive weight")
-        if drift is not None:
-            bits.append(f"expected {h}-d move {drift:+.2f}%"
-                        + (f" ± {dsd:.2f}%" if dsd is not None else ""))
-        _add("reversion", g_rev, label, "; ".join(bits) + ".")
-
-    # ── 3. Does the whole cross-section agree? ──────────────────────────
-    xs = _f(mula, "xs_consistency")
-    if xs is None:
-        _add("cross_section", _GATE_ABSENT, "no cross-section read",
-             "No leave-one-block-out consistency is available for this session.")
-    else:
-        _add("cross_section", _gate(xs, 0.3, 0.9),
-             ("no claim to confirm" if dir_ == 0 else
-              "the world agrees" if xs >= 0.75 else
-              "the world is split" if xs >= 0.5 else "the world disagrees"),
-             f"Independent slices of the cross-section (each asset-class block left "
-             f"out in turn) agree on the gap's sign: consistency {xs:.2f}.")
-
-    # ── 4. Do the instrument's own internals confirm it? ────────────────
-    if swayam_breadth:
-        os_ = float(swayam_breadth.get("oversold_pct", 0.0) or 0.0)
-        ob_ = float(swayam_breadth.get("overbought_pct", 0.0) or 0.0)
-        net = (os_ - ob_) / 100.0
-        aligned = net * dir_ if dir_ else abs(net)
-        agree_txt = (f" Across direction, breadth, magnitude and regime the engines agree "
-                     f"{agreement:.0%}." if agreement is not None and np.isfinite(agreement) else "")
-        _add("convergence", _gate(aligned, -0.3, 0.4),
-             ("no claim to confirm" if dir_ == 0 else
-              "Swayam confirms" if aligned > 0.1 else
-              "Swayam contradicts" if aligned < -0.1 else "Swayam split"),
-             f"Swayam net breadth {net:+.0%} ({os_:.0f}% of views oversold, "
-             f"{ob_:.0f}% overbought).{agree_txt}")
-    else:
-        _add("convergence", _GATE_ABSENT, "no Swayam read",
-             "Swayam produced no breadth for this target's latest session.")
-
-    # ── 5. Has this call paid, out of sample? ───────────────────────────
-    ic = _f(edge, "ic")
-    if ic is None:
-        _add("edge", _GATE_UNVALIDATED, "unvalidated",
-             "Not enough scored history for a walk-forward read of the call.")
-    else:
-        se = _f(edge, "se")
-        n = int((edge or {}).get("n", 0) or 0)
-        pos, nb = edge_periods(edge)
-        _add("edge", _gate(ic, -0.02, 0.15),
-             ("edge holds" if ic > 0.05 else "edge marginal" if ic > 0 else "no measured edge"),
-             f"Mūla's call has a non-overlapping {h}-d IC of {ic:+.3f}"
-             + (f" (± {se:.3f})" if se is not None else "")
-             + (f" over {n} calls" if n else "")
-             + (f"; {pos} of {nb} periods positive." if nb else "."))
-
-    # ── 6. Did it pay the last times this state occurred? ───────────────
-    p_n = _f(precedent, "n_eff", 0.0) or 0.0
-    p_pos = _f(precedent, "positive_pct")
-    p_h = int((precedent or {}).get("horizon", h) or h)
-    usable = bool((precedent or {}).get("usable", True))
-    if precedent and usable and p_n >= min_precedent_n and p_pos is not None:
-        p_bull = p_pos / 100.0
-        agree = p_bull if dir_ > 0 else 1.0 - p_bull if dir_ < 0 else 0.5
-        if dir_ == 0:
-            label = "no claim to test"
-        else:
-            label = ("precedent agrees" if agree > 0.55 else
-                     "precedent disagrees" if agree < 0.45 else "precedent split")
-        _raw = int((precedent or {}).get("n", 0) or 0)
-        _add("precedent", _gate(agree, 0.35, 0.65), label,
-             f"{p_pos:.0f}% of the closest analogs rose over the next {p_h}d "
-             f"(≈{p_n:.0f} effective of {_raw} distinct episodes; median "
-             f"{(_f(precedent, 'median', 0.0) or 0.0):+.2f}%).")
-    else:
-        why = str((precedent or {}).get("note") or "").strip()
-        _add("precedent", _GATE_ABSENT, "no usable precedent",
-             (why + " " if why else "")
-             + f"≈{p_n:.0f} effective analogs (need {min_precedent_n}) — too few to read as a base rate.")
-
-    # ── Conviction: the product, and the constraint that binds it ──────
-    conviction = float(np.prod([g["value"] for g in gates]))
-    binding = min(gates, key=lambda g: g["value"])
-
-    level, label, prose = _TIERS[-1][1:]
-    for cut, lvl, lab, pr in _TIERS:
-        if conviction >= cut:
-            level, label, prose = lvl, lab, pr
-            break
-    if dir_ == 0:
-        level, label, prose = "noclaim", "NO CLAIM", "fairly valued — nothing to act on"
-
-    word = "BUY" if dir_ > 0 else "SELL"
-    signal = _TIER_WORD.get(level, "HOLD").format(word) if dir_ else "HOLD"
-    acting = signal != "HOLD"
-
-    if fvo is None:
-        headline = "HOLD — no valuation has been published for this instrument yet."
-    elif dir_ == 0:
-        headline = (f"HOLD — {abs(pct):.1f}% {side} fair value, within the normal "
-                    f"noise of price around it.")
-    elif acting:
-        headline = (f"{signal} — {abs(pct):.1f}% {verb} versus the level the macro "
-                    f"cross-section implies.")
-    else:
-        headline = (f"HOLD — {abs(pct):.1f}% {verb} versus the cross-section, but the "
-                    f"evidence does not support acting on it.")
-
-    # The single most useful sentence the card produces: what is holding it back.
-    if dir_ == 0:
-        limit = "No directional claim: the gap is inside the normal noise around fair value."
-    elif binding["value"] >= 0.75:
-        limit = "Nothing is materially limiting this — every condition holds."
-    else:
-        limit = f"Capped by {binding['title'].lower()}: {binding['detail']}"
-
-    # ── Standing flags, outside the chain ──────────────────────────────
-    risk = None
-    if n_divergences > 0:
-        risk = (f"{n_divergences} Mūla/Swayam divergence event"
-                f"{'s' if n_divergences != 1 else ''}"
-                + (f" in the last {div_window} sessions." if div_window else "."))
-    caveat = None
-    if (mula or {}).get("asof_row_withheld"):
-        reason = str((mula or {}).get("withheld_reason") or "withheld")
-        caveat = (f"The latest session was not valued ({reason}); every reading above is "
-                  f"from the last session that was.")
-
-    tier, chip = edge_tier(ic)
-    trust = {"tier": tier, "chip": chip, "oos_ic": ic, "se": _f(edge, "se"),
-             "n": int((edge or {}).get("n", 0) or 0),
-             "positive_blocks": edge_periods(edge)[0],
-             "n_blocks": edge_periods(edge)[1]}
-
-    return {
-        "signal": signal,
-        "signal_class": ("buy" if acting and dir_ > 0 else
-                         "sell" if acting and dir_ < 0 else "hold"),
-        "direction": direction,
-        "valuation": {"fvo": fvo, "pct": pct, "verb": verb, "side": side,
-                      "state": (mula or {}).get("valuation_state")},
-        "conviction": conviction if dir_ else None,
-        "headline": headline,
-        "binding": binding["name"] if dir_ and binding["value"] < 0.75 else None,
-        "limit": limit,
-        "gates": gates,
-        "risk": risk,
-        "caveat": caveat,
-        "trust": trust,
-        "action": {"level": level, "label": label, "prose": prose},
-        "horizon_days": h,
-    }
-
-
-def format_conviction(verdict: dict) -> str:
-    """Conviction as the card and the KPI strip both print it."""
-    c = verdict.get("conviction")
-    return "—" if c is None else f"{c:.0%}"
+    ip, hp = cg.get("issued_payoff"), cg.get("held_payoff")
+    warm = _knob("GRADE_WARMUP_WIN")
+    prospective = cg.get("prospective") or {}
+    pooled = cg.get("pooled") or "no pooled class grade"
+    if cg.get("graded") and None not in (cg.get("ic"), cg.get("se"), cg.get("t")):
+        value, sub = f"{cg['ic']:+.3f}", f"± {cg['se']:.3f} · t {cg['t']:.2f} · {cg['label']}"
+    elif cg.get("n_win", 0) < warm:
+        value = "not yet graded"
+        sub = f"{cg.get('n_win', 0)} of {warm} independent issued windows · {pooled}"
+    else:                                            # warmed up, but nothing to rank
+        value, sub = "ungraded", f"{cg.get('status', 'ungraded')} · {pooled}"
+    render_kpi_strip([
+        {"label": "Call grade · as issued", "value": value, "subtext": sub,
+         "color_class": "neutral"},
+        {"label": "Coverage", "value": f"{cg.get('issued_n', 0)} of {cg.get('claim_n', 0)}",
+         "subtext": "claim sessions on which a call was issued", "color_class": "neutral"},
+        {"label": "Hit vs base",
+         "value": (f"{cg['hit']:.0f}% vs {cg['base']:.0f}%"
+                   if cg.get("hit") is not None and cg.get("base") is not None else "—"),
+         "subtext": "issued calls, against the side-matched no-skill rate", "color_class": "neutral"},
+        {"label": "Issued vs held",
+         "value": f"{pct((ip or {}).get('mean'))} / {pct((hp or {}).get('mean'))}",
+         "subtext": (f"drift-neutral {horizon}D claim payoff · n/h "
+                     f"{(ip or {}).get('n_win', 0)} / {(hp or {}).get('n_win', 0)}"),
+         "color_class": "neutral"},
+        {"label": "Prospective record", "value": f"{prospective.get('n_win', 0)} windows",
+         "subtext": prospective.get("status", ""), "color_class": "neutral"},
+    ], max_cols=5, key="call-grade")
 
 
 def render_hero_card(verdict: dict) -> None:
-    """Render the verdict: claim, what limits it, then the chain behind both.
+    """The call, its grade and its chain — Overview's first three blocks.
 
-    The layout follows the logic rather than decorating it. A reader who stops
-    after two lines has the decision (signal + conviction) and the single
-    reason it is not stronger; a reader who continues gets every gate with the
-    number behind it.
+    1. The CALL: the action word, the size beside it (when a call is issued),
+       the headline, what limits it, and any caveat on d*.
+    2. GRADE→call: the call graded on the sessions it was issued.
+    3. The chain: one row per role in decision order — claim, preconditions,
+       trust, each sizer, size — each with its reading, its grade and its
+       effect, ending in the size's arithmetic.
     """
-    trust = verdict["trust"]
-    # Theme-aware: every colour here is a CSS var, not a literal hex, so the
-    # trust chip repaints correctly under the light theme too.
-    chip_style = {
-        "uncalibrated": ("var(--ink-tertiary)", "var(--surface-2)"),
-        "no_edge":      ("var(--short)", "var(--short-fill)"),
-        "marginal":     ("var(--caution)", "var(--caution-fill)"),
-        "modest":       ("var(--long)", "var(--long-fill)"),
-        "solid":        ("var(--long)", "color-mix(in srgb, var(--long) 18%, transparent)"),
-    }.get(trust["tier"], ("var(--ink-tertiary)", "var(--surface-2)"))
-    ic_text = (f"walk-forward IC {trust['oos_ic']:+.3f}" if trust.get("oos_ic") is not None
-               else "no walk-forward read")
-    if trust.get("n_blocks"):
-        ic_text += f" &bull; {trust.get('positive_blocks', 0)}/{trust['n_blocks']} periods +"
-
-    action = verdict["action"]
-    tier_color = {"high": "var(--long)", "moderate": "var(--caution)",
-                  "low": "var(--ink-secondary)", "standaside": "var(--ink-tertiary)",
-                  "noclaim": "var(--ink-tertiary)"}.get(action["level"], "var(--ink-tertiary)")
-
-    # ── Gate chain: one row each, bar width = how open the gate is ──────
-    # Bar colour thresholds sit on the same 0.75 line the binding constraint
-    # uses, so a gate drawn green can never be the one named as binding.
-    binding = verdict.get("binding")
-    gate_rows = "".join(
-        f'<div class="hero-gate{" binding" if g["name"] == binding else ""}">'
-        f'<span class="hero-gate-name">{html_mod.escape(g["title"])}</span>'
-        f'<span class="hero-gate-bar"><i style="width:{max(2, round(g["value"] * 100))}%;'
-        f'background:{"var(--short)" if g["value"] < 0.35 else "var(--caution)" if g["value"] < 0.75 else "var(--long)"};">'
-        f'</i></span>'
-        f'<span class="hero-gate-label">{html_mod.escape(g["label"])}</span>'
-        f'<span class="hero-gate-detail">{html_mod.escape(g["detail"])}</span>'
-        f'</div>'
-        for g in verdict["gates"]
-    )
-
-    flags = "".join(
-        f'<div class="hero-risk">{html_mod.escape(t)}</div>'
-        for t in (verdict.get("caveat"), verdict.get("risk")) if t
-    )
-    conv_txt = format_conviction(verdict)
-
+    esc = html_mod.escape
+    act, h = verdict["action"], int(verdict["horizon_days"])
+    cls = _ACTION_CLASS.get(act, "hold")
+    size_txt = f"size {format_size(verdict['size'])}"
+    formula = verdict["size_formula"] if verdict["direction"] else "no claim to size"
+    asof = verdict.get("asof")
+    when = f"as of {asof:%d %b %Y}" if asof is not None else "no published session"
+    caveat = (f'<div class="hero-risk">{esc(verdict["caveat"])}</div>'
+              if verdict.get("caveat") else "")
     st.markdown(
-        f"""\
-<div class="hero-card {html_mod.escape(verdict["signal_class"])}">
+        f"""<div class="hero-card {cls}">
   <div class="hero-top">
     <div class="hero-signal-block">
-      <div class="hero-eyebrow">Tattva &bull; {verdict["horizon_days"]}-day call</div>
-      <div class="hero-signal">{html_mod.escape(verdict["signal"])}</div>
+      <div class="hero-eyebrow">Tattva &bull; {h}-session call from the next close</div>
+      <div class="hero-signal">{esc(verdict["word"])}</div>
     </div>
     <div class="hero-conviction-block">
-      <span class="hero-chip" style="background:{chip_style[1]};color:{chip_style[0]};">\
-{html_mod.escape(trust["chip"])} &bull; {ic_text}</span>
-      <div class="hero-conviction" style="color:{tier_color};">\
-{html_mod.escape(action["label"])}{f" &middot; {conv_txt}" if verdict.get("conviction") is not None else ""}</div>
-      <div class="hero-conviction-sub">{html_mod.escape(action["prose"])}</div>
+      <span class="hero-chip">{esc(when)}</span>
+      <div class="hero-conviction">{esc(size_txt)}</div>
+      <div class="hero-conviction-sub">{esc(formula)}</div>
     </div>
   </div>
-  <div class="hero-headline">{html_mod.escape(verdict["headline"])}</div>
-  <div class="hero-limit">{html_mod.escape(verdict["limit"])}</div>
-  <div class="hero-gates">{gate_rows}</div>
-  {flags}
-  <div class="hero-foot">Conviction is the product of the six gates above &mdash; the weakest caps it.</div>
+  <div class="hero-headline">{esc(verdict["headline"])}</div>
+  <div class="hero-limit">{esc(verdict["limit"])}</div>
+  {caveat}
 </div>
 """,
+        unsafe_allow_html=True,
+    )
+
+    _render_call_grade(verdict["call_grade"], h)
+
+    binding = f"sizer:{verdict['binding']}" if verdict.get("binding") else None
+    rows = "".join(
+        f'<div class="hero-gate{" binding" if r["key"] == binding else ""}">'
+        f'<span class="hero-gate-name">{esc(r["role"])}</span>'
+        f'<span></span>'
+        f'<span class="hero-gate-label">{esc(r["title"])} &middot; {esc(r["reading"])}</span>'
+        f'<span class="hero-gate-detail">{esc(r["effect"])}'
+        + (f' &middot; {esc(r["grade"])}' if r["grade"] else "")
+        + f' &middot; {esc(r["detail"])}</span>'
+        f'</div>'
+        for r in verdict["chain"]
+    )
+    st.markdown(
+        f'<div class="hero-card {cls}"><div class="hero-eyebrow">The chain &bull; in decision '
+        f'order</div><div class="hero-gates">{rows}</div>'
+        f'<div class="hero-foot">{esc(verdict["size_formula"])} &mdash; trust is the claim&rsquo;s '
+        f'earned base size; a sizer is &times;1.00 until its own grade earns a weight.</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -1330,7 +1023,7 @@ def render_hero_card(verdict: dict) -> None:
 # engine leaned one way, did the instrument move that way over the horizon?
 # The number is the rank IC of the engine's bullish-positive lean against the
 # h-day forward return, sampled every h sessions so no two scored windows
-# overlap (convergence.intelligence.series_edge). One function computes it and
+# overlap (core.grade.series_edge). One function computes it and
 # one component draws it, so "edge" cannot mean four things on four pages.
 
 def edge_summary_text(edge: dict | None, what: str) -> str:
@@ -1362,18 +1055,17 @@ def render_edge_panel(edge: dict | None, key: str, *, what: str, show_chart: boo
             eyebrow="Edge",
         )
         return
-    tier, chip = edge_tier(ic)
+    label, tone = edge_tier(edge)
     se = edge.get("se")
     # Only scored periods are drawn: an unscored one has no IC, and drawing it
     # as an empty bar in the negative colour read as a bad period.
     blocks = [b for b in (edge.get("blocks") or [])
               if b.get("ic") is not None and np.isfinite(b.get("ic"))]
     pos, n_scored = edge_periods(edge)
-    tone = {"solid": "success", "modest": "success", "marginal": "warning",
-            "no_edge": "danger"}.get(tier, "neutral")
     render_kpi_strip([
         {"label": "Walk-Forward IC", "value": f"{ic:+.3f}",
-         "subtext": f"{chip} · ± {se:.3f} (1 SE)" if se is not None and np.isfinite(se) else chip,
+         "subtext": (f"{label} · ± {se:.3f} (1 SE)" if se is not None and np.isfinite(se)
+                     else label),
          "color_class": tone,
          "tooltip": ("Rank correlation of the lean with the forward return over the "
                      "horizon, scored on non-overlapping windows. 0 = no skill; the SE "

@@ -56,7 +56,7 @@ TOOLTIPS = {
 #: The engines graded on the System page, in reading order: key in the
 #: ``edges`` session dict → (display name, what is graded).
 _EDGE_ROWS = (
-    ("mula", "Mūla", "the valuation call (oscillator lean)"),
+    ("claim", "Mūla", "the claim (its sign, on claim sessions)"),
     ("swayam", "Swayam", "net breadth (oversold − overbought)"),
     ("composite", "Convergence", "the learned weighted composite"),
 )

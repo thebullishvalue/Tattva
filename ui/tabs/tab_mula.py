@@ -202,7 +202,7 @@ def _render_read(signal: dict, ts: pd.DataFrame, edge: dict | None, horizon: int
                          "danger" if drift is not None and drift < 0 else "neutral"),
          "tooltip": TOOLTIPS["drift"]},
         {"label": "Walk-Forward IC", "value": f"{ic:+.3f}" if ic is not None else "—",
-         "subtext": f"Mūla's call, non-overlapping {horizon}d" if ic is not None else "not yet graded",
+         "subtext": f"the claim's sign, claim sessions, {horizon}d from the next close" if ic is not None else "not yet graded",
          "color_class": ("success" if ic is not None and ic >= 0.05 else
                          "warning" if ic is not None and ic > 0 else
                          "danger" if ic is not None else "neutral")},
@@ -615,7 +615,7 @@ def render_mula_tab(engine, ts_filtered, x_axis, signal, model_stats, ts, active
         f"{horizon} sessions? Scored on non-overlapping windows, period by period.",
         icon="trending", accent="violet",
     )
-    render_edge_panel(edge, "mula", what="Mūla's call")
+    render_edge_panel(edge, "mula", what="the claim")
 
     render_section_header(
         "What Drives Fair Value",

@@ -6,8 +6,10 @@ UI — the record behind every page, in the units every page shows it in: the
 mispricing as a percentage and in σ (never a log gap rounded to one decimal,
 which printed 0.0 on every row), model spread in basis points, the valuation
 state word, Swayam's net breadth and the convergence readings joined on the
-same date. The export is the same joined frame at full precision, so "the
-evidence, exportable" is literally true rather than true of one engine.
+same date — and the call itself at every session (``call_ts``: what was
+issued, why, and every number it was composed from). The export is the same
+joined frame at full precision, so "the evidence, exportable" is literally
+true rather than true of one engine.
 
 There is one date filter: the chart window, in the table's own header, as on
 every other page. The second "Date Range" selector that used to sit beside it
@@ -18,7 +20,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -35,8 +36,12 @@ def _by_date(frame: pd.DataFrame | None) -> pd.DataFrame:
     return f[~f.index.isna()]
 
 
+#: Header prefix of the call's own columns (call_ts) in the record.
+CALL_PREFIX = "Call · "
+
+
 def build_record(ts: pd.DataFrame) -> pd.DataFrame:
-    """The joined, full-precision record: Mūla + Swayam + Convergence per session."""
+    """The joined, full-precision record: Mūla + Swayam + Convergence + the call, per session."""
     if ts is None or ts.empty:
         return pd.DataFrame()
     m = ts.copy()
@@ -75,6 +80,11 @@ def build_record(ts: pd.DataFrame) -> pd.DataFrame:
                           ("convergence_score", "Weighted composite")):
             if src in cv.columns:
                 out[name] = cv[src].reindex(out.index)
+    # The call at every session, every column of call_ts (core.call.CALL_COLUMNS).
+    ct = _by_date(st.session_state.get("call_ts"))
+    for c in ct.columns:
+        out[CALL_PREFIX + c] = ct[c].reindex(out.index)
+
     cons = st.session_state.get("hero_series")
     if cons is not None and len(cons):
         c = cons.copy()
@@ -137,5 +147,5 @@ def render_data_tab(ts_filtered, ts, active_target):
         "Download the record (CSV)", csv_data,
         f"tattva_{active_target}_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv",
     )
-    render_note(f"Full history · {len(record):,} sessions · Mūla, Swayam and Convergence "
-                f"joined on date at full precision.")
+    render_note(f"Full history · {len(record):,} sessions · Mūla, Swayam, Convergence and the "
+                f"call joined on date at full precision.")

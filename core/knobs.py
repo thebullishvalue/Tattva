@@ -269,6 +269,12 @@ _by_ref("FVO_VALUATION_DELTAS", consumer="claim: the valuation regression's disc
 _by_ref("MIN_DATA_POINTS", consumer="infrastructure: the target-history precondition (data.prep)",
         horizon_coupling="horizon-free: sessions of the target's own prints",
         reason="a run needs this much target history; prepare_panel raises below it")
+_by_ref("ANALYSIS_EPOCH", consumer="infrastructure: every fetch start and the prepared history's "
+                                   "first session, max(epoch, the target's first print)",
+        horizon_coupling="horizon-free: a calendar date",
+        reason="the first weekday of the year in which 2.8.0's nine-year window began, fixed "
+               "before any IC was computed on it and never tuned; changing it is a versioned "
+               "history rewrite")
 
 # ════════════════════════════════════════════════════════════════════════
 # Placeholders the pooled-prior study replaces (register_measured)

@@ -6,7 +6,7 @@ cannot carry it is refused at construction.
 
 C2: every verdict input is read at d*, Mūla's as-of session. When the newest
 row's valuation is withheld but Swayam has a native row on it, the command bar
-and the verdict still read d* — not the frame's last row.
+and the verdict (call_ts at d*) still read d* — not the frame's last row.
 
 The spine: every Valid Gold row is a session GC=F printed; the CME-open US
 holidays with no Gold bar are gone. A Provisional row is read from the ECM's
@@ -18,8 +18,10 @@ import pytest
 
 import app
 from core.config import InstrumentConfig, get_instrument_config
+from core.instruments import instrument
 from data.calendars import session_mask
 from engines.mula import MulaEngine
+from pipeline.assemble import assemble
 from studies.make_fixtures import load_ohlcv, load_panel
 
 
@@ -74,18 +76,21 @@ def test_a_withheld_newest_row_reads_every_input_at_d_star():
     d_star = sig["asof"]
     assert d_star == eng.asof == dates[-2]
 
-    # Swayam and the agreement both carry a NATIVE row after d*, with values
-    # that differ from d*'s — a positional read would take them.
+    # Swayam carries a NATIVE row after d*, with values that differ from
+    # d*'s — a positional read would take it.
     sw = pd.DataFrame({"Oversold_Pct": np.linspace(10, 60, len(dates)),
                        "Overbought_Pct": np.linspace(50, 5, len(dates)),
                        "_Native": True}, index=dates)
-    cdf = pd.DataFrame({"agreement_ratio": np.linspace(0.2, 0.9, len(dates))}, index=dates)
-    verdict = app._compute_hero_verdict(sig, swayam_daily=sw, convergence_df=cdf,
-                                        divergence_events=None, edges=None,
-                                        precedent=None, horizon=10)
-    assert verdict["swayam_asof"] == d_star == verdict["agreement_asof"]
-    assert verdict["swayam_breadth"]["oversold_pct"] == sw.loc[d_star, "Oversold_Pct"]
-    assert verdict["agreement"] == cdf.loc[d_star, "agreement_ratio"]
+    fvo_ts = eng.ts_data.copy()
+    fvo_ts.index = dates
+    asm = assemble(fvo_ts, sw, instrument=instrument("Gold"), cfg=InstrumentConfig(),
+                   asof=d_star, today=dates[-1], priors=None)
+    verdict = asm.verdict
+    lean = (sw["Oversold_Pct"] - sw["Overbought_Pct"]) / 100.0
+    assert verdict["asof"] == d_star
+    assert asm.call_ts.loc[d_star, "swayam_lean"] == lean.loc[d_star] != lean.iloc[-1]
+    assert verdict["action"] == asm.call_ts.loc[d_star, "action"]
+    assert asm.call_ts.loc[dates[-1], "action"] == "NO CALL"      # the withheld row issues nothing
 
     bar = app._asof_status(sig, "GC=F", dates[-1] + pd.Timedelta(days=3))
     assert bar["as_of"] == d_star == bar["valued_as_of"]

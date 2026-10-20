@@ -1,38 +1,17 @@
-"""Every learner scores the sign the system reads; the edge grades what it says."""
+"""Every learner scores the sign the system reads. (The edge's own tests are in test_grade.py.)"""
 import numpy as np
 import pandas as pd
-from scipy.stats import spearmanr
 
 from analytics.adaptive import OnlineSkillWeights
 from convergence.cross_validator import CrossValidator
 from convergence.divergence_detector import CrossSystemDivergenceDetector
-from convergence.intelligence import DIMENSIONS, online_dimension_weights, series_edge
+from convergence.intelligence import DIMENSIONS, online_dimension_weights
 from convergence.normalization import compute_normalized_convergence
 from engines.swayam.kernel import view_skill_weights
 
 RNG = np.random.default_rng(7)
 IDX = pd.bdate_range("2017-01-02", periods=2000)
 PRICE = pd.Series(100 * np.exp(np.cumsum(RNG.normal(0, 0.01, len(IDX)))), index=IDX)
-
-
-def test_series_edge_recovers_a_planted_ic():
-    h = 10
-    fwd = np.log(PRICE).shift(-h) - np.log(PRICE)
-    z = (fwd - fwd.mean()) / fwd.std()
-    for rho in (0.0, 0.15, 0.30):
-        lean = rho * z + np.sqrt(1 - rho ** 2) * pd.Series(RNG.normal(0, 1, len(IDX)), index=IDX)
-        planted = np.mean([spearmanr(lean.iloc[o:-h:h], fwd.iloc[o:-h:h]).correlation for o in range(h)])
-        e = series_edge(lean, PRICE, h)
-        assert abs(e["ic"] - planted) < 1e-9
-        assert e["n"] == e["n_obs"] // h              # non-overlapping count
-        assert abs(e["ic"] - rho) < 3 * e["se"]
-
-
-def test_series_edge_cannot_see_the_future():
-    h = 10
-    fwd = np.log(PRICE).shift(-h) - np.log(PRICE)
-    e = series_edge(fwd.shift(h), PRICE, h)           # a lean built from the past only
-    assert abs(e["ic"]) < 3 * e["se"]
 
 
 def test_dimension_learner_scores_the_signed_contribution():

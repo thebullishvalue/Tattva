@@ -31,17 +31,12 @@ the way the two engines lean. That is what is scored now — "when this
 dimension's agreement pointed bullish, did the target go up?" — which is the
 question the module docstring always claimed to ask.
 
-THE EDGE. :func:`series_edge` is the one measurement of directional skill in
-the system, used for every engine alike: the rank IC of a bullish-positive
-lean against the realised h-day forward log return, NON-overlapping. It
-replaced ``walk_forward_ic``, which scored the unsigned agreement (no
-direction in it at all — a planted composite of IC +0.31 came back as −0.01),
-at the shortest hold horizon rather than the instrument's own, on every
-overlapping daily row. Because every lean it is given is already causal (Mūla
-is fit to no label; the dimension weights are learned forward), there is
-nothing to re-fit per window: an expanding "train, then score the next block"
-loop over a causal series is the same thing as scoring each block of the
-published series, and this does the latter directly.
+THE EDGE. :func:`series_edge` — the one measurement of directional skill in
+the system — now lives in :mod:`core.grade` and is re-exported here, call for
+call, for the pipeline's engine grades. It replaced ``walk_forward_ic``, which
+scored the unsigned agreement (no direction in it at all — a planted
+composite of IC +0.31 came back as −0.01), at the shortest hold horizon rather
+than the instrument's own, on every overlapping daily row.
 """
 
 from __future__ import annotations
@@ -50,11 +45,11 @@ import logging
 
 import numpy as np
 import pandas as pd
-from scipy.stats import rankdata
 
 from analytics.adaptive import OnlineSkillWeights
 from convergence.cross_validator import DIMENSIONS, PRIOR_WEIGHTS, normalise_weights
 from core.config import HOLD_HORIZONS
+from core.grade import _datetime_index, forward_return, series_edge
 
 log = logging.getLogger(__name__)
 
@@ -65,28 +60,6 @@ __all__ = [
     "apply_online_weights",
     "series_edge",
 ]
-
-
-def _forward_log_return(price: pd.Series, horizon: int) -> pd.Series:
-    """h-SESSION forward log return on the price's own calendar.
-
-    Computed on the price series' own index, before any alignment, so ``h``
-    always means h trading sessions of the target — never "h rows of whatever
-    frame it is later joined to", which is longer wherever that frame has gaps
-    (e.g. dates with no Swayam row).
-    """
-    p = pd.to_numeric(price, errors="coerce").astype(float)
-    p = p[~p.index.duplicated(keep="last")].sort_index()
-    lp = np.log(p.where(p > 0))
-    return lp.shift(-int(horizon)) - lp
-
-
-def _datetime_index(obj: pd.Series | pd.DataFrame) -> pd.Series | pd.DataFrame:
-    out = obj.copy()
-    out.index = pd.to_datetime(out.index, errors="coerce")
-    out = out[~out.index.isna()]
-    out.index = out.index.normalize()
-    return out[~out.index.duplicated(keep="last")].sort_index()
 
 
 def _price_series(fvo_ts: pd.DataFrame, target_col: str) -> pd.Series:
@@ -138,22 +111,8 @@ def _build_calibration_frame(
 
     out = conv.copy()
     for h in horizons:
-        out[f"Ret_{h}b"] = _forward_log_return(price, h).reindex(out.index)
+        out[f"Ret_{h}b"] = forward_return(price, h).reindex(out.index)
     return out.dropna(subset=sorted(needed))
-
-
-def _spearman_ic(x: np.ndarray, y: np.ndarray) -> float:
-    """Spearman rank correlation. Returns NaN on degenerate input."""
-    if len(x) < 5 or len(x) != len(y):
-        return float("nan")
-    rx = rankdata(x).astype(np.float64)
-    ry = rankdata(y).astype(np.float64)
-    rx -= rx.mean()
-    ry -= ry.mean()
-    denom = np.sqrt((rx * rx).sum() * (ry * ry).sum())
-    if denom < 1e-12:
-        return float("nan")
-    return float((rx * ry).sum() / denom)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -284,119 +243,3 @@ def apply_online_weights(
         out.index.name = convergence_df.index.name
     return out, W
 
-
-# ════════════════════════════════════════════════════════════════════════
-# The edge — one measurement of directional skill, for every engine
-# ════════════════════════════════════════════════════════════════════════
-
-
-#: Fewer non-overlapping observations than this in a block and its IC is
-#: reported as missing rather than as a number: eight points is already an IC
-#: standard error of ~0.4.
-MIN_BLOCK_OBS = 8
-
-
-def _offset_averaged_ic(lean: np.ndarray, fwd: np.ndarray, h: int) -> float:
-    """Mean of the h non-overlapping ICs, one per phase offset.
-
-    Sampling every h-th row makes consecutive forward windows disjoint, which
-    is what makes the observations independent and the IC's precision honest
-    (a daily-sampled IC on overlapping h-day returns overstates it by ~√h).
-    Any single offset throws away (h−1)/h of the data and depends on which
-    day the sample happens to start; averaging the h offsets uses all of it
-    and removes that arbitrariness without re-introducing the overlap inside
-    any one of them.
-    """
-    ics = []
-    for o in range(h):
-        x, y = lean[o::h], fwd[o::h]
-        if len(x) >= 5 and np.nanstd(x) > 0:
-            ic = _spearman_ic(x, y)
-            if np.isfinite(ic):
-                ics.append(ic)
-    return float(np.mean(ics)) if ics else float("nan")
-
-
-def series_edge(
-    lean: pd.Series,
-    price: pd.Series,
-    horizon: int,
-    n_blocks: int = 6,
-) -> dict:
-    """Out-of-sample directional skill of a bullish-positive lean.
-
-    ``lean`` is dated *t* and uses only data available at *t* (every lean the
-    system publishes is causal); it is scored against ``log P(t+h) − log P(t)``
-    computed on ``price``'s own session calendar. Rows where either is missing
-    are dropped. Nothing is fitted here, so every number is out-of-sample with
-    respect to everything after the date it was published.
-
-    Returns::
-
-        {"ic", "se", "t", "n", "n_obs", "horizon",
-         "hit", "base", "positive_blocks", "scored_blocks", "n_blocks",
-         "blocks": [{"start", "end", "n", "ic"}, ...]}
-
-    * ``ic`` — the offset-averaged non-overlapping Spearman IC over the whole
-      history (:func:`_offset_averaged_ic`).
-    * ``n`` — independent observations, ``n_obs // h``; ``se`` —
-      ``1/√(n−3)``, the single-offset standard error (conservative: the
-      offset average is somewhat more precise than any one offset, by an
-      amount that depends on the series' own autocorrelation); ``t = ic/se``.
-    * ``hit`` / ``base`` — directional hit rate on rows with a non-zero lean,
-      beside the rate a constant majority-direction call would have scored on
-      the same rows. A hit rate is only readable against its own null.
-    * ``blocks`` — the same IC within ``n_blocks`` consecutive stretches of
-      history: consistently positive is a durable edge, one lucky stretch is
-      not. ``positive_blocks`` counts those above zero among the
-      ``scored_blocks`` with at least :data:`MIN_BLOCK_OBS` observations.
-    """
-    h = max(1, int(horizon))
-    empty = {"ic": float("nan"), "se": float("nan"), "t": float("nan"), "n": 0,
-             "n_obs": 0, "horizon": h, "hit": float("nan"), "base": float("nan"),
-             "positive_blocks": 0, "scored_blocks": 0, "n_blocks": int(n_blocks),
-             "blocks": []}
-    if lean is None or price is None or len(lean) == 0 or len(price) == 0:
-        return empty
-
-    lean_s = _datetime_index(pd.to_numeric(pd.Series(lean), errors="coerce").astype(float))
-    fwd = _forward_log_return(_datetime_index(pd.Series(price)), h)
-    df = pd.DataFrame({"lean": lean_s, "fwd": fwd.reindex(lean_s.index)}).dropna()
-    if len(df) < 5 * h:
-        out = dict(empty)
-        out["n_obs"] = int(len(df))
-        return out
-
-    x = df["lean"].to_numpy(dtype=np.float64)
-    y = df["fwd"].to_numpy(dtype=np.float64)
-    ic = _offset_averaged_ic(x, y, h)
-    n_ind = len(df) // h
-    se = float(1.0 / np.sqrt(max(n_ind - 3, 1)))
-
-    called = x != 0
-    if called.any():
-        hit = float(np.mean(np.sign(x[called]) == np.sign(y[called])) * 100.0)
-        up = float(np.mean(y[called] > 0))
-        base = float(max(up, 1.0 - up) * 100.0)
-    else:
-        hit = base = float("nan")
-
-    blocks = []
-    for part in np.array_split(np.arange(len(df)), max(1, int(n_blocks))):
-        if not len(part):
-            continue
-        nb = len(part) // h
-        b_ic = (_offset_averaged_ic(x[part], y[part], h) if nb >= MIN_BLOCK_OBS
-                else float("nan"))
-        blocks.append({"start": df.index[part[0]], "end": df.index[part[-1]],
-                       "n": int(nb), "ic": b_ic})
-    scored = [b["ic"] for b in blocks if np.isfinite(b["ic"])]
-
-    return {
-        "ic": ic, "se": se, "t": float(ic / se) if np.isfinite(ic) else float("nan"),
-        "n": int(n_ind), "n_obs": int(len(df)), "horizon": h,
-        "hit": hit, "base": base,
-        "positive_blocks": int(sum(1 for v in scored if v > 0)),
-        "scored_blocks": int(len(scored)), "n_blocks": int(len(blocks)),
-        "blocks": blocks,
-    }

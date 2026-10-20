@@ -20,22 +20,29 @@ it. This module is the one place it is written down:
 * a **lean** is the call that reading implies, BULLISH-POSITIVE, in [-1, +1],
   and is what anything that scores direction against a forward return uses.
 
-The valuation state words (Cheap / Fair / Rich) are also defined once, here,
-so the hero, the Mūla page and the Precedent page cannot classify the same
-oscillator reading three different ways.
+The words are defined once here too: the valuation states (Cheap / Fair /
+Rich), the one Swayam word (confirms / split / contradicts) and the one grade
+label (``edge_tier``), so no two pages can word the same reading differently.
+Every cut they use is a registered knob (``core.knobs``); none is a literal.
 """
 
 from __future__ import annotations
 
 import math
 
+from core.knobs import knob
+
 #: |FVO| below this is inside the normal day-to-day noise of price around fair
-#: value: no directional claim is made. The hero's mispricing gate starts to
-#: open here.
-CLAIM_SIGMA = 0.5
-#: |FVO| at or beyond this is a deep mispricing — the gate is fully open and
-#: the state reads VERY CHEAP / VERY RICH.
-DEEP_SIGMA = 2.0
+#: value: no directional claim is made.
+CLAIM_SIGMA: float = knob("CLAIM_SIGMA")
+#: |FVO| at or beyond this is a deep mispricing — the state reads VERY CHEAP /
+#: VERY RICH and the valuation lean saturates.
+DEEP_SIGMA: float = knob("DEEP_SIGMA")
+#: Net Swayam breadth, aligned with the claim, inside ±this is a split read.
+SWAYAM_DEAD: float = knob("SWAYAM_DEAD")
+
+_T0: float = knob("STRENGTH_T0")
+_T1: float = knob("STRENGTH_T1")
 
 #: Mūla valuation states, cheapest first.
 VALUATION_STATES: tuple[str, ...] = ("VERY CHEAP", "CHEAP", "FAIR", "RICH", "VERY RICH")
@@ -125,9 +132,38 @@ def state_lean(state: str) -> int:
     return 0
 
 
-def lean_word(lean: float, dead: float = 0.1) -> str:
-    """'bullish' / 'bearish' / 'neutral' for a lean, with a dead band."""
-    v = _finite(lean)
-    if v is None or abs(v) < dead:
-        return "neutral"
-    return "bullish" if v > 0 else "bearish"
+def swayam_word(aligned) -> str:
+    """The one Swayam word for a claim-aligned net breadth (``d · Lean``).
+
+    ``'confirms'`` beyond +SWAYAM_DEAD, ``'contradicts'`` beyond −SWAYAM_DEAD,
+    ``'split'`` inside the band. A missing reading carries no information and
+    reads ``'split'``, the no-information word — never a confirmation.
+    """
+    v = _finite(aligned)
+    if v is None or abs(v) <= SWAYAM_DEAD:
+        return "split"
+    return "confirms" if v > 0 else "contradicts"
+
+
+def edge_tier(t) -> tuple[str, str]:
+    """``(label, tone)`` for a grade's t — the one label scale every page uses.
+
+    Applied to the posterior t of a role object (claim, sizer, call) and to the
+    own t of evidence. |t| < 1 is never called an edge, and a grade measured
+    AGAINST the lean leaves it neutral: nothing is ever inverted on its grade.
+    An undefined t (no SE yet) is ``'ungraded'``.
+    """
+    v = _finite(t)
+    if v is None:
+        return "ungraded", "neutral"
+    if v <= -_T0:
+        return "measured against: neutral, never inverted", "danger"
+    if v <= -1:
+        return "negative, unproven", "warning"
+    if v < 1:
+        return "no measured edge", "neutral"
+    if v < _T0:
+        return "unproven", "warning"
+    if v < _T1:
+        return "edge", "success"
+    return "solid edge", "success"

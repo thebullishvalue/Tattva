@@ -1,38 +1,32 @@
 """
 Tattva — System tab: does the machinery behind the call actually hold up?
 
-Everything here answers a question the engine pages assume the answer to. Each
-engine page grades its own lean; this page puts the grades side by side, shows
-what the convergence learner concluded from them, the statistics of the gap
-Mūla's call rests on, and whether the data layer feeding all of it is healthy.
+Everything here answers a question the engine pages assume the answer to: the
+statistics of the gap Mūla's claim rests on, and whether the data layer
+feeding all of it is healthy. Every grade lives on the Grades page.
 
 Reading order — the house convention every analysis tab follows:
 
-  1 ANSWER    does any of it work?               Walk-forward edge, every engine
-  2 TRUST     what did the learner conclude?     Learned vs prior dimension weights
-  3 STATE     is the gap a valid spread?         Gap statistics (OU · ADF · KPSS)
-  4 DETAIL    is the data sound?                 Data layer health
+  1 STATE     is the gap a valid spread?         Gap statistics (OU · ADF · KPSS)
+  2 DETAIL    is the data sound?                 Data layer health
 
 (Driver importance moved to the Mūla page, beside the valuation it explains;
-the regime chart that duplicated Swayam's went; and the "Signal Performance"
+the regime chart that duplicated Swayam's went; the "Signal Performance"
 table — a BUY/SELL event study of Mūla's window stretch, titled "walk-forward
 hit rates" though it was neither the hero's call nor walk-forward — went with
-the rival signal it graded.)
+the rival signal it graded; and the engine-edge table and the learned-weight
+charts went with the parallel opinions and the learner they described. The
+grades moved to the Grades page, where every one of them reads the issued
+call's sample.)
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
-from ui.theme import (chart_layout, style_axes,
-                      chart_color, chart_rgba, grid_rgba)
-from ui.components import (render_metric_card, render_section_header, render_chip,
-                           render_empty_state, render_chart_panel, render_table_panel,
-                           render_note, edge_tier, edge_periods)
-from core.config import UI_CHART_HEIGHT_MEDIUM
+from ui.components import render_metric_card, render_section_header, render_chip
 from data.cache import all_caches
 from data.circuit_breaker import all_circuits, CircuitState
 
@@ -53,72 +47,9 @@ TOOLTIPS = {
     ),
 }
 
-#: The engines graded on the System page, in reading order: key in the
-#: ``edges`` session dict → (display name, what is graded).
-_EDGE_ROWS = (
-    ("claim", "Mūla", "the claim (its sign, on claim sessions)"),
-    ("swayam", "Swayam", "net breadth (oversold − overbought)"),
-    ("composite", "Convergence", "the learned weighted composite"),
-)
 
-
-def _render_edges(edges: dict, horizon: int) -> None:
-    """Every engine's walk-forward edge, side by side, graded one way."""
-    rows, bars = [], []
-    for key, name, what in _EDGE_ROWS:
-        e = (edges or {}).get(key) or {}
-        ic = e.get("ic")
-        tier, chip = edge_tier(ic)
-        pos, nb = edge_periods(e)
-        rows.append({
-            "Engine": name, "Graded": what,
-            "IC": f"{ic:+.3f}" if ic is not None and np.isfinite(ic) else "—",
-            "± SE": f"{e['se']:.3f}" if e.get("se") is not None and np.isfinite(e.get("se")) else "—",
-            "Calls": int(e.get("n", 0) or 0),
-            "Periods +": f"{pos}/{nb}" if nb else "—",
-            "Read": chip,
-        })
-        for b in e.get("blocks") or []:
-            if b.get("ic") is not None and np.isfinite(b.get("ic")):
-                bars.append((name, f"{str(b.get('start'))[:7]}", b.get("ic")))
-    if not any(r["IC"] != "—" for r in rows):
-        render_empty_state(
-            "Nothing graded yet",
-            "The walk-forward edges need roughly a year of published history past each "
-            "engine's warm-up before a non-overlapping read exists.",
-            eyebrow="System",
-        )
-        return
-    render_table_panel(pd.DataFrame(rows), "system-edges", units=f"non-overlapping {horizon}d IC", windowed=False,
-                       label_col="Engine", max_height=200)
-    if bars:
-        fig = go.Figure()
-        colours = {"Mūla": "violet", "Swayam": "cyan", "Convergence": "accent"}
-        for name in dict.fromkeys(n for n, _p, _v in bars):
-            pts = [(p, v) for n, p, v in bars if n == name]
-            fig.add_trace(go.Bar(x=[p for p, _ in pts], y=[v for _, v in pts], name=name,
-                                 marker=dict(color=chart_color(colours.get(name, "slate")))))
-        fig.add_hline(y=0, line_color=grid_rgba(0.10), line_width=0.6)
-        fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM), barmode="group")
-        style_axes(fig, y_title="IC per period")
-        render_chart_panel(fig, "system-edge-blocks", units="IC per period, by engine", windowed=False)
-    render_note("A durable edge is positive in most periods, not large in one. With ~100–150 "
-                "non-overlapping calls the 1-SE band is roughly ±0.08–0.10 — read the IC "
-                "against it.")
-
-
-def render_diagnostics_tab(engine, signal, horizon: int = 10):
-    """System — edges, learner, gap statistics, data layer."""
-    render_section_header(
-        "Walk-Forward Edge — Every Engine",
-        f"Each engine's lean against the {horizon}-day forward return, on non-overlapping "
-        f"windows: the same grading every engine page shows for itself.",
-        icon="trending", accent="accent",
-    )
-    _render_edges(st.session_state.get("edges") or {}, horizon)
-
-    _render_intelligence_center()
-
+def render_diagnostics_tab(engine, signal):
+    """System — gap statistics, data layer."""
     render_section_header(
         "Gap Statistics",
         "Is Mūla's mispricing gap a valid mean-reverting spread at all? Necessary for the "
@@ -159,7 +90,7 @@ def render_diagnostics_tab(engine, signal, horizon: int = 10):
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 4. DATA LAYER HEALTH — cache hit rate + circuit breaker state per source
+    # 2. DATA LAYER HEALTH — cache hit rate + circuit breaker state per source
     # ═══════════════════════════════════════════════════════════════════════
     render_section_header(
         "Data Layer Health",
@@ -235,48 +166,3 @@ def render_diagnostics_tab(engine, signal, horizon: int = 10):
                 ),
             )
 
-
-def _render_intelligence_center() -> None:
-    """What the convergence learner concluded — weights against their prior.
-
-    Weights are learned forward from resolved outcomes, so there is no trial
-    count, no saved profile and no train-vs-val split to report: the weights
-    at any date ARE out-of-sample with respect to everything after it. What is
-    worth showing is where the learner ended up relative to its prior; whether
-    the composite it weights has paid is the Convergence row of the table
-    above.
-    """
-    render_section_header(
-        "What the Convergence Learner Concluded",
-        "Dimension weights learned forward from each dimension's own signed skill — never "
-        "refitted on history, never persisted.",
-        icon="cpu", accent="violet",
-    )
-    from convergence.intelligence import PRIOR_WEIGHTS
-
-    weights = st.session_state.get("intelligence_active_weights") or {}
-    names = [k for k in PRIOR_WEIGHTS if k in weights]
-    if not names:
-        render_empty_state(
-            "No learned weights",
-            "The learner needs enough sessions where both engines published to score its "
-            "dimensions; until then the prior weights stand.",
-            eyebrow="System",
-        )
-        return
-    learned = [float(weights[k]) for k in names]
-    prior = [float(PRIOR_WEIGHTS[k]) for k in names]
-    labels = [k.capitalize() for k in names]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=labels, y=prior, name="Prior",
-                         marker=dict(color=chart_rgba("slate", 0.45))))
-    fig.add_trace(go.Bar(x=labels, y=learned, name="Learned",
-                         marker=dict(color=chart_color("accent"))))
-    fig.update_layout(**chart_layout(height=260), barmode="group")
-    style_axes(fig, y_title="weight")
-    render_chart_panel(fig, "intel_weights_plot", units="weight today", windowed=False)
-    _moved = max((abs(l - p) for l, p in zip(learned, prior)), default=0.0)
-    _top = labels[int(np.argmax(learned))]
-    _learned = bool((st.session_state.get("intelligence_active_profile") or {}).get("learned", True))
-    render_note(f"Largest move from prior {_moved:+.3f} · heaviest dimension {_top}"
-                + ("" if _learned else " · learning skipped this run (too little overlap) — prior shown"))

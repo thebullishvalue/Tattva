@@ -513,7 +513,7 @@ def style_axes(fig, y_title: str = "", x_title: str = "", y_range=None, row=None
         # Plotly otherwise sets it from each subplot's widest tick label, so a
         # stacked figure whose rows carry different magnitudes ("0.5" vs
         # "-100") puts each row's y-title at a different x — the small
-        # misalignment down the left edge of the convergence chart.
+        # misalignment down the left edge of a stacked breadth chart.
         title_standoff=14,
         **kw,
     )
@@ -556,8 +556,8 @@ def apply_default_hover(fig, precision: int = 2) -> None:
         if getattr(tr, "hoverinfo", None) == "skip":
             continue
         # Preserve two kinds of intentional templates:
-        #  • "%{x…}" — traces that show the X value on hover (e.g. the precedent
-        #    Z-vs-forward scatter, "Z: %{x:.2f}"); those run in closest mode where
+        #  • "%{x…}" — traces that show the X value on hover (e.g. a scatter
+        #    whose hover reads "Z: %{x:.2f}"); those run in closest mode where
         #    d3 formats fine and the X is the point of the hover.
         #  • "%{customdata…}" — already pre-formatted (by us on a prior pass, so
         #    this stays idempotent across multi-row style_axes calls, or by a
@@ -637,7 +637,7 @@ RUN_PHASES = (
     (1, 0, 19, "Data Acquisition"),
     (2, 20, 41, "Mūla Engine"),
     (3, 42, 75, "Swayam Engine"),
-    (4, 76, 95, "Convergence"),
+    (4, 76, 95, "The Call"),
     (5, 96, 100, "Final Assembly"),
 )
 

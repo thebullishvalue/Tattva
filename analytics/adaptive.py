@@ -4,9 +4,9 @@ Tattva — the adaptive layer: constants replaced by causal online estimates.
 
 Every quantity this module produces used to be a hand-set number in
 ``core.config``: a classification cut-point ("STRONG BUY below −0.404"), a
-display tier ("model spread above 29.92 bps is red"), a dimension weight
-("direction counts 0.50"). Between them they carried most of the system's
-behaviour, and they had two problems that turn out to be the same problem.
+display tier ("model spread above 29.92 bps is red"). Between them they
+carried much of the system's behaviour, and they had two problems that turn
+out to be the same problem.
 
 **They had to be tuned.** Each one was anchored by a research study that swept
 it over the full history and read off a p75 or an argmax. That is a lot of
@@ -24,31 +24,23 @@ which is precisely what the Optuna calibration this module replaced was doing.
 
 The fix for both is one idea, and it is the idea the FVO valuation engine
 already runs on: **estimate, don't tune, and estimate one-sidedly.** A
-threshold becomes the causal empirical quantile of the signal's own past. A
-weight becomes the exponentially-discounted predictive skill of the thing being
-weighted, accumulated forward. Nothing is fitted to data that had not happened
-yet, so a value published on day *t* is never revised, and the same input
-prefix always produces the same output prefix — the reproducibility property
-the test suite asserts.
+threshold becomes the causal empirical quantile of the signal's own past.
+Nothing is fitted to data that had not happened yet, so a value published on
+day *t* is never revised, and the same input prefix always produces the same
+output prefix — the reproducibility property the test suite asserts.
 
-What this deliberately does NOT auto-derive: horizons (``forecast_horizon``,
-``precedent_horizons``) are product decisions about what you intend to trade,
-not statistical estimates; the FVO burn-in and print floor are estimability
+What this deliberately does NOT auto-derive: the horizon
+(``forecast_horizon``) is a product decision about what you intend to trade,
+not a statistical estimate; the FVO burn-in and print floor are estimability
 floors argued from first principles; and the view/discount *banks* stay
 declared, because a bank is a hypothesis space to average over, not a value to
 pick. The distinction throughout is between choosing a number and choosing a
-question.
-
-References
-----------
-Raftery, A. E., Kárný, M. & Ettler, P. (2010). "Online Prediction Under Model
-    Uncertainty via Dynamic Model Averaging." *Technometrics* 52(1).
-Cesa-Bianchi, N. & Lugosi, G. (2006). *Prediction, Learning, and Games.*
+question. (An online skill-weighter of view banks lived here too; its
+sign-hit loss rewarded the drift side, it added no measurable IC over equal
+weights, and it went with the learners it served.)
 """
 
 from __future__ import annotations
-
-import math
 
 import numpy as np
 
@@ -58,11 +50,10 @@ import numpy as np
 # which pointed the dependency the wrong way — analytics is the layer engines
 # are built ON, so anything in it importing from an engine is a cycle waiting
 # to happen, and duly was.
-from analytics.causal import EPS, ExpandingRank
+from analytics.causal import ExpandingRank
 
 __all__ = [
     "AdaptiveThreshold",
-    "OnlineSkillWeights",
     "adaptive_tiers",
     "tier_now",
     "expanding_quantile_series",
@@ -120,105 +111,6 @@ class AdaptiveThreshold:
     @property
     def n(self) -> int:
         return self._rank.n
-
-
-class OnlineSkillWeights:
-    """Weight a bank of views by their exponentially-discounted predictive skill.
-
-    Each member proposes a signed signal; some time later the outcome arrives.
-    A member's weight is driven by the sign agreement between what it said and
-    what happened, accumulated with a forgetting factor so a view that has
-    stopped working fades instead of being averaged over forever.
-
-    Why sign agreement and not squared error: the members here are oscillators
-    on different scales (an MSF at a 8-day lookback and one at 52 days do not
-    produce comparable magnitudes), and the decision the system takes from them
-    is directional. Scoring magnitude would mostly rank the members by their
-    volatility. This is the same reason the system reports rank IC rather than
-    R² for a directional signal.
-
-    Weights are a softmax over each member's discounted MEAN agreement, scaled
-    by the square root of its effective sample size. That scaling is the whole
-    design and it is worth being explicit about, because the obvious
-    alternative is wrong: accumulating a running SUM of per-round evidence (the
-    textbook dynamic-model-averaging recursion) makes the log-weight gap grow
-    like ``mean_edge / (1 - lambda)``, which at a 252-day half-life is a factor
-    of ~364. A member hitting a thoroughly ordinary 55% of calls against
-    another's 45% would then be weighted ~e^36 higher — total collapse onto one
-    view off a difference that is not close to significant.
-
-    Scaling the mean by ``sqrt(n_eff)`` instead means the weight gap tracks the
-    *t-statistic* of the skill difference rather than the raw round count, so
-    concentration requires evidence rather than merely time. ``kappa`` sets how
-    many nats one standard error of edge is worth.
-
-    Weights are floored so no member is ever fully silenced — a bank that
-    collapses onto one view has stopped being an ensemble, and the member that
-    looks worst over one regime is often the one that carries the next.
-    """
-
-    __slots__ = ("names", "_abar", "_wsum", "_wsq", "lam", "floor", "kappa",
-                 "_n_scored")
-
-    def __init__(self, names: list[str], halflife: float = 252.0,
-                 floor: float = 0.02, kappa: float = 0.5) -> None:
-        self.names = list(names)
-        self._abar = np.zeros(len(self.names))   # discounted MEAN agreement
-        self._wsum = 0.0                          # sum of discount weights
-        self._wsq = 0.0                           # sum of squared weights
-        self.lam = math.exp(-math.log(2.0) / max(float(halflife), 1.0))
-        self.floor = float(floor)
-        self.kappa = float(kappa)
-        self._n_scored = 0
-
-    @property
-    def effective_obs(self) -> float:
-        """Kish effective sample size of the discounted evidence."""
-        return float(self._wsum ** 2 / self._wsq) if self._wsq > EPS else 0.0
-
-    def weights(self) -> np.ndarray:
-        """Current weights — a function of evidence absorbed so far only."""
-        n = len(self._abar)
-        if not n:
-            return np.array([])
-        logw = self.kappa * math.sqrt(max(self.effective_obs, 0.0)) * self._abar
-        w = np.exp(logw - logw.max())
-        w = w / max(w.sum(), EPS)
-        if self.floor > 0:
-            # Mix with uniform rather than clipping-then-renormalising: the
-            # latter pushes the clipped members back BELOW the floor when the
-            # sum is rescaled, so the floor it advertises would not hold. This
-            # form gives w_i >= floor exactly, and sums to 1 by construction.
-            k = min(self.floor * n, 1.0)
-            w = (1.0 - k) * w + k / n
-        return w
-
-    def observe(self, signals: np.ndarray, outcome: float) -> None:
-        """Absorb one scored round: what each member said, and what happened.
-
-        ``signals`` is the members' signed calls at the decision time,
-        ``outcome`` the realised signed move over the horizon. Non-finite or
-        flat entries score neutral rather than being punished — an abstaining
-        view is not a wrong view.
-        """
-        if not np.isfinite(outcome) or outcome == 0.0:
-            return
-        s = np.asarray(signals, dtype=np.float64)
-        if s.shape != self._abar.shape:
-            return
-        agree = np.sign(s) * np.sign(outcome)
-        agree = np.where(np.isfinite(agree), agree, 0.0)
-        # Discounted mean: abar <- (lam*wsum*abar + agree) / (lam*wsum + 1)
-        prev_w = self.lam * self._wsum
-        new_w = prev_w + 1.0
-        self._abar = (prev_w * self._abar + agree) / new_w
-        self._wsum = new_w
-        self._wsq = (self.lam ** 2) * self._wsq + 1.0
-        self._n_scored += 1
-
-    @property
-    def n_scored(self) -> int:
-        return self._n_scored
 
 
 def expanding_quantile_series(

@@ -1,12 +1,14 @@
 """
-Tattva — Swayam kernel: per-series MSF + MMR with regime intelligence.
+Tattva — Swayam kernel: per-series MSF + MMR, and the views' one breadth.
 तत्त्व (Tattva) — "Principle / Essence"
 
 The single-series analysis kernel underneath the Swayam self-ensemble. It
 computes, for ONE price series: the Market Strength Factor (momentum /
-structure / flow), the Macro-Music Regression deviation oscillator against a
-macro driver pool, HMM/GARCH/CUSUM regime state, and their unification into
-``Unified_Osc`` + ``Condition``.
+structure / flow), the Macro-Micro Regime deviation oscillator against a
+macro driver pool (a short-window residual of the target on the same panel
+Mūla values against), and their unification into ``Unified_Osc`` +
+``Condition``. (A per-view Kalman → GARCH → HMM → CUSUM regime loop used to
+run here, fifteen times per target; nothing on the call read it, and it went.)
 
 This was the Nirnay engine. Nirnay ran this kernel across a *basket* — an
 index's constituents, or a curated proxy basket for a commodity/FX target —
@@ -21,18 +23,15 @@ itself rather than among hand-picked cousins of it.
 What survived is exactly the per-series math, which was never basket-specific;
 ``aggregate_views`` (formerly ``aggregate_constituent_timeseries``) survived
 too, because the ensemble reduces its member views the same way the basket
-reduced its constituents — only now each view is weighted by its own realised
-skill rather than counted equally (see ``view_skill_weights``).
+reduced its constituents: every view counted once. (Views were briefly
+weighted by a learner of their own realised skill; it added no measurable IC
+over equal weights, its loss rewarded the drift side, and it was removed.)
 """
 
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 import pandas as pd
-
-from analytics.regime import run_regime_loop
 
 # ─── Utility functions ───────────────────────────────────────────────────────
 # sigmoid / zscore_clipped / calculate_atr moved to analytics.utils (audit
@@ -40,7 +39,7 @@ from analytics.regime import run_regime_loop
 # (analytics.utils previously carried a second, non-equivalent copy that no
 # caller here ever used); import them so there is exactly one implementation.
 from analytics.utils import sigmoid as _sigmoid, zscore_clipped as _zscore_clipped, calculate_atr as _calculate_atr
-from analytics.adaptive import OnlineSkillWeights
+from core.semantics import breadth_lean
 
 
 # ─── Market Strength Factor ──────────────────────────────────────────────────
@@ -163,7 +162,7 @@ def calculate_mmr(
     length: int = 20,
     num_vars: int = 5,
     macro_columns: list[str] | None = None,
-) -> tuple[pd.Series, list[dict[str, Any]], pd.Series]:
+) -> tuple[pd.Series, pd.Series]:
     """Calculate Macro-Micro Regime via rolling R²-weighted regression.
 
     Finds the top ``num_vars`` macro indicators most correlated with price,
@@ -186,7 +185,7 @@ def calculate_mmr(
 
     Returns
     -------
-    mmr_signal, driver_details, mmr_quality
+    mmr_signal, mmr_quality
     """
     if macro_columns is None:
         macro_columns = []
@@ -228,14 +227,13 @@ def calculate_mmr(
         available_macros = _keep
 
     if len(df) < length + 10 or not available_macros:
-        return (pd.Series(0.0, index=df.index), [], pd.Series(0.0, index=df.index))
+        return (pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index))
 
     y_mean = target.rolling(length, min_periods=1).mean().shift(1).fillna(float(target.iloc[0]))
     y_std = target.rolling(length, min_periods=1).std().shift(1).fillna(1.0)
 
     preds_list = []
     r2_list = []
-    last_corr: dict[str, float] = {}   # signed r at the last bar, per ticker
 
     # Vectorized causal rolling computations
     for ticker in available_macros:
@@ -266,8 +264,6 @@ def calculate_mmr(
 
         preds_list.append(pred)
         r2_list.append(r2)
-        if len(roll_corr):
-            last_corr[ticker] = float(roll_corr.iloc[-1])
 
     all_preds = pd.concat(preds_list, axis=1)
     all_r2 = pd.concat(r2_list, axis=1)
@@ -306,37 +302,32 @@ def calculate_mmr(
     mmr_z = _zscore_clipped(deviation, length, 3.0)
     mmr_signal = _sigmoid(mmr_z, 1.5)
     mmr_quality = pd.Series(np.sqrt(model_r2_arr), index=df.index).fillna(0)
-
-    # Top drivers from the causal per-row R² weights at the last bar (same
-    # weights that actually drove the MMR signal, not a trailing static corr).
-    # Two fixes here:
-    #   • Symbol — rolling().corr() drops the Series name, so all_r2's columns
-    #     are INTEGER positions; the old code emitted those integers as the
-    #     "Symbol". Map position → available_macros[position] (the loop order).
-    #   • Correlation — the SIGNED r; sqrt(r²) would silently report |r| and
-    #     display an inversely-related driver (r = -0.8) as +0.8.
-    driver_details = []
-    if len(all_r2) > 0:
-        last_r2 = all_r2.iloc[-1].dropna()
-        if len(last_r2) > 0:
-            top_r2 = last_r2.nlargest(num_vars)
-            for col in top_r2.index:
-                if isinstance(col, (int, np.integer)) and 0 <= int(col) < len(available_macros):
-                    name = available_macros[int(col)]
-                else:
-                    name = str(col)
-                signed_r = last_corr.get(name)
-                if signed_r is None:
-                    signed_r = float(np.sqrt(max(0.0, float(top_r2[col]))))
-                driver_details.append({
-                    "Symbol": name,
-                    "Correlation": round(float(signed_r), 4),
-                })
-
-    return mmr_signal, driver_details, mmr_quality
+    return mmr_signal, mmr_quality
 
 
 # ─── Full Analysis Pipeline ──────────────────────────────────────────────────
+
+
+def osc_reach(use_macro: bool, base_weight: float) -> float:
+    """The least upper bound of |Unified_Osc| a view can print, on the ±10 scale.
+
+    A macro-anchored view blends MSF with a live MMR under the agreement
+    multiplier (up to ×1.2) and clips the blend to ±1, so it reaches ±10. A
+    price-only view has MMR ≡ 0: its MSF share of the blend stays below
+    (1 + base_weight) / 2 and |MSF| < 1, so |Unified_Osc| stays strictly below
+    10 · (1 + base_weight) / 2 — at base_weight 0, never past ±5.
+    """
+    return 10.0 if use_macro else 10.0 * (1.0 + float(base_weight)) / 2.0
+
+
+def can_vote(use_macro: bool, base_weight: float, oversold: float, overbought: float) -> bool:
+    """Whether a view can reach the Oversold or the Overbought condition at all.
+
+    A view whose reach does not pass the nearer cut never votes: it is counted
+    in ``Total_Analyzed``, so it dilutes both shares, but it can never move
+    ``Oversold_Pct`` or ``Overbought_Pct``.
+    """
+    return osc_reach(use_macro, base_weight) > min(-float(oversold), float(overbought))
 
 
 def run_full_analysis(
@@ -350,7 +341,7 @@ def run_full_analysis(
     overbought: float = 5.0,
     macro_columns: list[str] | None = None,
     components: tuple[str, ...] | None = None,
-) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+) -> pd.DataFrame:
     """Run the complete Swayam pipeline on a single stock DataFrame.
 
     Steps
@@ -359,10 +350,11 @@ def run_full_analysis(
     2. Compute adaptive clarity-based weights
     3. Blend signals with agreement multiplier
     4. Classify conditions (Oversold/Overbought/Neutral)
-    5. Run regime intelligence loop (Kalman → GARCH → HMM → CUSUM)
 
-    ``components`` is forwarded to :func:`calculate_msf` (``None`` — the
-    default — is byte-identical to the pre-mask MSF combine).
+    ``Can_Vote`` (constant per view, :func:`can_vote`) says whether the view
+    can reach a condition at all. ``components`` is forwarded to
+    :func:`calculate_msf` (``None`` — the default — is byte-identical to the
+    pre-mask MSF combine).
     """
     if macro_columns is None:
         macro_columns = []
@@ -371,7 +363,7 @@ def run_full_analysis(
     # the six columns one-by-one into the (wide, 100+ macro) frame triggers
     # pandas' "highly fragmented DataFrame" PerformanceWarning on every stock.
     msf, micro, momentum, flow = calculate_msf(df, length, roc_len, components=components)
-    mmr, drivers, mmr_quality = calculate_mmr(
+    mmr, mmr_quality = calculate_mmr(
         df, length, num_vars=num_vars, macro_columns=macro_columns
     )
     df = pd.concat(
@@ -419,34 +411,18 @@ def run_full_analysis(
     # block-build via pd.concat. Note: df.assign() also triggers the
     # PerformanceWarning on newer pandas because internally it does a per-kwarg
     # column insert loop. pd.concat with a fresh inner DataFrame builds the
-    # twelve new columns as a single block and merges them in one operation.
+    # new columns as a single block and merges them in one operation.
     unified = np.asarray((unified_signal * multiplier).clip(-1.0, 1.0))
     unified_osc = unified * 10.0
     msf_osc = df["MSF"].to_numpy() * 10.0
     mmr_osc = df["MMR"].to_numpy() * 10.0
-    close_arr = df["Close"].to_numpy()
-
-    agreement_arr = agreement.to_numpy() if hasattr(agreement, "to_numpy") else np.asarray(agreement)
-    strong_agreement = agreement_arr > 0.3
-    buy_signal = strong_agreement & (unified_osc < oversold)
-    sell_signal = strong_agreement & (unified_osc > overbought)
-
-    # Divergence detection (shift(1) ↔ prepend NaN, drop last)
-    prev_unified_osc = np.concatenate(([np.nan], unified_osc[:-1]))
-    prev_close = np.concatenate(([np.nan], close_arr[:-1]))
-    with np.errstate(invalid="ignore"):  # NaN comparisons → False, silently
-        osc_rising = unified_osc > prev_unified_osc
-        price_falling = close_arr < prev_close
-        osc_falling = unified_osc < prev_unified_osc
-        price_rising = close_arr > prev_close
-    bullish_div = osc_rising & price_falling & (unified_osc < oversold)
-    bearish_div = osc_falling & price_rising & (unified_osc > overbought)
 
     condition = np.where(
         unified_osc < oversold,
         "Oversold",
         np.where(unified_osc > overbought, "Overbought", "Neutral"),
     )
+    use_macro = any(c in df.columns for c in macro_columns)
 
     df = pd.concat(
         [
@@ -460,11 +436,8 @@ def run_full_analysis(
                     "MSF_Weight": msf_w_norm,
                     "MMR_Weight": mmr_w_norm,
                     "Agreement": agreement.to_numpy() if hasattr(agreement, "to_numpy") else np.asarray(agreement),
-                    "Buy_Signal": buy_signal,
-                    "Sell_Signal": sell_signal,
-                    "Bullish_Div": bullish_div,
-                    "Bearish_Div": bearish_div,
                     "Condition": condition,
+                    "Can_Vote": can_vote(use_macro, base_weight, oversold, overbought),
                 },
                 index=df.index,
             ),
@@ -472,320 +445,56 @@ def run_full_analysis(
         axis=1,
     )
 
-    # Regime intelligence loop — single-pass Numba kernel (faithful port of the
-    # Kalman → GARCH → HMM → CUSUM sequential filters; output is identical to
-    # the per-step object implementation but ~15× faster: the old Python loop
-    # spent its time in per-step NumPy dispatch over tiny windows).
-    regimes, hmm_bulls, hmm_bears, vol_regimes, change_points, confidences = (
-        run_regime_loop(df["Unified"].values)
-    )
-
-    # Join the six regime-intelligence columns as ONE block via pd.concat.
-    # df.assign() also fragments under newer pandas because it inserts kwargs
-    # one-by-one internally; pd.concat with a pre-built inner DataFrame avoids
-    # that entirely (single block-build, single merge).
-    df = pd.concat(
-        [
-            df,
-            pd.DataFrame(
-                {
-                    "Regime": regimes,
-                    "HMM_Bull": hmm_bulls,
-                    "HMM_Bear": hmm_bears,
-                    "Vol_Regime": vol_regimes,
-                    "Change_Point": change_points,
-                    "Confidence": confidences,
-                },
-                index=df.index,
-            ),
-        ],
-        axis=1,
-    )
-
-    return df, drivers
+    return df
 
 
 # ─── View aggregation ────────────────────────────────────────────────────────
 
 
-#: How much of the raw skill differential to keep, 0.0 = equal weight,
-#: 1.0 = the unshrunk estimator. Re-measured 2026-10-17 with the skill scored on
-#: the contrarian call (see view_skill_weights): weighting is no longer a cost —
-#: it is within noise of equal weight everywhere, a little ahead on Gold and
-#: Copper and a little behind on Silver — and per-view skill still does not
-#: persist reliably (split-half rank corr +0.04 / -0.27 / +0.12 / +0.18 on
-#: Gold / Copper / Silver / Bitcoin). Half-way is the honest setting for
-#: evidence that neither condemns nor licenses a full skill differential.
-SKILL_WEIGHT_SHRINK: float = 0.5
+def aggregate_views(view_results: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Reduce the views' votes into Swayam's daily breadth, every view counted once.
 
+    One row per date, over the views that reported on it:
 
-def view_skill_weights(
-    view_results: dict[str, pd.DataFrame],
-    horizon: int = 10,
-    halflife: float = 252.0,
-    floor: float = 0.02,
-    shrink: float | None = None,
-) -> pd.DataFrame:
-    """Causal per-date weight for each view, from its own realised skill.
+    * ``Oversold_Pct`` / ``Overbought_Pct`` — the share (0–100) of them whose
+      ``Condition`` is Oversold / Overbought;
+    * ``Total_Analyzed`` — how many views reported;
+    * ``N_Voting`` — how many of those can reach a condition at all
+      (``Can_Vote``, :func:`can_vote`); the others sit in the shares'
+      denominator but can never move them;
+    * ``Lean`` — ``core.semantics.breadth_lean(Oversold_Pct, Overbought_Pct)``,
+      THE published Swayam lean, bullish-positive (oversold views are the
+      bullish reading under Tattva's contrarian convention). The composer, the
+      sizer's grade, every page and the export read this column; none
+      re-derives it.
 
-    Returns a ``(dates x views)`` frame whose rows sum to the view count, so it
-    drops straight into :func:`aggregate_views` without changing the scale of
-    any count or percentage it produces.
-
-    The ordering is the whole point. At date *t* a view's weight reflects only
-    outcomes that had already resolved by *t*: the call made at ``s`` is scored
-    against the move over ``(s, s+h]``, which is not knowable until ``s+h``, so
-    the loop below absorbs ``s = t - h`` on step ``t`` and never earlier. A
-    weight published on *t* therefore never changes when more data arrives —
-    the same discipline the FVO engine applies to its two valuation views, and
-    the reason breadth here can be recomputed years later and match.
-
-    All views read the SAME underlying price (that is what makes the ensemble
-    self-referential), so the outcome series is shared and taken from whichever
-    member carries a usable Close.
+    Equal weights: a view's vote is not scaled by anything learned. The
+    reduction is one stacked frame and one ``groupby(Date)`` (the earlier
+    per-cell ``df.loc[date]`` loop was ~12 s for 18 series over ~2k days).
     """
-    if not view_results:
-        return pd.DataFrame()
-
-    names = list(view_results.keys())
-    frames = [view_results[k] for k in names]
-    idx = None
-    for df in frames:
-        if df is not None and not df.empty:
-            idx = df.index if idx is None else idx.union(df.index)
-    if idx is None or len(idx) == 0:
-        return pd.DataFrame()
-    idx = idx.sort_values()
-
-    # Signed call per view per date.
-    sig = pd.DataFrame(0.0, index=idx, columns=names)
-    for k, df in zip(names, frames):
-        if df is None or df.empty or "Unified_Osc" not in df.columns:
-            continue
-        sig[k] = pd.to_numeric(df["Unified_Osc"], errors="coerce").reindex(idx)
-    sig = sig.fillna(0.0)
-
-    # Shared outcome: the target's own forward return over the horizon.
-    close = None
-    for df in frames:
-        if df is not None and not df.empty and "Close" in df.columns:
-            c = pd.to_numeric(df["Close"], errors="coerce").reindex(idx)
-            if c.notna().sum() > horizon:
-                close = c
-                break
-    if close is None:
-        return pd.DataFrame(1.0, index=idx, columns=names)
-
-    h = max(1, int(horizon))
-    fwd = (close.shift(-h) / close - 1.0).to_numpy(dtype=np.float64)
-    S = sig.to_numpy(dtype=np.float64)
-
-    # THE CALL IS THE BULLISH LEAN, -osc — not the oscillator itself.
-    #
-    # Every consumer of Swayam reads it contrarian: a view with Unified_Osc
-    # below the oversold line votes "Oversold", and oversold breadth is the
-    # BULLISH reading in the convergence direction dimension, the hero's
-    # breadth gate and the divergence detector (core.semantics). Scoring the
-    # raw oscillator against the forward move instead credited a view when a
-    # HIGH reading preceded a RISE — momentum skill, the opposite of what its
-    # vote means. Measured on a planted contrarian world, the view whose call
-    # was right under the system's reading (IC(osc, fwd10) = -0.73) was weighted
-    # 0.52 and the one that was wrong (+0.49) 1.48: the learner was promoting
-    # exactly the views the aggregate should have been discounting.
-    skill = OnlineSkillWeights(names, halflife=halflife, floor=floor)
-    n = len(names)
-    W = np.empty((len(idx), n), dtype=np.float64)
-    for t in range(len(idx)):
-        s = t - h
-        if s >= 0:
-            skill.observe(-S[s], fwd[s])  # resolved at t; never before
-        W[t] = skill.weights() * n        # rows sum to n, preserving count scale
-
-    # SHRINK TOWARD EQUAL WEIGHT.
-    #
-    # The weights above are causal and never revised. Whether the skill they
-    # measure PERSISTS is a separate question, and it was first answered with
-    # the call scored on the wrong sign (momentum, +osc), which is what made
-    # skill weighting look harmful: "equal weight 3x better" on Gold. Measured
-    # again on the app path (macro live, so MMR runs; 10d, non-overlapping
-    # offset-averaged IC from convergence.intelligence.series_edge, SE ~0.07)
-    # with the contrarian call the system actually reads:
-    #
-    #   IC of net view breadth    equal    shrink 0.5   unshrunk   persistence
-    #   Gold                     +0.045      +0.052      +0.053        +0.04
-    #   Copper                   +0.030      +0.029      +0.029        -0.27
-    #   Silver                   +0.010      +0.009      +0.008        +0.12
-    #   Bitcoin                  -0.014      -0.012      -0.010        +0.18
-    #
-    # (persistence = split-half rank correlation of each view's own contrarian
-    # hit rate; raw best/worst weight spread 3.4-5.5x unshrunk, ~2x at 0.5.)
-    # Every difference between the columns is a fraction of one standard error,
-    # so the measurement neither condemns weighting nor licenses trusting a 5x
-    # differential on evidence that barely persists. A fixed half-way pull
-    # toward 1.0 is the setting that claims neither; ``shrink=1.0`` (or
-    # SKILL_WEIGHT_SHRINK = 1.0) gives the unshrunk estimator, 0.0 equal weight.
-    k = SKILL_WEIGHT_SHRINK if shrink is None else float(shrink)
-    if k < 1.0:
-        W = 1.0 + k * (W - 1.0)
-        # Re-normalise so rows still sum to n; aggregate_views relies on that
-        # scale for its counts and percentages.
-        rs = W.sum(axis=1, keepdims=True)
-        W = np.divide(W * n, rs, out=np.full_like(W, 1.0), where=rs > 0)
-    return pd.DataFrame(W, index=idx, columns=names)
-
-
-def aggregate_views(
-    view_results: dict[str, pd.DataFrame],
-    weights: pd.DataFrame | None = None,
-) -> pd.DataFrame:
-    """Aggregate per-view Swayam results into daily statistics.
-
-    Column schema is unchanged: Oversold/Overbought counts and percentages,
-    signal counts, regime distributions, and average oscillator values.
-
-    ``weights`` is an optional ``(dates x views)`` frame from
-    :func:`view_skill_weights`, normalised so each row sums to the view count.
-    Passing it makes every count and mean a WEIGHTED one — a view that has
-    stopped predicting this instrument contributes proportionally less to
-    breadth — while leaving the scale of every published column identical, so
-    ``Oversold_Pct`` still reads 0-100 and ``Total_Analyzed`` still reports how
-    many views actually reported (coverage, which is a count of participation,
-    not of skill, and so stays unweighted).
-
-    ``weights=None`` gives the equal-weighted reduction.
-
-    NOTE ON COUNTS. With weights, ``Oversold`` / ``Overbought`` /
-    ``Buy_Signals`` / ``Sell_Signals`` and the ``Regime_*`` columns are
-    SKILL-WEIGHTED counts — fractional, and summing to ``Total_Analyzed``
-    across a split — not head counts of views. Display them as weighted
-    counts (one decimal) or, better, as the ``*_Pct`` shares; truncating them
-    to integers turns a 0.7-weight vote into 0.
-    """
-    if not view_results:
-        return pd.DataFrame()
-
-    # ── Vectorized aggregation ────────────────────────────────────────────
-    # The previous implementation looped over every (date × view) pair
-    # with a per-cell ``df.loc[date]`` lookup — O(D·C) Python with a Series
-    # materialization on each step (~12s for 18 series over ~2k days).
-    # We instead stack every view's needed columns into one long frame
-    # and let a single ``groupby(Date)`` do all the reductions in C. The output
-    # schema, column order, and values are identical (validated to 1e-6).
-    needed = [
-        "Unified_Osc", "Condition", "Buy_Signal", "Sell_Signal",
-        "Bullish_Div", "Bearish_Div", "Regime", "Vol_Regime", "Change_Point",
-        "MSF_Osc", "MMR_Osc", "HMM_Bull", "HMM_Bear",
-    ]
-    defaults = {
-        "Unified_Osc": 0.0, "Condition": "Neutral", "Buy_Signal": False,
-        "Sell_Signal": False, "Bullish_Div": False, "Bearish_Div": False,
-        "Regime": "NEUTRAL", "Vol_Regime": "NORMAL", "Change_Point": False,
-        "MSF_Osc": 0.0, "MMR_Osc": 0.0, "HMM_Bull": 0.33, "HMM_Bear": 0.33,
-    }
-
     parts: list[pd.DataFrame] = []
-    for sym, df in view_results.items():
+    for df in (view_results or {}).values():
         if df is None or df.empty:
             continue
-        sub = pd.DataFrame(index=df.index)
-        for col in needed:
-            sub[col] = df[col] if col in df.columns else defaults[col]
-        sub["Date"] = [d.date() if hasattr(d, "date") else d for d in df.index]
-        # Per-view weight, aligned to this view's own rows. Missing (a view
-        # absent from the weight frame, or dates it does not cover) means an
-        # unweighted vote, which is the equal-weight behaviour.
-        if weights is not None and sym in weights.columns:
-            sub["_w"] = pd.to_numeric(weights[sym], errors="coerce").reindex(df.index).fillna(1.0)
-        else:
-            sub["_w"] = 1.0
-        parts.append(sub)
-
+        cond = df["Condition"].astype(str)
+        parts.append(pd.DataFrame({
+            "Date": [d.date() if hasattr(d, "date") else d for d in df.index],
+            "Oversold": (cond == "Oversold").astype(float).to_numpy(),
+            "Overbought": (cond == "Overbought").astype(float).to_numpy(),
+            "Total_Analyzed": 1,
+            "N_Voting": df["Can_Vote"].astype(bool).astype(int).to_numpy(),
+        }))
     if not parts:
         return pd.DataFrame()
 
-    big = pd.concat(parts, ignore_index=True)
-
-    # Per-row indicator columns (mirror the original branch logic exactly).
-    cond = big["Condition"].astype(str)
-    regime = big["Regime"].astype(str)
-    vol = big["Vol_Regime"].astype(str)
-    osc = pd.to_numeric(big["Unified_Osc"], errors="coerce")
-    is_bull = regime.str.contains("BULL", regex=False)
-    is_bear = regime.str.contains("BEAR", regex=False) & ~is_bull
-
-    w = pd.to_numeric(big["_w"], errors="coerce").fillna(1.0).clip(lower=0.0)
-
-    ind = pd.DataFrame({
-        "Date": big["Date"],
-        "_w": w,
-        "Oversold": (cond == "Oversold").astype(float) * w,
-        "Overbought": (cond == "Overbought").astype(float) * w,
-        "Neutral": (~cond.isin(["Oversold", "Overbought"])).astype(float) * w,
-        "Buy_Signals": big["Buy_Signal"].fillna(False).astype(bool).astype(float) * w,
-        "Sell_Signals": big["Sell_Signal"].fillna(False).astype(bool).astype(float) * w,
-        "Total_Analyzed": 1,
-        "Signal_Sum": osc * w,
-        "Bull_Div": big["Bullish_Div"].fillna(False).astype(bool).astype(float) * w,
-        "Bear_Div": big["Bearish_Div"].fillna(False).astype(bool).astype(float) * w,
-        "Regime_Bull": is_bull.astype(float) * w,
-        "Regime_Bear": is_bear.astype(float) * w,
-        "Regime_Transition": ((regime == "TRANSITION") & ~is_bull & ~is_bear).astype(float) * w,
-        "Vol_High": vol.isin(["HIGH", "EXTREME"]).astype(float) * w,
-        "Vol_Low": (vol == "LOW").astype(float) * w,
-        "Change_Points": big["Change_Point"].fillna(False).astype(bool).astype(float) * w,
-        "_msf": pd.to_numeric(big["MSF_Osc"], errors="coerce") * w,
-        "_mmr": pd.to_numeric(big["MMR_Osc"], errors="coerce") * w,
-        "_hb": pd.to_numeric(big["HMM_Bull"], errors="coerce") * w,
-        "_hbe": pd.to_numeric(big["HMM_Bear"], errors="coerce") * w,
-    })
-    # Regime_Neutral is the original "else" branch: not bull/bear/transition.
-    # Residual of the weighted parts (was "1 - ..."; with weights the row's
-    # total vote mass is w, not 1).
-    ind["Regime_Neutral"] = (
-        ind["_w"] - ind["Regime_Bull"] - ind["Regime_Bear"] - ind["Regime_Transition"]
-    ).clip(lower=0)
-
-    g = ind.groupby("Date", sort=True)
-    sums = g[[
-        "Oversold", "Overbought", "Neutral", "Buy_Signals", "Sell_Signals",
-        "Total_Analyzed", "Signal_Sum", "Bull_Div", "Bear_Div",
-        "Regime_Bull", "Regime_Bear", "Regime_Neutral", "Regime_Transition",
-        "Vol_High", "Vol_Low", "Change_Points",
-    ]].sum()
-    # The "_*" columns are already weight-multiplied, so a plain .mean() would
-    # divide by the row COUNT and leave the weighting in the numerator only.
-    # Divide by the summed weight instead — a proper weighted mean.
-    wsum = g["_w"].sum().replace(0.0, np.nan)
-    means = g[["Signal_Sum", "_msf", "_mmr", "_hb", "_hbe"]].sum().div(wsum, axis=0)
-
+    sums = pd.concat(parts, ignore_index=True).groupby("Date", sort=True)[
+        ["Oversold", "Overbought", "Total_Analyzed", "N_Voting"]].sum()
     n = sums["Total_Analyzed"]
     out = pd.DataFrame(index=sums.index)
-    out["Oversold"] = sums["Oversold"]
-    out["Overbought"] = sums["Overbought"]
-    out["Neutral"] = sums["Neutral"]
-    out["Buy_Signals"] = sums["Buy_Signals"]
-    out["Sell_Signals"] = sums["Sell_Signals"]
-    out["Total_Analyzed"] = sums["Total_Analyzed"]
-    out["Avg_Signal"] = means["Signal_Sum"]
-    out["Signal_Sum"] = sums["Signal_Sum"]
-    out["Bull_Div"] = sums["Bull_Div"]
-    out["Bear_Div"] = sums["Bear_Div"]
-    out["Regime_Bull"] = sums["Regime_Bull"]
-    out["Regime_Bear"] = sums["Regime_Bear"]
-    out["Regime_Neutral"] = sums["Regime_Neutral"]
-    out["Regime_Transition"] = sums["Regime_Transition"]
-    out["Vol_High"] = sums["Vol_High"]
-    out["Vol_Low"] = sums["Vol_Low"]
-    out["Change_Points"] = sums["Change_Points"]
     out["Oversold_Pct"] = sums["Oversold"] / n * 100
     out["Overbought_Pct"] = sums["Overbought"] / n * 100
-    out["Neutral_Pct"] = sums["Neutral"] / n * 100
-    out["Regime_Bull_Pct"] = sums["Regime_Bull"] / n * 100
-    out["Regime_Bear_Pct"] = sums["Regime_Bear"] / n * 100
-    out["Vol_High_Pct"] = sums["Vol_High"] / n * 100
-    out["avg_hmm_bull"] = means["_hb"]
-    out["avg_hmm_bear"] = means["_hbe"]
-    out["avg_msf_osc"] = means["_msf"]
-    out["avg_mmr_osc"] = means["_mmr"]
+    out["Total_Analyzed"] = n
+    out["N_Voting"] = sums["N_Voting"]
+    out["Lean"] = [breadth_lean(a, b) for a, b in zip(out["Oversold_Pct"], out["Overbought_Pct"])]
     out.index.name = "Date"
     return out

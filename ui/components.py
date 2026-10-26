@@ -388,7 +388,7 @@ def render_chip(label: str, tone: str = "neutral", *, as_html: bool = False) -> 
     """Render (or return) a status chip — one badge system for the whole app.
 
     ``tone``: ``accent`` / ``success`` / ``danger`` / ``warning`` / ``info`` /
-    ``neutral``. Used for analog-tier badges, session/freshness state, and
+    ``neutral``. Used for session/freshness state, gap stationarity, and
     any other "state in a word" reading (previously several one-off HTML
     blocks with their own colour logic). Pass ``as_html=True`` to get the raw
     ``<span>`` back for composition inside a larger ``st.markdown`` call
@@ -630,132 +630,6 @@ def render_rail_readout(rows: "list[tuple[str, str, str]]") -> None:
     st.markdown(f'<div class="rail-readout">{body}</div>', unsafe_allow_html=True)
 
 
-#: Instruments on the tape, in reading order: the broad risk complex, then
-#: rates, then the dollar, then the commodity and volatility poles. Ordered
-#: by what a desk checks first rather than alphabetically — a tape is scanned
-#: peripherally, and a familiar running order is what makes that possible.
-TICKER_INSTRUMENTS: tuple[str, ...] = (
-    "US Large Cap (S&P 500)", "US Nasdaq 100", "US Small Cap (Russell 2000)",
-    "Global Equity (ACWI)", "Japan Equity (EWJ)", "Eurozone Equity (EZU)",
-    "Emerging Markets Equity", "India Equity",
-    "US 10-Year Treasury Yield", "US Treasury Long (20Y+)",
-    "US Corporate Investment Grade", "US High Yield Corporate",
-    "Dollar Index", "EUR/USD", "USD/JPY", "USD/INR",
-    "Gold", "Silver", "Copper", "Crude Oil", "Brent Crude", "Natural Gas",
-    "Broad Commodity Index (DBC)", "Equity Volatility (VIX)",
-)
-
-
-#: Display-name overrides for the tape. Used only where the yfinance ticker
-#: is not what a desk would call the instrument (a futures root with an "=F"
-#: suffix, an index with a caret) — everywhere else the real ticker is the
-#: right label, because that is what a tape shows.
-_TAPE_ALIAS: dict[str, str] = {
-    "GC=F": "GOLD", "SI=F": "SILVER", "HG=F": "COPPER", "PL=F": "PLAT",
-    "CL=F": "WTI", "BZ=F": "BRENT", "NG=F": "NATGAS",
-    "^VIX": "VIX", "^MOVE": "MOVE", "^TNX": "US10Y", "^TYX": "US30Y",
-    "^FVX": "US5Y", "^IRX": "US3M",
-    "DX-Y.NYB": "DXY", "EURUSD=X": "EURUSD", "JPY=X": "USDJPY",
-    "INR=X": "USDINR", "CNY=X": "USDCNY",
-}
-
-
-def _tape_symbol(column: str) -> str:
-    """Ticker for a macro column, as a tape would print it.
-
-    Resolves the display name back through the config maps to its real symbol
-    — "US Nasdaq 100" prints as QQQ, not as a name truncated mid-word. Falls
-    back to a word-boundary-safe abbreviation for anything unmapped (a
-    Google-Sheet series, a user column), because cutting "US Nasdaq 100" to
-    "US Nasdaq 10" is worse than showing fewer words.
-    """
-    try:
-        from core.config import (COMMODITY_TARGETS, GLOBAL_MACRO_MAP,
-                                 MACRO_SYMBOLS_YF)
-        lookup = {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF, **COMMODITY_TARGETS}
-    except Exception:
-        lookup = {}
-    tkr = lookup.get(column)
-    if tkr:
-        if tkr in _TAPE_ALIAS:
-            return _TAPE_ALIAS[tkr]
-        # Strip exchange suffixes (.NS/.L/.TO) and index carets for display.
-        clean = tkr.lstrip("^").split(".")[0].replace("=X", "").replace("=F", "")
-        if clean:
-            return clean.upper()[:10]
-    # Unmapped: prefer a trailing parenthetical, else whole words up to 12 chars.
-    if "(" in column and column.rstrip().endswith(")"):
-        return column.split("(")[-1].rstrip(")")[:10].upper()
-    out = ""
-    for word in column.split():
-        if len(out) + len(word) + 1 > 12:
-            break
-        out = f"{out} {word}".strip()
-    return (out or column[:12]).upper()
-
-
-def render_ticker(frame, instruments: tuple[str, ...] = TICKER_INSTRUMENTS,
-                  seconds_per_item: float = 3.6) -> None:
-    """Render the running tape from the already-fetched macro panel.
-
-    No additional network call: the panel behind the valuation engine already
-    holds every one of these instruments, so the tape is a view of the data the
-    run is using rather than a second, possibly disagreeing, source.
-
-    The track is emitted TWICE and animated to -50%, which is what makes the
-    loop seamless — at the moment the first copy leaves the viewport the second
-    is exactly where the first began. Duration scales with item count so the
-    scroll speed stays constant no matter how many instruments are listed;
-    a tape that accelerates as you add symbols is unreadable.
-
-    Direction is carried by an arrow glyph as well as by colour. Roughly 8% of
-    men have red/green colour deficiency, and the sign of a move is the one
-    reading here that must never be ambiguous.
-    """
-    if frame is None or not len(frame):
-        return
-    cols = [c for c in instruments if c in getattr(frame, "columns", ())]
-    if not cols:
-        return
-
-    tail = frame[cols].tail(2)
-    if len(tail) < 2:
-        return
-    prev, last = tail.iloc[0], tail.iloc[1]
-
-    items: list[str] = []
-    for c in cols:
-        try:
-            p1, p0 = float(last[c]), float(prev[c])
-        except (TypeError, ValueError):
-            continue
-        if not (np.isfinite(p1) and np.isfinite(p0)) or p0 == 0:
-            continue
-        chg = (p1 / p0 - 1.0) * 100.0
-        cls, arrow = (("up", "▲") if chg > 0.005 else
-                      ("down", "▼") if chg < -0.005 else ("flat", "•"))
-        sym = _tape_symbol(c)
-        px = f"{p1:,.2f}" if abs(p1) < 10000 else f"{p1:,.0f}"
-        items.append(
-            f'<span class="tt-item">'
-            f'<span class="tt-sym">{html_mod.escape(sym)}</span>'
-            f'<span class="tt-px">{px}</span>'
-            f'<span class="tt-chg {cls}" data-arrow="{arrow}">{abs(chg):.2f}%</span>'
-            f'</span><span class="tt-sep">|</span>'
-        )
-    if not items:
-        return
-
-    run = "".join(items)
-    duration = max(40.0, len(items) * float(seconds_per_item))
-    st.markdown(
-        f'<div class="ticker" role="marquee" aria-label="Live macro tape">'
-        f'<div class="tt-track" style="--tt-duration:{duration:.0f}s">{run}{run}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-
 def render_empty_state(
     title: str,
     body: str,
@@ -766,7 +640,7 @@ def render_empty_state(
     """Render a professional, icon-free empty/degraded state.
 
     One system for every "nothing to show yet" moment in the app — cold
-    start (no data loaded), "no weights yet", "no usable precedent", short-
+    start (no data loaded), "not yet graded", "no Swayam breadth", short-
     history guards — rather than each tab hand-rolling its own notice.
     ``body`` may carry simple inline HTML (``<strong>``, line breaks), same
     convention as ``render_interpretation_card``. ``action_label`` is a short
@@ -783,18 +657,6 @@ def render_empty_state(
         f'<div class="es-body">{body}</div>'
         f'{action_html}'
         f'</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def render_info_box(title: str, content: str, color: str = "cyan") -> None:
-    """Render an info box. ``color`` is applied as a modifier class (cyan / amber /
-    emerald / rose / violet) so callers can theme it; was previously ignored."""
-    st.markdown(
-        f'<div class="info-box {html_mod.escape(color)}">'
-        f"<h4>{html_mod.escape(title)}</h4>"
-        f"<p>{html_mod.escape(content)}</p>"
-        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -890,27 +752,13 @@ from core.knobs import knob as _knob  # noqa: E402
 from core.semantics import edge_tier as _t_tier  # noqa: E402
 
 
-def edge_tier(edge) -> tuple[str, str]:
-    """The label of a grade — one scale, from ``core.semantics.edge_tier``.
+def edge_tier(edge: dict | None) -> tuple[str, str]:
+    """The label of a grade (``series_edge``'s dict) — one scale, from ``core.semantics.edge_tier``.
 
-    Given a grade dict (``series_edge``'s), its ``(label, tone)`` on the
-    grade's own t: |t| < 1 is never an edge, and a grade measured against a
-    lean leaves it neutral. Given a bare IC (a float, or None) — the System
-    page's engine table, until it is rebuilt — the older ``(tier, chip)`` on
-    the IC's own scale.
+    ``(label, tone)`` on the grade's own t: |t| < 1 is never an edge, and a
+    grade measured against a lean leaves it neutral.
     """
-    if isinstance(edge, dict):
-        return _t_tier(edge.get("t"))
-    ic = edge
-    if ic is None or not np.isfinite(ic):
-        return "uncalibrated", "NO READ"
-    if ic >= 0.10:
-        return "solid", "SOLID EDGE"
-    if ic >= 0.05:
-        return "modest", "MODEST EDGE"
-    if ic > 0:
-        return "marginal", "MARGINAL"
-    return "no_edge", "NO EDGE"
+    return _t_tier((edge or {}).get("t"))
 
 
 #: Card class per action: only an issued call is coloured as a direction.
@@ -1138,8 +986,8 @@ _HEADER_ACRONYMS = {
 def _prettify_header(name: str) -> str:
     """Turn a raw column/field name into a professional table header.
 
-    ``divergence_type`` → ``Divergence Type``; ``MSF_Osc`` → ``MSF Osc``;
-    ``Change_Point`` → ``Change Point``; ``val_ic`` → ``Val IC``. Already-clean
+    ``withheld_reason`` → ``Withheld Reason``; ``MSF_Osc`` → ``MSF Osc``;
+    ``n_win`` → ``N Win``; ``val_ic`` → ``Val IC``. Already-clean
     headers ("Buy Avg Δ", "Period") pass through with only per-word acronym
     casing applied.
     """
@@ -1172,6 +1020,7 @@ def render_data_table(
     precision: int = 2,
     col_precision: dict[str, int] | None = None,
     sign_color_cols: "set[str] | None" = None,
+    contrarian_cols: "set[str] | None" = None,
     label_col: str | None = None,
     col_labels: dict[str, str] | None = None,
     max_height: int = 520,
@@ -1184,7 +1033,7 @@ def render_data_table(
     header treatment and hover, none of which can be reached from the app's
     stylesheet. Sticky muted header, hairline row rules, right-aligned tabular
     numerics, a bolder "label" column, and horizontal/vertical scroll under a
-    fixed ``max_height`` — safe on both the 10-row divergence table and the
+    fixed ``max_height`` — safe on both the few-row grades table and the
     full dataset viewer.
 
     Rows are 27px (was 42): the old height came from 0.6rem cell padding at a
@@ -1204,6 +1053,10 @@ def render_data_table(
     precision / col_precision : default and per-column float precision.
     sign_color_cols : numeric columns whose values are tinted emerald/rose by
         sign (the "signal" colouring from Pragyam's per-signal columns).
+    contrarian_cols : numeric columns of a native reading whose positive side
+        is the bearish lean (stretched up, as Swayam's oscillators): tinted by
+        sign the other way round, rose when positive, so the number keeps its
+        native sign and its tone follows the lean it implies.
     label_col : the column to style as the bold Space-Grotesk label (default:
         the index if shown, else the first column).
     col_labels : explicit header overrides ``{raw_name: display}``; any column
@@ -1229,6 +1082,7 @@ def render_data_table(
     cols = list(view.columns)
     numeric_cols = {c for c in cols if pd.api.types.is_numeric_dtype(view[c])}
     sign_cols = (sign_color_cols or set()) & numeric_cols
+    contra_cols = (contrarian_cols or set()) & numeric_cols
     col_precision = col_precision or {}
     # The label column: explicit, else the index (when shown), else first column.
     if label_col is None:
@@ -1248,9 +1102,9 @@ def render_data_table(
     def _value_html(c: str, val) -> str:
         p = col_precision.get(c, precision)
         text = _fmt_cell(val, p)
-        if c in sign_cols and text != "—":
+        if c in sign_cols | contra_cols and text != "—":
             try:
-                fv = float(val)
+                fv = float(val) * (-1.0 if c in contra_cols else 1.0)
                 color = (t["emerald"] if fv > 1e-12 else t["rose"] if fv < -1e-12
                          else t["ink_tertiary"])
                 return f'<span style="color:{color};font-weight:600;">{text}</span>'
@@ -1350,7 +1204,7 @@ def provisional_note(fvo_ts) -> str:
 
     The engine separates `publish` (the value is emitted) from `Valid` (the value
     may be trusted), and marks the difference `Provisional`. That distinction was
-    introduced for the convergence cards and initially surfaced only there — so
+    introduced for the engine-agreement cards and initially surfaced only there — so
     the valuation chart drew today's forming fair value as an ordinary point and the
     Data tab listed it unlabelled, which is the same misreading the cards were
     fixed to prevent. This is the shared accessor, so every surface that shows a

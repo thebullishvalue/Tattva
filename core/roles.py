@@ -71,10 +71,14 @@ ROLES: dict[str, Role] = {r.key: r for r in (
          "claim with neutral sizers)"),
     Role("grade:call", "GRADE", "call", "Call grade (as issued)", "call",
          "Overview's GRADE→call strip and the sidebar: the call graded on the sessions it was issued"),
+    Role("grade:call:prospective", "GRADE", "call", "Call grade (prospective)", "call:prospective",
+         "Grades: the call graded only on the sessions after the priors file's run date, the "
+         "one clean out-of-sample record"),
     Role("grade:claim", "GRADE", "claim", "Claim grade", "claim",
          "trust (as of each session, shrunk) and Mūla's claim-grade card (full history)"),
     Role("grade:sizer:swayam", "GRADE", "sizer:swayam", "Swayam sizer grade", "sizer:swayam",
-         "β of the Swayam sizer: its z against d·Y on native claim rows"),
+         "β of the Swayam sizer: its z against d·Y on native claim rows; the Swayam page's "
+         "contradicts / split / confirms payoff table"),
     Role("grade:sizer:reversion", "GRADE", "sizer:reversion", "Reversion sizer grade", "sizer:reversion",
          "β of the reversion sizer: its z against d·Y on claim rows"),
     Role("evidence:gap_split", "EVIDENCE", "claim", "Who closes the gap?", None,
@@ -83,6 +87,10 @@ ROLES: dict[str, Role] = {r.key: r for r in (
          "Overview: FVO's causal mean, SD and RICH:CHEAP balance against the C12 contract"),
     Role("evidence:claim_side", "EVIDENCE", "claim", "The claim by side", None,
          "Overview: hit against the side-matched base, read off edges claim:buy and claim:sell"),
+    Role("evidence:swayam_lean", "EVIDENCE", "sizer:swayam", "Swayam's lean, standalone",
+         "evidence:swayam_lean",
+         "the Swayam page: the published Lean graded on its own, on the valued sessions with a "
+         "native Swayam row"),
     Role("infra:asof", "INFRASTRUCTURE", None, "As of d*", None,
          "every verdict input is read at d*, Mūla's latest published session"),
 )}

@@ -6,10 +6,9 @@ Every engine publishes in its own native units, and those units share one
 orientation: a POSITIVE reading means the instrument is stretched UP.
 
     Mūla    FVO > 0          price above the level the cross-section implies (rich)
-    Swayam  oscillator > 0   the instrument's own views read it overbought
-    Convergence score > 0    the two agree it is stretched up
+    Swayam  oscillator > 0   its views read it overbought
 
-The directional call is CONTRARIAN on all of them — stretched up is bearish,
+The directional call is CONTRARIAN on both — stretched up is bearish,
 stretched down is bullish — so a reading and the call it implies have opposite
 signs. That inversion used to be re-derived, inline and slightly differently,
 at every consumer; three learners ended up scoring the wrong sign because of
@@ -94,42 +93,16 @@ def valuation_lean(fvo) -> float:
 
 
 def breadth_lean(oversold_pct, overbought_pct) -> float:
-    """Bullish-positive lean of a breadth split (percent points, 0-100 each)."""
+    """Bullish-positive lean of a breadth split (percent points, 0-100 each).
+
+    Swayam's one lean: ``engines.swayam.kernel.aggregate_views`` publishes it
+    as ``Lean`` on every breadth row, and everything downstream reads that
+    column. An oversold majority is the bullish reading (contrarian).
+    """
     os_, ob_ = _finite(oversold_pct), _finite(overbought_pct)
     if os_ is None or ob_ is None:
         return 0.0
     return max(-1.0, min(1.0, (os_ - ob_) / 100.0))
-
-
-def oscillator_lean(osc, scale: float = 10.0) -> float:
-    """Bullish-positive lean of a Swayam oscillator reading (±``scale``)."""
-    v = _finite(osc)
-    if v is None or scale <= 0:
-        return 0.0
-    return max(-1.0, min(1.0, -v / scale))
-
-
-def swayam_regime_lean(bull_pct, bear_pct) -> float:
-    """Bullish-positive lean of Swayam's HMM regime split.
-
-    Swayam's "bull" state is the high-oscillator state — the views reading the
-    instrument as persistently stretched UP. Under the system's contrarian
-    reading that is a bearish lean, so the lean is ``(bear - bull) / 100``.
-    """
-    b, r = _finite(bull_pct), _finite(bear_pct)
-    if b is None or r is None:
-        return 0.0
-    return max(-1.0, min(1.0, (r - b) / 100.0))
-
-
-def state_lean(state: str) -> int:
-    """Sign of a valuation-state word: +1 for the cheap family, -1 for rich."""
-    s = str(state or "").upper()
-    if "CHEAP" in s:
-        return 1
-    if "RICH" in s:
-        return -1
-    return 0
 
 
 def swayam_word(aligned) -> str:

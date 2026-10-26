@@ -26,6 +26,7 @@ from core.config import InstrumentConfig
 from core.instruments import instrument
 from core.knobs import knob
 from core.roles import CHAIN, ROLES
+from core.semantics import breadth_lean
 from pipeline.assemble import assemble, gather_inputs
 
 H = 10
@@ -33,7 +34,7 @@ L = knob("EXECUTION_LAG")
 T0 = knob("STRENGTH_T0")
 GOLD = instrument("Gold")
 EDGE_KEYS = {"claim", "claim:buy", "claim:sell", "sizer:swayam", "sizer:reversion",
-             "call", "call:prospective"}
+             "call", "call:prospective", "evidence:swayam_lean"}
 
 
 # ─── The synthetic panel ─────────────────────────────────────────────────────
@@ -61,10 +62,15 @@ def _panel(n=1500, seed=3, burn=120):
     }, index=idx)
     native = np.ones(n, dtype=bool)
     native[::17] = False                                          # some carried rows
-    sw = pd.DataFrame({"Oversold_Pct": (100 * lean).clip(lower=0),
-                       "Overbought_Pct": (-100 * lean).clip(lower=0),
-                       "_Native": native}, index=idx)
+    sw = _breadth((100 * lean).clip(lower=0), (-100 * lean).clip(lower=0), native)
     return fvo_ts, sw
+
+
+def _breadth(oversold, overbought, native) -> pd.DataFrame:
+    """A Swayam frame as aggregate_views publishes it: the shares and their one Lean."""
+    return pd.DataFrame({"Oversold_Pct": oversold, "Overbought_Pct": overbought,
+                         "Lean": [breadth_lean(a, b) for a, b in zip(oversold, overbought)],
+                         "_Native": native}, index=oversold.index)
 
 
 def _asof(fvo_ts):
@@ -186,9 +192,9 @@ def test_c_perturbing_every_sizer_input_never_changes_d(panel, loop):
     f2, s2 = fvo_ts.copy(), sw.copy()
     f2["MRProb"] = rng.uniform(0, 1, len(f2))
     f2["MulaKappa"] = rng.normal(0, 0.05, len(f2))
-    s2["Oversold_Pct"] = rng.uniform(0, 100, len(s2))
-    s2["Overbought_Pct"] = rng.uniform(0, 100, len(s2))
-    s2["_Native"] = rng.uniform(size=len(s2)) > 0.3
+    s2 = _breadth(pd.Series(rng.uniform(0, 100, len(s2)), index=s2.index),
+                  pd.Series(rng.uniform(0, 100, len(s2)), index=s2.index),
+                  rng.uniform(size=len(s2)) > 0.3)
     other = _assemble(f2, s2).call_ts
     assert other["d"].equals(loop.call_ts["d"])
     for col in ("claim_t", "trust", "precondition"):

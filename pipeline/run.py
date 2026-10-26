@@ -34,18 +34,14 @@ from data.prep import PreparedPanel, prepare_panel
 from engines.mula import MulaEngine
 from engines.swayam import (aggregate_views, build_swayam_frames, default_swayam_members,
                             effective_member_count)
-from engines.swayam.kernel import view_skill_weights
 from pipeline.assemble import assemble, describe_priors
 
 #: The Swayam page's drill-down reads only these per-view columns. The kernel
-#: emits ~270 per view; at 15 views × ~2,300 rows that is ~76 MB per target,
+#: emits ~260 per view; at 12 views × ~2,300 rows that is ~60 MB per target,
 #: held in the live session, the Swayam analysis cache and up to six result
-#: bundles. Everything that needs the full width (skill weights, aggregation,
-#: the effective view count) has consumed it before the frames are kept.
-SWAYAM_DRILLDOWN_COLS = (
-    "Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition",
-    "Regime", "Vol_Regime", "Change_Point", "Confidence",
-)
+#: bundles. Everything that needs the full width (aggregation, the effective
+#: view count) has consumed it before the frames are kept.
+SWAYAM_DRILLDOWN_COLS = ("Close", "MSF_Osc", "MMR_Osc", "Unified_Osc", "Condition")
 
 
 def _source(fetch):
@@ -190,15 +186,16 @@ def build_swayam(target: str, cfg, ohlcv: pd.DataFrame | None, prep: PreparedPan
     """``(swayam_daily, meta)``: Swayam's breadth on the model spine, and its by-products.
 
     The view bank runs on the target's own bars (``ohlcv``) with the
-    leakage-guarded ``drivers``; the views are skill-weighted causally and
-    aggregated, then carried onto the prepared spine with ``_Native`` marking
-    the sessions that are a genuine view-bank observation (a carried row is
-    not a new reading). ``meta``: ``view_dfs`` (the drill-down columns),
-    ``n_eff``, ``view_weights`` and ``native_last`` (both dated ≤ ``asof``,
-    d*), ``n_members``, ``n_drivers`` and ``n_drivers_kept``.
+    leakage-guarded ``drivers``; the views are aggregated with equal weights
+    (``aggregate_views``: ``Oversold_Pct, Overbought_Pct, Total_Analyzed,
+    N_Voting`` and the one published ``Lean``), then carried onto the
+    prepared spine with ``_Native`` marking the sessions that are a genuine
+    view-bank observation (a carried row is not a new reading). ``meta``:
+    ``view_dfs`` (the drill-down columns), ``n_eff``, ``native_last`` (dated
+    ≤ ``asof``, d*), ``n_members``, ``n_drivers`` and ``n_drivers_kept``.
     ``progress(done, total, view)`` is called per view.
     """
-    meta = {"view_dfs": {}, "n_eff": None, "view_weights": None, "native_last": None,
+    meta = {"view_dfs": {}, "n_eff": None, "native_last": None,
             "n_members": 0, "n_drivers": len(drivers.columns), "n_drivers_kept": 0}
     if ohlcv is None or ohlcv.empty:
         return pd.DataFrame(), meta
@@ -214,14 +211,7 @@ def build_swayam(target: str, cfg, ohlcv: pd.DataFrame | None, prep: PreparedPan
     if not frames:
         return pd.DataFrame(), meta
     meta["n_eff"] = effective_member_count(frames)
-    # Views are weighted by their own realised skill, causally: a timescale
-    # that has stopped predicting this instrument contributes less to breadth.
-    weights = view_skill_weights(frames, horizon=int(cfg.forecast_horizon))
-    daily = aggregate_views(frames, weights=weights)
-    if asof is not None and not weights.empty:
-        weights = weights[pd.DatetimeIndex(weights.index) <= pd.Timestamp(asof)]
-    if not weights.empty:
-        meta["view_weights"] = {k: float(v) for k, v in weights.iloc[-1].items()}
+    daily = aggregate_views(frames)
     meta["view_dfs"] = _slim_view_dfs(frames)
     if daily.empty:
         return daily, meta
@@ -254,9 +244,8 @@ def run_target(target: str, *, end=None, priors: PriorTable | None | str = "defa
     or none), None (per-instrument grades only) or a ``PriorTable``.
 
     Returns ``engine, fvo_ts, swayam_daily, swayam_view_dfs, swayam_n_eff,
-    swayam_view_weights, swayam_native_last, call_ts, grades_ts, edges,
-    evidence, verdict, asof, horizon, exec_lag, epoch, fingerprint,
-    priors_meta``.
+    swayam_native_last, call_ts, grades_ts, edges, evidence, verdict, asof,
+    horizon, exec_lag, epoch, fingerprint, priors_meta``.
     """
     cfg, inst = get_instrument_config(target), instrument(target)
     h, lag = int(cfg.forecast_horizon), int(knob("EXECUTION_LAG"))
@@ -275,7 +264,7 @@ def run_target(target: str, *, end=None, priors: PriorTable | None | str = "defa
     return {
         "engine": engine, "fvo_ts": fvo_ts, "swayam_daily": swayam_daily,
         "swayam_view_dfs": sw["view_dfs"], "swayam_n_eff": sw["n_eff"],
-        "swayam_view_weights": sw["view_weights"], "swayam_native_last": sw["native_last"],
+        "swayam_native_last": sw["native_last"],
         "call_ts": asm.call_ts, "grades_ts": asm.grades_ts, "edges": asm.edges,
         "evidence": asm.evidence, "verdict": asm.verdict, "asof": engine.asof, "horizon": h,
         "exec_lag": lag, "epoch": engine.epoch, "fingerprint": engine.fingerprint,

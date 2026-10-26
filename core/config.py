@@ -5,8 +5,8 @@ Tattva — Configuration constants, thresholds, column mappings, and shared defa
 CORE — macro universe, target catalogue, structural knobs and warm-up priors.
 
 The engine-tuning constants below are the DEFAULTS of the per-instrument config
-registry: `InstrumentConfig` (routing + every Mūla / Swayam / DDM /
-convergence knob) → `CLASS_CONFIG_DEFAULTS` (per asset class) → `INSTRUMENT_CONFIGS`
+registry: `InstrumentConfig` (routing + every Mūla / Swayam knob and the
+horizon) → `CLASS_CONFIG_DEFAULTS` (per asset class) → `INSTRUMENT_CONFIGS`
 (one explicit entry per catalogue target). The five catalogue classes (commodity,
 fx, crypto, india_index, us_index) are tuned PER INSTRUMENT via `PER_INSTRUMENT_TUNING`
 / `_PER_INSTRUMENT_OVERRIDES`; India/US stocks are tuned at ASSET level via
@@ -91,22 +91,13 @@ MIN_DATA_POINTS = 1500
 ANALYSIS_EPOCH = pd.Timestamp("2017-01-02")
 
 # Evaluation horizons. FORECAST_HORIZON is no longer a label horizon the engine
-# is trained on (nothing is): it is the holding period the convergence layer,
-# the precedent analogs and the Intelligence calibrator score against, and the
-# window the UI projects the current mispricing over. Data stays DAILY.
+# is trained on (nothing is): it is THE horizon h of the call's estimand — the
+# holding period every grade scores against and the window the UI projects the
+# current mispricing over. Data stays DAILY.
 FORECAST_HORIZON = 10       # scoring / display horizon (trading days)
-# Forward-return horizons the convergence calibration frame carries by default
-# (convergence.intelligence._build_calibration_frame). Every published grade —
-# the walk-forward edge of every engine — is scored at FORECAST_HORIZON.
+# A second horizon list the retired calibration frame carried. Every published
+# grade is scored at FORECAST_HORIZON.
 HOLD_HORIZONS = (5, 10)
-
-# Trailing window for the PRECEDENT analog matcher's state features (momentum
-# and realized vol) in analytics.analogs.
-# Validated by the `precedent_univ` study, which sweeps it against the horizon.
-# This was formerly FORECAST_MOMENTUM and did double duty as the removed
-# forecast engine's predictor-momentum window; the two uses were never the same
-# quantity, they merely shared a value, so it is named for the one that remains.
-ANALOG_MOM_WINDOW = 20
 
 # Predictors that are RAW YIELD LEVELS (e.g. ^TNX at 4.25), not prices. The Mūla
 # cross-section is a panel of PRICES: it takes logs and first differences, and
@@ -116,12 +107,6 @@ ANALOG_MOM_WINDOW = 20
 RAW_YIELD_PREDICTORS = frozenset({
     "US 13-Week T-Bill Yield", "US 5-Year Treasury Yield",
     "US 10-Year Treasury Yield", "US 30-Year Treasury Yield"})
-
-# Precedent-tab analog term-structure horizons (trading days), FIXED and decoupled
-# from HOLD_HORIZONS. 1d is a normal member (weak/noisy edge, disclosed by the
-# Analog-Skill chart's per-horizon IC); 60d is the long/regime end (edge fades past
-# ~20d). The hero's precedent second-opinion reads at FORECAST_HORIZON (10d).
-PRECEDENT_HORIZONS = (1, 3, 5, 10, 20, 60)
 
 # Warm-up priors for the tiers of Mūla's WINDOW AGREEMENT (ConvictionBounded,
 # ±100) — the engine's zone labels and the Mūla page's "broadly / leans" read.
@@ -149,42 +134,23 @@ DDM_LONG_RUN_VAR = 100.0
 #
 # SWAYAM_MSF_LENGTH / SWAYAM_ROC_LEN are gone: they parameterised the single
 # basket-mode read, and the Swayam members each carry their own length. Their
-# tuning history is instructive about why this whole layer moved to online
-# estimation — three validating universes returned contradictory class winners
-# (3, 40, 18, 12) on a flat sign-flipping surface, and the standing value was
-# "held at 20" because no reconciliation rule existed. A bank that weights all
-# of those by realised skill needs no such rule.
+# tuning history is why no single length is chosen: three validating universes
+# returned contradictory class winners (3, 40, 18, 12) on a flat sign-flipping
+# surface. The bank keeps several lengths and counts every view once (equal
+# weights); no learner re-weights them, and the breadth is graded as the
+# Swayam-confirmation sizer instead.
 SWAYAM_REGIME_SENSITIVITY = 8.0  # swayam 2026-07-21 (|IC| 0.073 @8.0)
 SWAYAM_BASE_WEIGHT = 0.0         # MSF share of the FIXED half of the MSF/MMR
                                  # blend (kernel: 0.5*bw + 0.5*adaptive).
 SWAYAM_MMR_NUM_VARS = 4          # swayam 2026-07-21 class-level best
 
-# Condition thresholds on Unified_Osc (±10 scale): classify Oversold/Overbought/
-# Neutral and gate buy/sell + divergence. ±5 = p75-p85 occupancy (ui_anchors).
+# Condition thresholds on Unified_Osc (±10 scale): a view votes Oversold below
+# SWAYAM_OVERSOLD and Overbought above SWAYAM_OVERBOUGHT, else Neutral. On the
+# views that can vote, ±5 sits at about p82-83 of |osc|; its originating study
+# is not retained (core.knobs: structural-inherited). A price-only view cannot
+# reach it at the shipped base weight (engines.swayam.kernel.can_vote).
 SWAYAM_OVERSOLD = -5
 SWAYAM_OVERBOUGHT = 5
-
-# ─── Convergence Layer Defaults ──────────────────────────────────────────────
-
-# PRIOR dimension weights — where the online learner starts (and what stands
-# when the overlap is too short to learn from). Direction-heavy: whether the two
-# engines point the same way is the dimension with a meaning independent of
-# scale.
-CONV_WEIGHT_DIRECTION = 0.50
-CONV_WEIGHT_BREADTH = 0.20
-CONV_WEIGHT_MAGNITUDE = 0.20
-CONV_WEIGHT_REGIME = 0.10
-
-# The weighted composite's drift-diffusion filter (convergence.conviction_model).
-# ddm 2026-07-20: leak 0.01. GUARD: sweep leak WITH drift co-scaled
-# (drift = leak × gain 1.20), never alone.
-CONV_DDM_LEAK_RATE = 0.01
-CONV_DDM_DRIFT_SCALE = 0.012
-CONV_DDM_LONG_RUN_VAR = 50.0
-
-# Divergence detection
-DIV_LOOKBACK = 20
-DIV_PERSISTENCE_THRESHOLD = 5
 
 # ─── Global Macro Bond ETF Universe ──────────────────────────────────────────
 # Adapted from Sanket — proxy for global yield dynamics via yfinance-available
@@ -713,7 +679,7 @@ def register_stock_target(display_name: str, ticker: str, market: str) -> None:
 # ─── Swayam (self-referential ensemble) ───────────────────────────────
 # Timescale axis (log-spaced) + the ROC fraction that derives each member's
 # roc_len — see engines/swayam/ensemble.py
-# (default_swayam_members) for how these build the 15-member grid.
+# (default_swayam_members) for how these build the 12-member grid.
 SWAYAM_LENGTHS = (8, 14, 22, 34, 52)   # swayam 2026-07-21 class-level best (|IC| 0.096 vs default-5)
 SWAYAM_ROC_FRAC = 0.85                  # swayam 2026-07-21 class-level best (|IC| 0.094 vs 0.7)
 
@@ -786,8 +752,8 @@ class InstrumentConfig:
     excluded_predictors: tuple[str, ...] = ()      # Mūla + Swayam-MMR leakage guard
 
     # ── Structure: Swayam breadth ───────────────────────────────────────────
-    # `swayam_lengths` is a SPAN to weight, not a length to pick — members are
-    # weighted by their own online skill (analytics.adaptive.OnlineSkillWeights).
+    # `swayam_lengths` is a SPAN of timescales, not a length to pick — every
+    # member is counted once (engines.swayam.kernel.aggregate_views).
     swayam_lengths: tuple[int, ...] = SWAYAM_LENGTHS
     swayam_roc_frac: float = SWAYAM_ROC_FRAC
     swayam_regime_sensitivity: float = SWAYAM_REGIME_SENSITIVITY
@@ -801,7 +767,6 @@ class InstrumentConfig:
     # passed explicitly everywhere (no default, no fallback downstream).
     forecast_horizon: int = FORECAST_HORIZON
     hold_horizons: tuple[int, ...] = HOLD_HORIZONS
-    analog_mom_window: int = ANALOG_MOM_WINDOW   # precedent state-feature window
 
     # ── Estimability floors: Mūla valuation engine ──────────────────────────
     # Default to the global constants; a per-instrument / asset-class override
@@ -816,28 +781,10 @@ class InstrumentConfig:
     fvo_valuation_deltas: tuple[float, ...] = FVO_VALUATION_DELTAS
     fvo_lookback_windows: tuple[int, ...] = LOOKBACK_WINDOWS
 
-    # ── Convergence: the weighted composite's drift-diffusion filter ────────
-    ddm_leak: float = CONV_DDM_LEAK_RATE
-    ddm_drift: float = CONV_DDM_DRIFT_SCALE
-    ddm_lrv: float = CONV_DDM_LONG_RUN_VAR
-
-    # ── Convergence dimension weights: PRIOR for the online learner ────────
-    # Passed as `prior` to convergence.intelligence.apply_online_weights, which
-    # moves them by each dimension's own discounted signed skill. A starting
-    # belief, not a fitted answer.
-    conv_weight_direction: float = CONV_WEIGHT_DIRECTION
-    conv_weight_breadth: float = CONV_WEIGHT_BREADTH
-    conv_weight_magnitude: float = CONV_WEIGHT_MAGNITUDE
-    conv_weight_regime: float = CONV_WEIGHT_REGIME
-
-    # ── Precedent analog term structure ─────────────────────────────────────
-    precedent_horizons: tuple[int, ...] = PRECEDENT_HORIZONS
-
-    # ── Analog matcher blend (analytics.analogs) ────────────────────────────
-    # (The analog blend weights lived here. They selected between Mahalanobis,
-    # trajectory-cosine and recency scoring, and had shipped at 1/0/0 since the
-    # analog re-tune — two of the three terms multiplied by zero on every call.
-    # The matcher is now kernel-weighted Mahalanobis with no blend to choose.)
+    # (The Convergence layer's knobs — its drift-diffusion filter, its prior
+    # dimension weights and its agreement tiers — and the Precedent matcher's
+    # term structure and state window left with the parallel opinions they
+    # tuned: none moved the call.)
 
     # ── Warm-up priors for the adaptive thresholds ─────────────────────────
     # Each is the p90 ("strong") / p75 ("moderate") / p50 ("weak") of its own
@@ -849,22 +796,15 @@ class InstrumentConfig:
     # Mūla window agreement (ConvictionBounded, ±100) — p90 / p75.
     conviction_strong: float = CONVICTION_STRONG
     conviction_moderate: float = CONVICTION_MODERATE
-    # Swayam average signal (±10) — p75, the one cut-point both the Swayam and
-    # the Convergence page colour it with.
-    ui_swayam_avg_threshold: float = 2.87
-    # Engine agreement ratio — p90 / p75.
-    ui_agreement_strong: float = 0.89
-    ui_agreement_moderate: float = 0.799
     # Model spread (SD of the fair-value level), basis points — p10 / p90. The
     # spread now measures the fair value's own uncertainty, not the residual
     # noise around it, and runs ~17-77 bps across instruments (2026-10-17), so
     # the prior is wide and each instrument's own history takes over.
     ui_model_spread_low: float = 20.0
     ui_model_spread_high: float = 80.0
-    # (The consensus and composite tiers are no longer per-instrument fields:
-    # convergence.normalization classifies both at their own causal p90 / p75,
-    # with one shared warm-up prior each. Seven other display fields went with
-    # the cards and markers that read them.)
+    # (The Swayam average-signal and agreement tiers went with the average
+    # signal and the agreement they coloured; nine other display fields went
+    # with the cards and markers that read them.)
 
     def __post_init__(self) -> None:
         """The horizon is THE estimand's h, so a config that cannot carry it
@@ -874,16 +814,6 @@ class InstrumentConfig:
         assert isinstance(h, int) and not isinstance(h, bool), (
             f"forecast_horizon must be an int, got {h!r}")
         assert h >= 1, f"forecast_horizon must be >= 1, got {h}"
-        assert h in self.precedent_horizons, (
-            f"forecast_horizon {h} is not in precedent_horizons {self.precedent_horizons}")
-
-    def weights_seed(self) -> dict[str, float]:
-        """Prior dimension weights — the CrossValidator's first pass and the learner's start."""
-        return {
-            "w_direction": self.conv_weight_direction,
-            "w_breadth": self.conv_weight_breadth,
-            "w_magnitude": self.conv_weight_magnitude,
-            "w_regime": self.conv_weight_regime}
 
 
 
@@ -953,8 +883,7 @@ PER_INSTRUMENT_TUNING: dict[str, dict] = {
 #   - swayam_lengths: both candidate spans beat their default by only ~0.03 (< bar) -> revert
 #     to the class Swayam grid (the target keeps its breadth signal, just not a bespoke span).
 #   - analog_w_*: dropped (the analog study's own verdict is that the class default 1/0/0 stands).
-#   - ui_swayam_avg_threshold: KEPT (Gold/Jeera) — a data-anchored DISPLAY calibration
-#     (the target's own p75, gated >=25% divergence + n>=250), not an edge claim.
+#   - ui_swayam_avg_threshold (Gold/Jeera): gone with the Swayam average signal it coloured.
 #
 # The per-instrument ENGINE tunings that used to live here were all Aarambh
 # walk-forward knobs (refit cadence / train window / ensemble roster / ridge
@@ -967,8 +896,8 @@ PER_INSTRUMENT_TUNING: dict[str, dict] = {
 # class defaults until a study measures otherwise.
 _PER_INSTRUMENT_OVERRIDES: dict[str, dict] = {
     # -- Commodities --
-    'Gold': {'ui_swayam_avg_threshold': 3.6887},
-    'Jeera': {'ui_swayam_avg_threshold': 2.1131},
+    'Gold': {},
+    'Jeera': {},
     # -- Currency (FX) --
     'USD/INR': {},
     # -- India Indices --
@@ -1093,4 +1022,3 @@ UI_R2_ACCEPTABLE = 0.4
 UI_CHART_HEIGHT_MEDIUM = 340
 UI_CHART_HEIGHT_LARGE = 380
 UI_CHART_HEIGHT_XLARGE = 540
-UI_CHART_HEIGHT_STACKED = 680

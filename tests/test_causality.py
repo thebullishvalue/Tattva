@@ -17,6 +17,7 @@ from core.call import CALL_COLUMNS
 from core.config import InstrumentConfig
 from core.instruments import instrument
 from core.knobs import knob
+from core.semantics import breadth_lean
 from engines.mula import MulaEngine
 from pipeline.assemble import assemble
 
@@ -77,8 +78,9 @@ def _call_ts(cut: int) -> pd.DataFrame:
     dates = tgt.index[:len(tgt) - cut]
     rng = np.random.default_rng(5)
     lean = np.clip(rng.normal(0, 0.4, len(tgt)), -1, 1)
-    sw = pd.DataFrame({"Oversold_Pct": np.clip(100 * lean, 0, None),
-                       "Overbought_Pct": np.clip(-100 * lean, 0, None),
+    os_, ob_ = np.clip(100 * lean, 0, None), np.clip(-100 * lean, 0, None)
+    sw = pd.DataFrame({"Oversold_Pct": os_, "Overbought_Pct": ob_,
+                       "Lean": [breadth_lean(a, b) for a, b in zip(os_, ob_)],
                        "_Native": rng.uniform(size=len(tgt)) > 0.05}, index=tgt.index).loc[dates]
     eng = _fitted(cut)
     fvo_ts = eng.ts_data.copy()

@@ -19,6 +19,7 @@ import pytest
 import app
 from core.config import InstrumentConfig, get_instrument_config
 from core.instruments import instrument
+from core.semantics import breadth_lean
 from data.calendars import session_mask
 from engines.mula import MulaEngine
 from pipeline.assemble import assemble
@@ -55,13 +56,12 @@ def test_one_horizon_from_config_to_bundle(gold_app):
 
 
 def test_a_horizon_the_config_cannot_carry_is_refused():
-    assert 7 not in InstrumentConfig().precedent_horizons
-    with pytest.raises(AssertionError):
-        InstrumentConfig(forecast_horizon=7)
-    with pytest.raises(AssertionError):
-        InstrumentConfig(forecast_horizon=10.0)
-    with pytest.raises(AssertionError):
-        InstrumentConfig(forecast_horizon=0, precedent_horizons=(0, 10))
+    # Any whole number of sessions >= 1 is a horizon (no second horizon list
+    # to belong to since the Precedent term structure went); nothing else is.
+    assert InstrumentConfig(forecast_horizon=7).forecast_horizon == 7
+    for bad in (10.0, 0, -5, True):
+        with pytest.raises(AssertionError):
+            InstrumentConfig(forecast_horizon=bad)
 
 
 # ─── C2 ──────────────────────────────────────────────────────────────────────
@@ -78,15 +78,16 @@ def test_a_withheld_newest_row_reads_every_input_at_d_star():
 
     # Swayam carries a NATIVE row after d*, with values that differ from
     # d*'s — a positional read would take it.
-    sw = pd.DataFrame({"Oversold_Pct": np.linspace(10, 60, len(dates)),
-                       "Overbought_Pct": np.linspace(50, 5, len(dates)),
+    os_, ob_ = np.linspace(10, 60, len(dates)), np.linspace(50, 5, len(dates))
+    sw = pd.DataFrame({"Oversold_Pct": os_, "Overbought_Pct": ob_,
+                       "Lean": [breadth_lean(a, b) for a, b in zip(os_, ob_)],
                        "_Native": True}, index=dates)
     fvo_ts = eng.ts_data.copy()
     fvo_ts.index = dates
     asm = assemble(fvo_ts, sw, instrument=instrument("Gold"), cfg=InstrumentConfig(),
                    asof=d_star, today=dates[-1], priors=None)
     verdict = asm.verdict
-    lean = (sw["Oversold_Pct"] - sw["Overbought_Pct"]) / 100.0
+    lean = sw["Lean"]
     assert verdict["asof"] == d_star
     assert asm.call_ts.loc[d_star, "swayam_lean"] == lean.loc[d_star] != lean.iloc[-1]
     assert verdict["action"] == asm.call_ts.loc[d_star, "action"]

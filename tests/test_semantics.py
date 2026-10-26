@@ -1,9 +1,8 @@
 """The one sign vocabulary (core/semantics.py)."""
 import math
 
-from core.semantics import (CLAIM_SIGMA, DEEP_SIGMA, breadth_lean, claim_direction,
-                            oscillator_lean, state_lean, swayam_regime_lean,
-                            valuation_lean, valuation_state)
+from core.semantics import (CLAIM_SIGMA, DEEP_SIGMA, SWAYAM_DEAD, breadth_lean, claim_direction,
+                            swayam_word, valuation_lean, valuation_state)
 
 
 def test_valuation_state_bands():
@@ -20,11 +19,15 @@ def test_valuation_state_bands():
 def test_readings_and_leans_have_opposite_signs():
     # Reading positive = stretched up; the call that implies is bearish.
     assert valuation_lean(1.0) < 0 < valuation_lean(-1.0)
-    assert oscillator_lean(5.0) < 0 < oscillator_lean(-5.0)
+    # An oversold majority of Swayam's views is the bullish lean.
     assert breadth_lean(60, 10) > 0 > breadth_lean(10, 60)
-    # Swayam's HMM "bull" state is the stretched-up one: a bearish lean.
-    assert swayam_regime_lean(70, 10) < 0 < swayam_regime_lean(10, 70)
-    assert state_lean("VERY CHEAP") == 1 and state_lean("RICH") == -1 and state_lean("FAIR") == 0
+    assert breadth_lean(float("nan"), 10) == 0.0
+
+
+def test_the_one_swayam_word():
+    assert swayam_word(SWAYAM_DEAD + 0.01) == "confirms"
+    assert swayam_word(-SWAYAM_DEAD - 0.01) == "contradicts"
+    assert swayam_word(SWAYAM_DEAD) == "split" and swayam_word(float("nan")) == "split"
 
 
 def test_claim_direction_dead_band_and_saturation():

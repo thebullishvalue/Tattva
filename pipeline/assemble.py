@@ -34,7 +34,7 @@ from core.config import VERSION
 from core.grade import causal_drift, expanding_edge, forward_return, series_edge
 from core.knobs import knob
 from core.logger_config import console
-from core.semantics import breadth_lean, claim_direction
+from core.semantics import claim_direction, swayam_word
 from core.trust import PriorTable, posterior, strength
 from data.calendars import trading_days_behind
 from pipeline.evidence import build_evidence
@@ -87,11 +87,11 @@ def gather_inputs(fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame | None, *, in
     (the target's sessions from d* to ``today``, on d*'s row only — a past
     session was issued on its own close, 0 behind); ``claim``
     (``claim_direction(FVO)``, before any precondition); the Swayam sizer's
-    ``swayam_lean`` (breadth_lean of the session's own row; NaN, never
-    filled, when Swayam has no row that day), ``swayam_native`` and
-    ``z_swayam = claim · Lean`` on a native row (NaN on a carried or absent
-    one); the reversion sizer's ``mr_prob, kappa`` and
-    ``z_reversion = 2·MRProb − 1``.
+    ``swayam_lean`` (the session's published ``Lean``, the one Swayam lean
+    ``aggregate_views`` emits; NaN, never filled, when Swayam has no row that
+    day), ``swayam_native`` and ``z_swayam = claim · Lean`` on a native row
+    (NaN on a carried or absent one); the reversion sizer's ``mr_prob, kappa``
+    and ``z_reversion = 2·MRProb − 1``.
 
     ``attrs``: ``h``, ``target``, ``asset_class`` and ``asof`` (d*, the
     newest published session).
@@ -111,9 +111,7 @@ def gather_inputs(fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame | None, *, in
                                                      pd.Timestamp(today).date()))
 
     sw = _by_date(swayam_daily).reindex(idx)
-    os_, ob_ = _col(sw, "Oversold_Pct"), _col(sw, "Overbought_Pct")
-    lean = pd.Series([breadth_lean(a, b) if np.isfinite(a) and np.isfinite(b) else np.nan
-                      for a, b in zip(os_, ob_)], index=idx, dtype=float)
+    lean = _col(sw, "Lean")
     native = (sw["_Native"].astype("boolean").fillna(False).astype(bool)
               if "_Native" in sw.columns else pd.Series(True, index=idx)) & lean.notna()
     claim = fvo.map(claim_direction).astype(np.int64)
@@ -246,14 +244,37 @@ def _terciles(size: pd.Series, y: pd.Series, h: int) -> dict:
     return {f"T{k}": _mean_se(y[terc == k], h) for k in (1, 2, 3)}
 
 
+def _payoff(d: pd.Series, price: pd.Series, *, h: int, exec_lag: int) -> pd.Series:
+    """The claim's drift-neutral payoff d · (Y − μ) on ``d``'s dates.
+
+    Y is the h-session return from the execution close, μ its causal drift
+    (only returns resolved by each date; NaN until DRIFT_MIN_RESOLVED have).
+    """
+    Y = forward_return(price, h, exec_lag)
+    mu, _ = causal_drift(Y, h, exec_lag, DRIFT_MIN_RESOLVED)
+    return d.astype(float) * (Y - mu).reindex(d.index)
+
+
+def _swayam_buckets(inputs: pd.DataFrame, y: pd.Series, rows: pd.Series, h: int) -> dict:
+    """The Swayam sizer's graded audit: the claim's payoff by what Swayam said.
+
+    On the claim rows with a native Swayam row (the sizer's own sample), each
+    session goes to ``core.semantics.swayam_word(d · Lean)`` — contradicts,
+    split or confirms at ±SWAYAM_DEAD — and the claim's drift-neutral payoff
+    is averaged within each, with its SE on n/h windows.
+    """
+    z = inputs["z_swayam"]
+    graded = rows & z.notna()
+    word = z.map(swayam_word)
+    return {w: _mean_se(y[graded & (word == w)], h) for w in ("contradicts", "split", "confirms")}
+
+
 def _call_edge(call_ts: pd.DataFrame, price: pd.Series, *, h: int, exec_lag: int) -> dict:
     """The call graded on the sessions it was issued (w ≠ 0), with its coverage."""
     w, d = call_ts["w"].astype(float), call_ts["d"].astype(float)
     issued, claimed = w != 0, d != 0
     e = series_edge(w, price, h, mask=issued, drift="causal", exec_lag=exec_lag)
-    Y = forward_return(price, h, exec_lag)
-    mu, _ = causal_drift(Y, h, exec_lag, DRIFT_MIN_RESOLVED)
-    y = d * (Y - mu).reindex(call_ts.index)          # the claim's drift-neutral payoff
+    y = _payoff(d, price, h=h, exec_lag=exec_lag)
     # Graded only past the warm-up AND with a defined IC and SE: issued calls
     # that are all the same (one side at one size) have nothing to rank.
     defined = bool(np.isfinite(e["ic"]) and np.isfinite(e["se"]))
@@ -301,14 +322,19 @@ def grade_all(call_ts: pd.DataFrame, inputs: pd.DataFrame, price: pd.Series, evi
       ``claim:sell`` the same on each side (their IC is undefined — one sign —
       so they report hit against the side-matched base, and payoff);
     * ``sizer:<key>`` — the sizer's z against claim · (Y − μ) on the claim
-      rows, with the β the call applied at d*;
+      rows, with the β the call applied at d*; ``sizer:swayam`` also carries
+      ``buckets``, the claim's drift-neutral payoff on its rows by
+      contradicts / split / confirms (``_swayam_buckets``);
     * ``call`` — w on the sessions it was issued, plus coverage, issued-vs-held
       payoff, causal size-tercile payoff and the warm-up status;
-    * ``call:prospective`` — the same on sessions after the priors' run date.
+    * ``call:prospective`` — the same on sessions after the priors' run date;
+    * ``evidence:swayam_lean`` — Swayam's published Lean on its own, as a
+      lean, on the valued sessions with a native Swayam row: EVIDENCE about
+      the sizer's input, read by the Swayam page; it moves nothing.
 
     ``evidence`` is ``build_evidence``'s output; none of its pieces is a lean,
-    so no evidence grade is computed from it yet. A key that raises reads as
-    an empty grade with ``status 'failed: …'``; every key carries ``horizon``.
+    so no grade is computed from it. A key that raises reads as an empty grade
+    with ``status 'failed: …'``; every key carries ``horizon``.
     """
     rows = _claim_rows(inputs)
     claim = inputs["claim"].astype(float)
@@ -320,8 +346,12 @@ def grade_all(call_ts: pd.DataFrame, inputs: pd.DataFrame, price: pd.Series, evi
 
     def sizer(s):
         beta = _num(call_ts[f"{s.key}_beta"].get(d_star)) if d_star is not None else None
-        return _with_asof(grade(inputs[s.z_col], rows, claim), grades_ts.get(f"sizer:{s.key}"),
-                          d_star, beta=beta)
+        e = _with_asof(grade(inputs[s.z_col], rows, claim), grades_ts.get(f"sizer:{s.key}"),
+                       d_star, beta=beta)
+        if s.key == "swayam":
+            e["buckets"] = _swayam_buckets(inputs, _payoff(claim, price, h=h, exec_lag=exec_lag),
+                                           rows, h)
+        return e
 
     specs = {
         "claim": lambda: _stated_rule(_with_asof(grade(claim, rows), grades_ts.get("claim"), d_star)),
@@ -331,6 +361,9 @@ def grade_all(call_ts: pd.DataFrame, inputs: pd.DataFrame, price: pd.Series, evi
         "call": lambda: _call_edge(call_ts, price, h=h, exec_lag=exec_lag),
         "call:prospective": lambda: _prospective(call_ts, price, h=h, exec_lag=exec_lag,
                                                  priors_meta=priors_meta),
+        "evidence:swayam_lean": lambda: grade(inputs["swayam_lean"],
+                                              inputs["valid"] & inputs["printed"]
+                                              & inputs["swayam_native"]),
     }
     edges: dict = {}
     for key, fn in specs.items():

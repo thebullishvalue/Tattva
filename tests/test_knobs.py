@@ -14,10 +14,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: arithmetic identities, percent, the half and a division guard. Every other
 #: number they use is a registered knob.
 ALLOWED = {0, 1, 2, 3, 100, 0.5, 1e-12}
-#: Unit constants allowed at one named site: Swayam's oscillators are published
-#: on a ±10 scale (engines/swayam/kernel.py), and oscillator_lean leaves with
-#: its only consumers, the Convergence package.
-UNIT_SITES = {("core/semantics.py", "oscillator_lean"): {10.0}}
+#: Unit constants allowed at one named site (none since oscillator_lean left
+#: with the Convergence package, its only consumer).
+UNIT_SITES: dict[tuple[str, str], set] = {}
 LINTED = ("core/grade.py", "core/trust.py", "core/semantics.py")
 
 

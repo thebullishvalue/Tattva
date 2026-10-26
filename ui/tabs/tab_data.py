@@ -5,8 +5,8 @@ Tattva — Data tab: every published series, one row per session, exportable.
 UI — the record behind every page, in the units every page shows it in: the
 mispricing as a percentage and in σ (never a log gap rounded to one decimal,
 which printed 0.0 on every row), model spread in basis points, the valuation
-state word, Swayam's net breadth and the convergence readings joined on the
-same date — and the call itself at every session (``call_ts``: what was
+state word and Swayam's published lean (as net breadth, in points) joined on
+the same date — and the call itself at every session (``call_ts``: what was
 issued, why, and every number it was composed from). The export is the same
 joined frame at full precision, so "the evidence, exportable" is literally
 true rather than true of one engine.
@@ -41,7 +41,7 @@ CALL_PREFIX = "Call · "
 
 
 def build_record(ts: pd.DataFrame) -> pd.DataFrame:
-    """The joined, full-precision record: Mūla + Swayam + Convergence + the call, per session."""
+    """The joined, full-precision record: Mūla + Swayam + the call, per session."""
     if ts is None or ts.empty:
         return pd.DataFrame()
     m = ts.copy()
@@ -65,31 +65,17 @@ def build_record(ts: pd.DataFrame) -> pd.DataFrame:
     if "Model spread bps" in out.columns:
         out["Model spread bps"] = pd.to_numeric(out["Model spread bps"], errors="coerce") * 1e4
 
+    # Swayam's one published lean (engines.swayam.aggregate_views' Lean), in
+    # points of net breadth, and the shares it is made of — never re-derived.
     sw = _by_date(st.session_state.get("swayam_daily"))
     if not sw.empty:
-        if {"Oversold_Pct", "Overbought_Pct"} <= set(sw.columns):
-            out["Swayam net breadth"] = (sw["Oversold_Pct"] - sw["Overbought_Pct"]).reindex(out.index)
-            out["Swayam oversold %"] = sw["Oversold_Pct"].reindex(out.index)
-            out["Swayam overbought %"] = sw["Overbought_Pct"].reindex(out.index)
-        if "Avg_Signal" in sw.columns:
-            out["Swayam avg signal"] = sw["Avg_Signal"].reindex(out.index)
-
-    cv = _by_date(st.session_state.get("convergence_df"))
-    if not cv.empty:
-        for src, name in (("agreement_ratio", "Agreement"),
-                          ("convergence_score", "Weighted composite")):
-            if src in cv.columns:
-                out[name] = cv[src].reindex(out.index)
+        out["Swayam net breadth"] = (sw["Lean"] * 100.0).reindex(out.index)
+        out["Swayam oversold %"] = sw["Oversold_Pct"].reindex(out.index)
+        out["Swayam overbought %"] = sw["Overbought_Pct"].reindex(out.index)
     # The call at every session, every column of call_ts (core.call.CALL_COLUMNS).
     ct = _by_date(st.session_state.get("call_ts"))
     for c in ct.columns:
         out[CALL_PREFIX + c] = ct[c].reindex(out.index)
-
-    cons = st.session_state.get("hero_series")
-    if cons is not None and len(cons):
-        c = cons.copy()
-        c.index = pd.to_datetime(c.index, errors="coerce").normalize()
-        out["Consensus"] = c[~c.index.duplicated(keep="last")].reindex(out.index)
     out.index.name = "Date"
     return out
 
@@ -110,8 +96,8 @@ def render_data_tab(ts_filtered, ts, active_target):
         "The Record",
         f"Every published series for {active_target}, one row per session, in the units the "
         f"pages show them in. Readings keep their native sign — positive = stretched up (gap, "
-        f"oscillator, Swayam signal, consensus, composite) — except Swayam net breadth, which "
-        f"is oversold minus overbought and so reads positive when the views lean bullish.",
+        f"oscillator) — except Swayam net breadth, which is its published lean in points "
+        f"(oversold minus overbought) and so reads positive when the views lean bullish.",
         icon="database", accent="cyan",
     )
     _pn = provisional_note(st.session_state.get("fvo_ts"))
@@ -147,5 +133,5 @@ def render_data_tab(ts_filtered, ts, active_target):
         "Download the record (CSV)", csv_data,
         f"tattva_{active_target}_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv",
     )
-    render_note(f"Full history · {len(record):,} sessions · Mūla, Swayam, Convergence and the "
-                f"call joined on date at full precision.")
+    render_note(f"Full history · {len(record):,} sessions · Mūla, Swayam and the call joined "
+                f"on date at full precision.")

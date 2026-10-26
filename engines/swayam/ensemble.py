@@ -7,8 +7,8 @@ deterministic ensemble of causal views spanning three diversity axes —
 
   • timescale       — MSF/MMR at log-spaced lookback windows
   • information set — macro-anchored (MSF+MMR) vs pure price-action (MSF only)
-  • mechanism       — MSF's own orthogonal components (momentum / structure /
-                      flow) promoted to standalone voters
+  • mechanism       — MSF's own components (momentum at the fastest
+                      timescale, flow at the slowest) as standalone views
 
 This is now the system's ONLY breadth formulation. It replaced a basket read
 (run the same kernel across an index's constituents, or a curated proxy basket
@@ -18,20 +18,22 @@ which names, capped at how many, co-directional or inverse (there was a
 polarity flag to flip the ones that ran the other way). Those are judgement
 calls the data never got to overrule, they went stale as constituents changed,
 and they cost a 503-name fetch on a large index. Asking the same question of
-the target's own price makes "breadth" mean agreement among independent views
-of the thing itself, which needs no curation and no proxy assumption.
+the target's own price makes "breadth" mean agreement among views of the
+thing itself, which needs no curation and no proxy assumption.
+
+What it is, stated plainly: a SHORT-WINDOW MACRO-RESIDUAL breadth. The views
+that can vote are the macro-anchored ones, and their vote is driven by the
+MMR deviation of the target from a rolling regression on the same macro panel
+Mūla values against; the price-only views cannot reach the ±5 cut at the
+shipped blend weight (``kernel.can_vote``; :func:`voting_views` counts them).
+It is not a read of the instrument's own internals, and its views are not
+independent of each other: views of one price are correlated by construction
+(``effective_member_count``).
 
 Each member runs through the UNCHANGED per-series kernel
 (``swayam.kernel.run_full_analysis``), producing the identical frame schema,
-and ``aggregate_views`` reduces member votes into the breadth schema the
-convergence layer consumes.
-
-Members are NOT equally weighted. Each view's vote is scaled by its own
-recursively-estimated out-of-sample skill (``analytics.adaptive``), so a
-timescale that has stopped predicting this instrument fades without anyone
-choosing a grid — the same principle the FVO engine uses to average its two
-valuation views. The grid below is therefore a *span* to be weighted, not a
-tuning to be picked.
+and ``aggregate_views`` reduces member votes, every view counted once, into
+the breadth the Swayam confirmation sizer reads.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from engines.swayam.kernel import run_full_analysis
+from engines.swayam.kernel import can_vote, run_full_analysis
 
 
 # ─── Member specification ────────────────────────────────────────────────────
@@ -52,9 +54,8 @@ from engines.swayam.kernel import run_full_analysis
 class SwayamMember:
     """One causal view in the self-ensemble.
 
-    ``name`` keys the view everywhere it appears (the frame dict, the skill
-    weights, the Swayam page's drill-down selector) — so it must be unique
-    within a member set.
+    ``name`` keys the view everywhere it appears (the frame dict and the Swayam
+    page's drill-down selector) — so it must be unique within a member set.
     """
 
     name: str
@@ -90,20 +91,22 @@ def default_swayam_members(
     lengths: tuple[int, ...] = (10, 14, 20, 28, 40),
     roc_frac: float = 0.7,
 ) -> tuple[SwayamMember, ...]:
-    """Build the default 15-member Swayam grid.
+    """Build the default 12-member Swayam grid.
 
     Grid (for the default ``lengths``):
       • 5 timescale × macro-anchored  members: L{10,14,20,28,40}·FULL
       • 5 timescale × price-only      members: L{10,14,20,28,40}·PRICE
-      • 3 component-isolation members (canonical length = middle of
-        ``lengths``, macro-anchored): L{mid}·MOM, L{mid}·STRUCT, L{mid}·FLOW
       • 2 horizon-extreme component members (price-only): fastest·MOM,
         slowest·FLOW
+
+    (Three macro-anchored component-isolation members at the middle length,
+    L{mid}·MOM / ·STRUCT / ·FLOW, were removed without retuning: they shared
+    L{mid}·FULL's MMR exactly (correlation 1.000), and the MMR is what casts a
+    macro-anchored view's vote, so they counted the middle window four times.)
     """
     if not lengths:
         raise ValueError("lengths must be non-empty")
     sorted_lengths = tuple(sorted(lengths))
-    mid = sorted_lengths[len(sorted_lengths) // 2]
     fastest = sorted_lengths[0]
     slowest = sorted_lengths[-1]
 
@@ -115,11 +118,6 @@ def default_swayam_members(
         roc_len = _default_roc_len(length, roc_frac)
         members.append(SwayamMember(f"L{length}·PRICE", length, roc_len, use_macro=False))
 
-    mid_roc = _default_roc_len(mid, roc_frac)
-    members.append(SwayamMember(f"L{mid}·MOM", mid, mid_roc, use_macro=True, components=("momentum",)))
-    members.append(SwayamMember(f"L{mid}·STRUCT", mid, mid_roc, use_macro=True, components=("structure",)))
-    members.append(SwayamMember(f"L{mid}·FLOW", mid, mid_roc, use_macro=True, components=("flow",)))
-
     fastest_roc = _default_roc_len(fastest, roc_frac)
     slowest_roc = _default_roc_len(slowest, roc_frac)
     members.append(SwayamMember(f"L{fastest}·MOM", fastest, fastest_roc, use_macro=False, components=("momentum",)))
@@ -130,12 +128,33 @@ def default_swayam_members(
 
 # Default grid instance — config wires SWAYAM_LENGTHS/ROC_FRAC through
 # this factory, so a different grid is a config change, never an edit here.
+# The frames come back in grid order, which is the order the Swayam page's
+# view selector lists them in.
 SWAYAM_MEMBERS: tuple[SwayamMember, ...] = default_swayam_members()
 
-# Canonical display order for the Swayam tab's "Select View" drop-down
-# (member-grid order, not alphabetical — alphabetical would separate
-# L10·FULL and L10·PRICE from their timescale siblings).
-SWAYAM_MEMBER_ORDER: tuple[str, ...] = tuple(m.name for m in SWAYAM_MEMBERS)
+
+def member_can_vote(member: SwayamMember, cfg) -> bool:
+    """Whether ``member`` can reach the ±vote cut under ``cfg`` (``kernel.can_vote``).
+
+    A member that cannot is flagged here rather than silently diluting the
+    breadth: it sits in ``Total_Analyzed`` but never in ``N_Voting``.
+    """
+    return can_vote(member.use_macro, cfg.swayam_base_weight, cfg.swayam_oversold,
+                    cfg.swayam_overbought)
+
+
+def voting_views(cfg) -> tuple[int, int]:
+    """``(N, M)``: of the M views ``cfg``'s bank holds, the N that can reach the ±vote cut.
+
+    The 'N of M views can reach the ±5 vote' copy. ``cfg`` is an
+    ``InstrumentConfig``; the bank is ``default_swayam_members`` on its
+    lengths. A run on an instrument with no volume drops its flow-only views
+    (:func:`build_swayam_frames`), which can never vote at the shipped blend
+    weight, so N is unchanged and the run's own ``Total_Analyzed`` can be
+    smaller than M.
+    """
+    members = default_swayam_members(cfg.swayam_lengths, cfg.swayam_roc_frac)
+    return sum(member_can_vote(m, cfg) for m in members), len(members)
 
 
 # ─── Ensemble builder ────────────────────────────────────────────────────────
@@ -189,7 +208,7 @@ def build_swayam_frames(
     for i, member in enumerate(active_members):
         try:
             member_macro_cols = macro_cols if (member.use_macro and has_macro_source) else []
-            result_df, _drivers = run_full_analysis(
+            result_df = run_full_analysis(
                 base,
                 length=member.length,
                 roc_len=member.roc_len,
@@ -220,9 +239,9 @@ def effective_member_count(frames: dict[str, pd.DataFrame]) -> float:
     N_eff = (sum of eigenvalues)^2 / (sum of squared eigenvalues) of the
     correlation matrix of member ``Unified`` oscillators — full-sample,
     DIAGNOSTIC ONLY (a full-history statistic, so say "over the full history"
-    wherever it is shown). Never fed into the causal signal path or the
-    learners; it exists to disclose that views of ONE price are correlated by
-    construction, so fifteen views are worth far fewer than fifteen votes.
+    wherever it is shown). Never fed into the causal signal path; it exists
+    to disclose that views of ONE price are correlated by construction, so a
+    dozen views are worth far fewer than a dozen votes.
 
     Returns ``0.0`` for fewer than 2 usable members.
     """

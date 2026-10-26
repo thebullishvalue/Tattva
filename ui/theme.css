@@ -30,9 +30,8 @@
       that needs blur to read as "above" the page is not elevated, it's
       decorated.
 
-   6. MOTION ONLY WHERE IT MEANS SOMETHING. The ticker scrolls because a tape
-      scrolls. Nothing else moves on its own, and everything stops under
-      prefers-reduced-motion.
+   6. MOTION ONLY WHERE IT MEANS SOMETHING. Nothing moves on its own, and
+      everything stops under prefers-reduced-motion.
 
    7. LEGIBILITY IS NOT NEGOTIABLE. Body text clears WCAG AA (4.5:1) on its own
       surface, large text clears 3:1, and focus is always visible in both
@@ -214,7 +213,7 @@
 /* Every numeral in the app is tabular. Without this, a column of prices
    shimmers as digits change width and the eye cannot hold a baseline. */
 .stApp [class*="value"], .stApp td, .stApp th,
-.stApp .mono, .tt-item, .hero-signal, .hero-conviction,
+.stApp .mono, .hero-signal, .hero-conviction,
 .command-bar .cb-quote, .command-bar .cb-meta .v, .rail-readout .v,
 .metric-card h2, .metric-card .value {
     font-variant-numeric: tabular-nums;
@@ -251,70 +250,6 @@
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
     overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
 }
-
-/* ─────────────────────────────────────────────────────────────────────────
-   3 · TICKER TAPE
-   The one element that moves, because a tape is a thing that moves. Two
-   identical halves scroll as one track and the animation resets at -50%,
-   so the loop is seamless without JavaScript. Hovering pauses it — a
-   number you cannot stop to read is decoration, not data.
-   ───────────────────────────────────────────────────────────────────────── */
-.ticker {
-    position: relative;
-    overflow: hidden;
-    background: var(--surface-1);
-    border-block: 1px solid var(--line);
-    margin: 0 0 var(--s5);
-    height: 30px;
-    display: flex;
-    align-items: center;
-    contain: content;
-}
-/* Edge fades: the tape should read as continuous rather than clipped. */
-.ticker::before, .ticker::after {
-    content: ""; position: absolute; top: 0; bottom: 0; width: 48px;
-    z-index: 2; pointer-events: none;
-}
-.ticker::before { left: 0;  background: linear-gradient(90deg, var(--surface-1), transparent); }
-.ticker::after  { right: 0; background: linear-gradient(270deg, var(--surface-1), transparent); }
-
-.tt-track {
-    display: flex;
-    gap: var(--s6);
-    white-space: nowrap;
-    will-change: transform;
-    animation: tt-scroll var(--tt-duration, 90s) linear infinite;
-    padding-left: var(--s6);
-}
-.ticker:hover .tt-track,
-.ticker:focus-within .tt-track { animation-play-state: paused; }
-
-@keyframes tt-scroll {
-    from { transform: translate3d(0, 0, 0); }
-    to   { transform: translate3d(-50%, 0, 0); }
-}
-
-/* Centre, not baseline: the symbol, price and change are set at different
-   sizes, so a shared baseline pushed the smaller glyphs visibly high in the
-   30px tape. */
-.tt-item {
-    display: inline-flex; align-items: center; gap: var(--s2);
-    font-family: var(--mono); font-size: var(--fs-xs); line-height: 1;
-}
-.tt-sym {
-    color: var(--ink-secondary); font-weight: 600;
-    letter-spacing: 0.04em; text-transform: uppercase;
-}
-.tt-px { color: var(--ink); font-weight: 500; }
-.tt-chg { font-weight: 600; }
-.tt-chg.up   { color: var(--long); }
-.tt-chg.down { color: var(--short); }
-.tt-chg.flat { color: var(--ink-tertiary); }
-/* Direction is carried by a glyph as well as a colour — colour alone fails
-   for the ~8% of men with red/green deficiency, and this is the one reading
-   in the app where getting the sign wrong is unrecoverable. */
-.tt-chg::before { content: attr(data-arrow); margin-right: 2px; }
-.tt-sep { color: var(--line-strong); }
 
 /* ─────────────────────────────────────────────────────────────────────────
    4 · APP HEADER / COMMAND BAR
@@ -991,17 +926,15 @@
    ───────────────────────────────────────────────────────────────────────── */
 /* Informative cards carry their state in the title colour and a faint tint —
    NOT a left rule. The 2px accent bar is reserved for things that are ranked
-   or actionable (the hero's verdict, an analog's tier). On a static readout
+   or actionable (the hero's verdict). On a static readout
    it was decoration standing in for a claim. */
-.interp-card, .info-box,
+.interp-card,
 .interp-card.success, .interp-card.danger, .interp-card.warning,
-.interp-card.info, .interp-card.accent, .interp-card.neutral,
-.info-box.cyan, .info-box.amber, .info-box.emerald,
-.info-box.rose, .info-box.violet, .info-box.accent {
+.interp-card.info, .interp-card.accent, .interp-card.neutral {
     border-left-width: 1px !important;
     border-left-color: var(--line) !important;
 }
-.interp-card, .warning-box, .info-box {
+.interp-card, .warning-box {
     background: var(--surface-1);
     border: 1px solid var(--line-strong);
     border-left: 2px solid var(--ink-quaternary);
@@ -1030,8 +963,8 @@
 .interp-card.info    .interp-title { color: var(--system); }
 .interp-card.accent  .interp-title { color: var(--accent); }
 
-/* warning-box / info-box: title+content (warning-box) or h4+p (info-box). */
-.warning-box, .info-box { display: flex; gap: var(--s3); align-items: flex-start; }
+/* warning-box: icon, then title+content. */
+.warning-box { display: flex; gap: var(--s3); align-items: flex-start; }
 .warning-box { border-left-color: var(--caution); background: var(--caution-fill); }
 .warning-box .icon {
     flex: none; width: 18px; height: 18px; border-radius: 50%; margin-top: 1px;
@@ -1040,26 +973,19 @@
     display: flex; align-items: center; justify-content: center;
 }
 .warning-box .icon::before { content: "!"; }
-.warning-box .title, .info-box h4 {
+.warning-box .title {
     margin: 0 0 var(--s1); font-family: var(--sans); font-size: var(--fs-sm); font-weight: 650;
     color: var(--ink);
 }
-.warning-box .content, .info-box p {
+.warning-box .content {
     margin: 0; font-family: var(--sans); font-size: var(--fs-sm);
     line-height: 1.6; color: var(--ink-secondary);
 }
-.info-box { border-left-color: var(--system); background: var(--system-fill); }
-.info-box.cyan    { border-left-color: var(--system);  background: var(--system-fill); }
-.info-box.amber   { border-left-color: var(--caution); background: var(--caution-fill); }
-.info-box.emerald { border-left-color: var(--long);    background: var(--long-fill); }
-.info-box.rose    { border-left-color: var(--short);   background: var(--short-fill); }
-.info-box.violet  { border-left-color: var(--violet);  background: var(--violet-fill); }
-.info-box.accent  { border-left-color: var(--accent);  background: var(--accent-fill); }
 
 
 /* ─────────────────────────────────────────────────────────────────────────
    9 · CHIPS / STATUS BADGES
-   One badge system, used for analog tiers, session/freshness state, and any
+   One badge system, used for session/freshness state, gap stationarity, and any
    other "state in a word" reading. Tone carries the claim; the leading dot
    repeats it for anyone who can't rely on colour alone.
    ───────────────────────────────────────────────────────────────────────── */
@@ -1077,94 +1003,11 @@
 .chip-warning { color: var(--caution);      background: var(--caution-fill); }
 .chip-info    { color: var(--system);       background: var(--system-fill); }
 .chip-neutral { color: var(--ink-tertiary); background: var(--surface-2); border-color: var(--line-strong); }
-.chip-outline { background: transparent; }
-
-/* ─────────────────────────────────────────────────────────────────────────
-   10 · ANALOG CARDS (Precedent)
-   ───────────────────────────────────────────────────────────────────────── */
-/* Analog card — a panel with a state rule, same surface and radius as every
-   other framed thing. Its own bottom margin now provides the stacking gap
-   (an inline spacer div in the tab used to do it). */
-.analog-card {
-    background: var(--surface-1);
-    border: 1px solid var(--line);
-    border-left: 2px solid var(--ink-quaternary);
-    border-radius: var(--r-lg); padding: var(--s4); margin-bottom: var(--s3);
-}
-.analog-card.tier-strong-buy { border-left-color: var(--long); }
-.analog-card.tier-buy        { border-left-color: var(--long-edge); }
-.analog-card.tier-caution    { border-left-color: var(--short); }
-.analog-card.tier-hold       { border-left-color: var(--neutral); }
-.analog-card-head {
-    display: flex; justify-content: space-between; align-items: flex-start;
-    gap: var(--s3); margin-bottom: var(--s3);
-}
-.analog-eyebrow {
-    font-family: var(--mono); font-size: var(--fs-3xs); font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-quaternary);
-}
-.analog-symbol {
-    font-family: var(--mono); font-size: var(--fs-md); font-weight: 700;
-    color: var(--ink); margin-top: 2px;
-}
-.analog-stat-row {
-    display: flex; flex-wrap: wrap; gap: var(--s4);
-    padding-bottom: var(--s3); border-bottom: 1px solid var(--line-faint);
-}
-.analog-stat { display: flex; flex-direction: column; gap: 1px; }
-.analog-stat-label {
-    font-family: var(--mono); font-size: var(--fs-3xs);
-    text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-quaternary);
-}
-.analog-stat-value {
-    font-family: var(--mono); font-size: var(--fs-sm); font-weight: 600; color: var(--ink);
-}
-.analog-stat-value.pos { color: var(--long); }
-.analog-stat-value.neg { color: var(--short); }
-.analog-stat-value.accent { color: var(--accent); }
-.analog-fwd-block { margin-top: var(--s3); }
-.analog-fwd-block-label {
-    font-family: var(--mono); font-size: var(--fs-3xs);
-    text-transform: uppercase; letter-spacing: 0.1em;
-    color: var(--ink-quaternary); margin-bottom: var(--s2);
-}
-.analog-fwd-grid { display: grid; gap: var(--s2); }
-.analog-fwd-tile {
-    display: flex; flex-direction: column; align-items: center; gap: 1px;
-    padding: var(--s2) var(--s1); border-radius: var(--r-sm);
-    background: var(--surface-2); border: 1px solid var(--line-faint);
-}
-.analog-fwd-label {
-    font-family: var(--mono); font-size: var(--fs-3xs);
-    color: var(--ink-quaternary); letter-spacing: 0.06em;
-}
-.analog-fwd-value { font-family: var(--mono); font-size: var(--fs-xs); font-weight: 700; }
-.analog-fwd-tile.pos .analog-fwd-value { color: var(--long); }
-.analog-fwd-tile.neg .analog-fwd-value { color: var(--short); }
-.analog-fwd-tile.flat .analog-fwd-value { color: var(--ink-tertiary); }
-.analog-card-foot {
-    display: flex; justify-content: space-between; align-items: center;
-    gap: var(--s3); margin-top: var(--s3);
-    padding-top: var(--s2); border-top: 1px solid var(--line-faint);
-    font-family: var(--mono); font-size: var(--fs-3xs); color: var(--ink-quaternary);
-}
-.analog-foot-label { text-transform: uppercase; letter-spacing: 0.1em; }
-.analog-foot-pct { color: var(--accent); font-weight: 700; }
-.conviction-bar {
-    flex: 1; height: 2px; border-radius: var(--r-pill);
-    background: var(--line-strong); overflow: hidden;
-}
-.conviction-bar-fill { height: 100%; border-radius: var(--r-pill); background: var(--caution); }
-.conviction-bar-fill.fill-strong-buy { background: var(--long); }
-.conviction-bar-fill.fill-buy        { background: var(--long-edge); }
-.conviction-bar-fill.fill-caution    { background: var(--short); }
-.conviction-bar-fill.fill-hold       { background: var(--neutral); }
-.analog-card-id { min-width: 0; }
 
 /* ─────────────────────────────────────────────────────────────────────────
    11 · EMPTY STATES & SKELETON LOADING
    Professional, icon-free, one explanation + one suggested action. Used for
-   "no data yet", "no usable precedent", "no weights yet" everywhere in the
+   "no data yet", "not yet graded", "no Swayam breadth" everywhere in the
    app so degraded states read as one system rather than six ad hoc notices.
    ───────────────────────────────────────────────────────────────────────── */
 .empty-state {
@@ -1965,7 +1808,7 @@
    takes the component's typography, never the page's. */
 .section-hdr .desc p, .panel-hdr p, .panel-foot p, .notice .n-body p,
 .metric-card p, .empty-state p, .control-hint p, .sub-head p,
-.rail-readout p, .chip-row p, .lookback-row p, .analog-card p,
+.rail-readout p, .chip-row p, .lookback-row p,
 .hero-headline p, .hero-limit p, .hero-gate p, .interp-body p,
 .panel-state p, .es-body p {
     margin: 0 !important;
@@ -2406,9 +2249,7 @@
     .hero-gate { grid-template-columns: 1fr; gap: 2px; }
     .hero-gate-detail { padding-left: 0; }
     .hero-gate-bar { max-width: 120px; }
-    .analog-stat-row { gap: var(--s3); }
     .stTabs [data-baseweb="tab-list"] { gap: var(--s3); overflow-x: auto; }
-    .ticker { height: 26px; }
     /* Quote drops its divider and wraps under the symbol rather than
        shrinking; a price is the last thing that should get smaller. */
     .command-bar .cb-quote { padding-left: 0; border-left: none; }
@@ -2433,9 +2274,6 @@
         transition-duration: 0.01ms !important;
         scroll-behavior: auto !important;
     }
-    /* The tape stops and becomes a scrollable strip rather than a blur. */
-    .tt-track { animation: none !important; }
-    .ticker { overflow-x: auto; }
     /* The skeleton keeps its SHAPE — it is the layout placeholder, and the
        shimmer was only ever the "still working" part of the message. */
     .skeleton::after { animation: none !important; }
@@ -2450,7 +2288,7 @@
    detached from its evidence. */
 @media print {
     .stApp { background: #fff; color: #000; }
-    .ticker, [data-testid="stSidebar"], [data-testid="stHeader"],
+    [data-testid="stSidebar"], [data-testid="stHeader"],
     .stTabs [data-baseweb="tab-list"], .toolbar-strip, .st-key-toolbar,
     [data-testid="stButtonGroup"] { display: none !important; }
     /* The command bar STAYS: on paper it is the only thing identifying which
@@ -2460,7 +2298,7 @@
         break-inside: avoid; break-after: avoid;
     }
     [data-testid="stMain"] .block-container { padding: 0 !important; }
-    .hero-card, .metric-card, .analog-card, .notice {
+    .hero-card, .metric-card, .notice {
         border: 1px solid #ccc; background: #fff; break-inside: avoid;
     }
     .hero-signal, .metric-card .value, .metric-card h2,

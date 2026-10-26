@@ -352,11 +352,12 @@ class OnlineFactorModel:
 
     Per step the model emits, using information up to and including t:
 
-    * ``scores``  -- unit-variance factor returns f_t
     * ``k``       -- number of factors above the Marchenko-Pastur edge
-    * ``loadings``-- the current eigenbasis (columns)
+    * ``levels``  -- the cumulative factor levels (the integrated unit-variance
+                     factor returns f_t)
     * ``contrib`` -- cumulative attribution of each factor level back to the
                      individual instruments that produced it
+                     (:meth:`instrument_contribution`)
 
     The attribution is exact rather than approximate: factor levels are
     linear in standardised returns, so F_k,t = sum_i contrib[k, i] holds
@@ -366,7 +367,6 @@ class OnlineFactorModel:
     def __init__(self, n: int, memories: tuple[float, ...] = MEMORY_GRID) -> None:
         self.n = n
         self.mem = [_CorrMemory(n, h) for h in memories]
-        self.memories = memories
         self.active = len(memories) - 1        # start at the longest memory
         #: Instruments admitted at least once so far.  Monotone by
         #: construction, so it can only grow forward in time -- which is what
@@ -491,20 +491,7 @@ class OnlineFactorModel:
         self.k = k
         self.last_scores = scores
         self.t += 1
-        return {
-            "k": k,
-            "scores": scores,
-            "levels": self.levels.copy(),
-            "memory": self.memories[self.active],
-            "memory_weights": w,
-            "t_eff": m.t_eff,
-            "n_active": n_active,
-            "explained": float(np.sum(m.lam_eig[:k]) / n_active) if k else 0.0,
-        }
-
-    def loadings(self) -> np.ndarray:
-        m = self.mem[self.active]
-        return m.V[:, :max(m.k, 1)].copy()
+        return {"k": k, "levels": self.levels.copy()}
 
     def instrument_contribution(self) -> np.ndarray:
         """(K_MAX, N) cumulative attribution of factor levels to instruments."""

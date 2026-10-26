@@ -922,19 +922,9 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   8 · INTERPRETATION & SYSTEM CARDS
+   8 · SYSTEM CARDS
    ───────────────────────────────────────────────────────────────────────── */
-/* Informative cards carry their state in the title colour and a faint tint —
-   NOT a left rule. The 2px accent bar is reserved for things that are ranked
-   or actionable (the hero's verdict). On a static readout
-   it was decoration standing in for a claim. */
-.interp-card,
-.interp-card.success, .interp-card.danger, .interp-card.warning,
-.interp-card.info, .interp-card.accent, .interp-card.neutral {
-    border-left-width: 1px !important;
-    border-left-color: var(--line) !important;
-}
-.interp-card, .warning-box {
+.warning-box {
     background: var(--surface-1);
     border: 1px solid var(--line-strong);
     border-left: 2px solid var(--ink-quaternary);
@@ -942,26 +932,6 @@
     padding: var(--s4);
     margin: var(--s3) 0;
 }
-.interp-title {
-    font-family: var(--mono); font-size: var(--fs-2xs); font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.12em;
-    color: var(--ink-secondary); margin-bottom: var(--s2);
-}
-.interp-body {
-    font-family: var(--sans); font-size: var(--fs-sm);
-    line-height: 1.65; color: var(--ink-secondary);
-}
-.interp-card.success { border-left-color: var(--long);    background: var(--long-fill); }
-.interp-card.danger  { border-left-color: var(--short);   background: var(--short-fill); }
-.interp-card.warning { border-left-color: var(--caution); background: var(--caution-fill); }
-.interp-card.info    { border-left-color: var(--system);  background: var(--system-fill); }
-.interp-card.accent  { border-left-color: var(--accent);  background: var(--accent-fill); }
-.interp-card.neutral { border-left-color: var(--neutral); }
-.interp-card.success .interp-title { color: var(--long); }
-.interp-card.danger  .interp-title { color: var(--short); }
-.interp-card.warning .interp-title { color: var(--caution); }
-.interp-card.info    .interp-title { color: var(--system); }
-.interp-card.accent  .interp-title { color: var(--accent); }
 
 /* warning-box: icon, then title+content. */
 .warning-box { display: flex; gap: var(--s3); align-items: flex-start; }
@@ -1808,8 +1778,8 @@
    takes the component's typography, never the page's. */
 .section-hdr .desc p, .panel-hdr p, .panel-foot p, .notice .n-body p,
 .metric-card p, .empty-state p, .control-hint p, .sub-head p,
-.rail-readout p, .chip-row p, .lookback-row p,
-.hero-headline p, .hero-limit p, .hero-gate p, .interp-body p,
+.rail-readout p, .lookback-row p,
+.hero-headline p, .hero-limit p, .hero-gate p,
 .panel-state p, .es-body p {
     margin: 0 !important;
     font: inherit !important;
@@ -2027,19 +1997,10 @@
     border: 1px solid var(--line); border-radius: var(--r-md);
 }
 /* ── Shared small compositions ───────────────────────────────────────────
-   Classes for the three layouts the tab files had been hand-rolling with
+   Classes for the layouts the tab files had been hand-rolling with
    inline `style="..."` strings. An inline style is a private stylesheet: it
    cannot be re-themed, it does not participate in the light theme, and it
    drifts the moment the same layout is needed twice. */
-
-/* A labelled row of status chips (Diagnostics' stationarity / θ stability). */
-.chip-row {
-    display: flex; gap: var(--s6); margin-top: var(--s3); flex-wrap: wrap;
-}
-.chip-row .cr-item {
-    display: inline-flex; align-items: center; gap: var(--s2);
-    font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink-tertiary);
-}
 
 /* A sub-heading INSIDE a section — one step below `.section-hdr`, used where
    a section has two labelled parts (e.g. Diagnostics' "Importance Over Time"

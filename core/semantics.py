@@ -20,14 +20,21 @@ it. This module is the one place it is written down:
   and is what anything that scores direction against a forward return uses.
 
 The words are defined once here too: the valuation states (Cheap / Fair /
-Rich), the one Swayam word (confirms / split / contradicts) and the one grade
-label (``edge_tier``), so no two pages can word the same reading differently.
-Every cut they use is a registered knob (``core.knobs``); none is a literal.
+Rich), the one Swayam word (confirms / split / contradicts), the one grade
+label (``edge_tier``) and the one gap-stationarity word
+(``gap_stationarity``), so no two pages can word the same reading
+differently. Every cut they use is a registered knob (``core.knobs``); none is
+a literal. :func:`claim_oscillator` is the claim's one candidate alternative
+unit, dormant until the pooled-prior study's Decision A and an owner-signed
+change.
 """
 
 from __future__ import annotations
 
 import math
+
+import numpy as np
+import pandas as pd
 
 from core.knobs import knob
 
@@ -39,12 +46,21 @@ CLAIM_SIGMA: float = knob("CLAIM_SIGMA")
 DEEP_SIGMA: float = knob("DEEP_SIGMA")
 #: Net Swayam breadth, aligned with the claim, inside ±this is a split read.
 SWAYAM_DEAD: float = knob("SWAYAM_DEAD")
+#: The size both stationarity tests on Mūla's gap are read at.
+STATIONARITY_ALPHA: float = knob("STATIONARITY_ALPHA")
+#: Published sessions Decision A's candidate unit centres and scales FVO on.
+CLAIM_CENTRING_WINDOW: int = knob("CLAIM_CENTRING_WINDOW")
 
 _T0: float = knob("STRENGTH_T0")
 _T1: float = knob("STRENGTH_T1")
 
-#: Mūla valuation states, cheapest first.
-VALUATION_STATES: tuple[str, ...] = ("VERY CHEAP", "CHEAP", "FAIR", "RICH", "VERY RICH")
+#: The three gap-stationarity words (:func:`gap_stationarity`), strongest first.
+GAP_STATES: tuple[str, ...] = (
+    "stationary", "reverts around a drifting level: unproven (see claim unit)",
+    "unit root not rejected")
+
+#: Decision A's candidate unit (:func:`claim_oscillator`); ``'none'`` is FVO itself.
+CLAIM_UNITS: tuple[str, ...] = ("none", f"robust_z_{CLAIM_CENTRING_WINDOW}")
 
 
 def _finite(x) -> float | None:
@@ -140,3 +156,69 @@ def edge_tier(t) -> tuple[str, str]:
     if v < _T1:
         return "edge", "success"
     return "solid edge", "success"
+
+
+def gap_stationarity(adf_p: float, kpss_p: float) -> str:
+    """The one word for whether Mūla's gap is stationary, from its two tests.
+
+    ``adf_p`` is the ADF p-value (null: a unit root), ``kpss_p`` the KPSS
+    p-value (null: stationary about a constant), both read at
+    STATIONARITY_ALPHA:
+
+      * ``'stationary'`` — ADF rejects the unit root and KPSS does not
+        reject stationarity: both tests agree;
+      * ``'reverts around a drifting level: unproven (see claim unit)'`` — ADF
+        rejects the unit root but KPSS rejects a constant level too (or did
+        not run): the gap reverts, but around a level that moves, which is
+        the claim's unit question (C12), not a settled stationarity;
+      * ``'unit root not rejected'`` — ADF does not reject (or did not run).
+
+    Evidence about the claim, labelled a full-history diagnostic wherever it
+    is shown; it is no precondition and moves nothing. It replaces two
+    definitions that contradicted each other on three of four instruments
+    (ADF alone on the Mūla page, ADF and KPSS on System).
+    """
+    adf, kp = _finite(adf_p), _finite(kpss_p)
+    if adf is None or adf >= STATIONARITY_ALPHA:
+        return GAP_STATES[2]
+    if kp is not None and kp > STATIONARITY_ALPHA:
+        return GAP_STATES[0]
+    return GAP_STATES[1]
+
+
+def claim_oscillator(fvo: pd.Series, mode: str) -> pd.Series:
+    """The claim's oscillator in ``mode``'s unit — DORMANT: nothing applies it.
+
+    ``'none'`` is Mūla's FVO itself (a copy). ``'robust_z_252'`` is Decision
+    A's pre-registered candidate: on the PUBLISHED sessions (FVO finite), each
+    session's FVO against the median and the MAD of the CLAIM_CENTRING_WINDOW
+    published sessions strictly before it,
+
+        z_t = (FVO_t − median(FVO_{t−W..t−1})) / (1.4826 · MAD(FVO_{t−W..t−1})),
+
+    so it is causal and lagged: row t reads nothing dated t or later besides
+    FVO_t itself. NaN until W published sessions precede it, on every
+    unpublished session, and where the window's MAD is 0.
+
+    The pooled-prior study evaluates it on held-out members and records the
+    decision in ``KNOBS['CLAIM_CENTRING']``; adopting it is an owner-signed
+    change that publishes it in place as FVO. Until then the claim, every
+    grade and every page read raw FVO.
+    """
+    s = pd.to_numeric(pd.Series(fvo), errors="coerce").astype(float)
+    if mode == CLAIM_UNITS[0]:
+        return s.copy()
+    if mode != CLAIM_UNITS[1]:
+        raise ValueError(f"claim unit {mode!r} is not one of {CLAIM_UNITS}")
+    w = int(CLAIM_CENTRING_WINDOW)
+    out = pd.Series(np.nan, index=s.index)
+    pos = np.flatnonzero(s.notna().to_numpy())
+    x = s.to_numpy()[pos]
+    if len(x) > w:
+        win = np.lib.stride_tricks.sliding_window_view(x[:-1], w)    # x[t−W..t−1], t = W…
+        med = np.median(win, axis=1)
+        mad = 1.4826 * np.median(np.abs(win - med[:, None]), axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            z = np.where(mad > 0, (x[w:] - med) / mad, np.nan)
+        out.iloc[pos[w:]] = z
+    return out

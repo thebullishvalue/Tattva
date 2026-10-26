@@ -1,10 +1,11 @@
 """
-Tattva — admitted evidence about the claim: who closes the gap, and the claim's unit.
+Tattva — admitted evidence: who closes the gap, the claim's unit, the gap's
+stationarity and the reversion sizer's gap-implied move.
 तत्त्व (Tattva) — "Principle / Essence"
 
 Evidence audits a role-holder from that role-holder's own published outputs,
-with no model of its own, and never moves the call. Two pieces audit the
-claim here:
+with no model of its own, and never moves the call. Three pieces audit the
+claim here and one the reversion sizer:
 
   * :func:`gap_split` — when Mūla's gap was open, how much of its closing
     over the call's horizon did PRICE do, and how much did FAIR VALUE do by
@@ -13,6 +14,13 @@ claim here:
     instruments fair value does most of the closing.)
   * :func:`claim_unit` — is the oscillator in the unit its cuts assume (the
     charter's C12 contract: centred, unit SD, RICH and CHEAP balanced)?
+  * :func:`gap_tests` — ADF and KPSS on the published gap through d*, read
+    into the one stationarity word (``core.semantics.gap_stationarity``): a
+    full-history diagnostic, no precondition;
+  * :func:`ecm_drift` — the error-correction layer's gap-implied h-session
+    move (``MulaDriftPct``, the drift excluded), a lean of the reversion
+    sizer's own layer that ``pipeline.assemble.grade_all`` grades as
+    ``edges['evidence:ecm_drift']``.
 
 No Streamlit dependency.
 """
@@ -20,12 +28,19 @@ No Streamlit dependency.
 from __future__ import annotations
 
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
 
 from core.knobs import knob
-from core.semantics import claim_direction
+from core.semantics import claim_direction, gap_stationarity
+
+try:
+    from statsmodels.tsa.stattools import adfuller, kpss
+    _HAS_STATSMODELS = True
+except ImportError:  # pragma: no cover — optional dependency
+    _HAS_STATSMODELS = False
 
 #: Pairs per phase offset below which an offset's slope is not computed.
 _MIN_PAIRS: int = knob("GRADE_MIN_WIN")
@@ -35,6 +50,10 @@ _MIN_PAIRS: int = knob("GRADE_MIN_WIN")
 UNIT_MAX_ABS_MEAN = 0.15
 UNIT_SD_RANGE = (0.8, 1.2)
 UNIT_RICH_CHEAP_RANGE = (0.67, 1.5)
+
+#: Published gaps the stationarity tests need: with this many or fewer
+#: neither runs, and the word is 'unit root not rejected'.
+TEST_MIN_OBS = 30
 
 
 def _frame(fvo_ts: pd.DataFrame) -> pd.DataFrame:
@@ -144,15 +163,77 @@ def claim_unit(fvo_ts: pd.DataFrame) -> dict:
             "contract": contract, "passes": all(contract.values())}
 
 
+def gap_tests(fvo_ts: pd.DataFrame) -> dict:
+    """The gap's stationarity as of d*: ADF and KPSS, and the one word for them.
+
+    Both tests run on the published gap (``Residual``) of the Valid sessions,
+    the history through d* the claim is graded on: ADF with its lag order by
+    AIC (null: a unit root), KPSS about a constant with automatic lags (null:
+    stationary; statsmodels reports its p-value only inside [0.01, 0.10]).
+    ``state`` is ``core.semantics.gap_stationarity(adf_pvalue, kpss_pvalue)``,
+    labelled a full-history diagnostic wherever it is shown: one test of the
+    whole record, not an as-of series, and no precondition of the call.
+
+    Returns ``{state, adf_pvalue, kpss_pvalue, n, asof, scope}``.
+    """
+    f = _frame(fvo_ts)
+    gap = pd.to_numeric(f["Residual"], errors="coerce")[f["Valid"].astype(bool)].dropna()
+    g = gap.to_numpy(dtype=np.float64)
+    adf_p = kpss_p = math.nan
+    if _HAS_STATSMODELS and len(g) > TEST_MIN_OBS:
+        with warnings.catch_warnings():
+            # statsmodels announces a return-type change (the p-value is
+            # element [1] under both) and that KPSS's table is truncated.
+            warnings.simplefilter("ignore")
+            adf_p = float(adfuller(g, autolag="AIC")[1])
+            kpss_p = float(kpss(g, regression="c", nlags="auto")[1])
+    return {"state": gap_stationarity(adf_p, kpss_p), "adf_pvalue": adf_p, "kpss_pvalue": kpss_p,
+            "n": int(len(g)), "asof": gap.index[-1] if len(g) else None,
+            "scope": "full-history diagnostic"}
+
+
+def ecm_drift(fvo_ts: pd.DataFrame, h: int) -> dict:
+    """The reversion sizer's layer, read as a lean: the gap-implied h-session move.
+
+    ``MulaDriftPct`` is the error-correction layer's projection of today's
+    gap over the horizon, b·z·Σφᵏ in percent: the move PRICE would make if it
+    responded to the gap as the layer estimates, with the regression's
+    intercept — the drift — left out. It is the reversion sizer's mechanism in
+    price units, so it is EVIDENCE→sizer:reversion: bullish-positive, graded
+    as ``edges['evidence:ecm_drift']`` (drift-neutral, on the valued
+    sessions), shown neutral-toned beside that grade, and never the expected
+    move.
+
+    Returns ``{lean, label, value, sd, asof, h}``: the series by date, the
+    words it is shown under, and its reading and h-session SD (``MulaSdPct``)
+    at d*.
+    """
+    f = _frame(fvo_ts)
+    lean = pd.to_numeric(f["MulaDriftPct"], errors="coerce").astype(float)
+    sd = pd.to_numeric(f["MulaSdPct"], errors="coerce").astype(float)
+    pub = f.index[pd.to_numeric(f["FVO"], errors="coerce").notna().to_numpy()]
+    d_star = pub[-1] if len(pub) else None
+
+    def _at(x: pd.Series) -> float:
+        v = x.get(d_star) if d_star is not None else None
+        return float(v) if v is not None and np.isfinite(v) else math.nan
+
+    return {"lean": lean, "label": f"gap-implied {int(h)}D move (excludes drift)",
+            "value": _at(lean), "sd": _at(sd), "asof": d_star, "h": int(h)}
+
+
 def build_evidence(fvo_ts: pd.DataFrame, *, h: int, exec_lag: int) -> dict:
-    """The claim's admitted evidence: ``{'gap_split', 'claim_unit'}``.
+    """The admitted evidence: ``{'gap_split', 'claim_unit', 'gap_stationarity',
+    'ecm_drift'}``.
 
     Each piece is computed on its own, and one that fails reads
-    ``{'error': ...}`` without touching the other or the call.
+    ``{'error': ...}`` without touching the others or the call.
     """
     out: dict = {}
     for name, fn in (("gap_split", lambda: gap_split(fvo_ts, h, exec_lag)),
-                     ("claim_unit", lambda: claim_unit(fvo_ts))):
+                     ("claim_unit", lambda: claim_unit(fvo_ts)),
+                     ("gap_stationarity", lambda: gap_tests(fvo_ts)),
+                     ("ecm_drift", lambda: ecm_drift(fvo_ts, h))):
         try:
             out[name] = fn()
         except Exception as e:                       # noqa: BLE001 - evidence, never the call

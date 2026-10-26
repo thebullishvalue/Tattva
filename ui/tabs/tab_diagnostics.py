@@ -1,105 +1,119 @@
 """
-Tattva — System tab: does the machinery behind the call actually hold up?
+Tattva — System tab: what the call runs on.
+तत्त्व (Tattva) — "Principle / Essence"
 
-Everything here answers a question the engine pages assume the answer to: the
-statistics of the gap Mūla's claim rests on, and whether the data layer
-feeding all of it is healthy. Every grade lives on the Grades page.
+INFRASTRUCTURE — everything here guarantees one as-of row and causality, and
+none of it is a grade or a reading of the market:
 
-Reading order — the house convention every analysis tab follows:
+  1 STATE     which history, which session?       d* · h and L · epoch · fingerprint · history rewritten?
+  2 TRUST     which pooled priors?                the study's provenance, or 'not yet run'
+  3 DETAIL    is the data sound?                  the newest session's coverage · withheld sessions ·
+                                                  caches and circuit breakers
+  4 RECORD    what can move the call, and why?    the KNOBS registry · the ROLES registry
 
-  1 STATE     is the gap a valid spread?         Gap statistics (OU · ADF · KPSS)
-  2 DETAIL    is the data sound?                 Data layer health
-
-(Driver importance moved to the Mūla page, beside the valuation it explains;
-the regime chart that duplicated Swayam's went; the "Signal Performance"
-table — a BUY/SELL event study of Mūla's window stretch, titled "walk-forward
-hit rates" though it was neither the hero's call nor walk-forward — went with
-the rival signal it graded; and the engine-edge table and the learned-weight
-charts went with the parallel opinions and the learner they described. The
-grades moved to the Grades page, where every one of them reads the issued
-call's sample.)
+(The gap's stationarity is evidence about the claim and is on the Mūla page,
+once; the OU half-life, the θ-stability chip and the duplicate ADF / KPSS
+cards that sat here went with the second definition they carried. Every
+grade is on the Grades page.)
 """
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
-from ui.components import render_metric_card, render_section_header, render_chip
+from core.knobs import KNOBS
+from core.roles import ROLES
+from ui.components import (render_kpi_strip, render_metric_card, render_note,
+                           render_section_header, render_table_panel)
 from data.cache import all_caches
 from data.circuit_breaker import all_circuits, CircuitState
 
-# ── Tooltip definitions ────────────────────────────────────────────────────
-TOOLTIPS = {
-    "ou_half_life": (
-        "Full-history Ornstein-Uhlenbeck fit on the mispricing gap: days for a shock to the "
-        "gap to halve. It measures the gap's persistence however it closes — mostly through "
-        "fair value moving, on most instruments — not how fast price converges."
-    ),
-    "adf_pvalue": (
-        "Tests whether the gap has a unit root (drifts away from fair value for good). "
-        "p < 0.05 rejects the unit root."
-    ),
-    "kpss_pvalue": (
-        "Corroborating test with the opposite null: is the gap stationary? p > 0.05 fails "
-        "to reject stationarity — a second, independent confirmation."
-    ),
-}
+
+def _history_flag(priors_meta: dict, target: str, fingerprint: str) -> tuple[str, str]:
+    """``(value, subtext)``: is this the history the pooled priors were studied on?"""
+    if (priors_meta or {}).get("status") != "loaded":
+        return "nothing to compare", "no pooled-prior study yet"
+    studied = (priors_meta.get("fingerprints") or {}).get(target)
+    if not studied:
+        return "nothing to compare", f"{target} is not a member of the priors study"
+    if studied != fingerprint:
+        return ("history rewritten",
+                f"history differs from the panel the priors were studied on ({studied})")
+    return "same history", f"the panel the priors were studied on ({studied})"
 
 
-def render_diagnostics_tab(engine, signal):
-    """System — gap statistics, data layer."""
-    render_section_header(
-        "Gap Statistics",
-        "Is Mūla's mispricing gap a valid mean-reverting spread at all? Necessary for the "
-        "valuation to mean anything; the price-side reversion read on the Mūla page is what "
-        "makes it a trade.",
-        icon="crosshair", accent="violet",
-    )
-    adf = float(signal.get("adf_pvalue", np.nan) if signal.get("adf_pvalue") is not None else np.nan)
-    kpss = float(signal.get("kpss_pvalue", np.nan) if signal.get("kpss_pvalue") is not None else np.nan)
-    stationary = bool(np.isfinite(adf) and np.isfinite(kpss) and adf < 0.05 and kpss > 0.05)
-    theta_stable = bool(signal.get("theta_stable", True))
-    c1, c2, c3 = st.columns(3, gap="small")
-    with c1:
-        hl = signal.get("ou_half_life")
-        render_metric_card("OU Half-Life (full history)",
-                           f"{float(hl):.0f}d" if hl is not None and np.isfinite(hl) else "—",
-                           "Persistence of the gap itself", "info", tooltip=TOOLTIPS["ou_half_life"])
-    with c2:
-        render_metric_card("ADF p-value", f"{adf:.3f}" if np.isfinite(adf) else "—",
-                           "Rejects a unit root if p < 0.05",
-                           "success" if np.isfinite(adf) and adf < 0.05 else "danger",
-                           tooltip=TOOLTIPS["adf_pvalue"])
-    with c3:
-        render_metric_card("KPSS p-value", f"{kpss:.3f}" if np.isfinite(kpss) else "—",
-                           "Consistent with stationarity if p > 0.05",
-                           "success" if np.isfinite(kpss) and kpss > 0.05 else "danger",
-                           tooltip=TOOLTIPS["kpss_pvalue"])
-    # Tones by EQUALITY. The chip used to test `"Stationary" in label`, which is
-    # also true of "Non-Stationary", so it was green whatever the tests said.
-    st.markdown(
-        f'<div class="chip-row">'
-        f'<span class="cr-item">Stationarity'
-        f'{render_chip("Stationary" if stationary else "Non-stationary", "success" if stationary else "warning", as_html=True)}</span>'
-        f'<span class="cr-item">\u03b8 Stability'
-        f'{render_chip("Stable" if theta_stable else "Unstable", "success" if theta_stable else "warning", as_html=True)}</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+def _render_run(target: str) -> None:
+    """d*, h and L, the epoch and the history's fingerprint — read off the bundle."""
+    ss = st.session_state
+    asof, h, lag = ss.get("asof"), ss.get("horizon"), ss.get("exec_lag")
+    epoch, fp = ss.get("epoch"), str(ss.get("fingerprint") or "")
+    flag, flag_sub = _history_flag(ss.get("priors_meta") or {}, target, fp)
+    render_kpi_strip([
+        {"label": "As of d*", "value": f"{asof:%d %b %Y}" if asof is not None else "—",
+         "subtext": "Mūla's newest published session: every verdict input is read here",
+         "color_class": "neutral"},
+        {"label": "Horizon", "value": f"{h}D" if h is not None else "—",
+         "subtext": f"from the close {lag} session(s) after d* (EXECUTION_LAG)",
+         "color_class": "neutral"},
+        {"label": "Analysis epoch", "value": f"{epoch:%d %b %Y}" if epoch is not None else "—",
+         "subtext": "the fixed first session of every history", "color_class": "neutral"},
+        {"label": "History fingerprint", "value": fp or "—",
+         "subtext": "content hash of the settled prepared rows", "color_class": "neutral"},
+        {"label": "Against the priors", "value": flag, "subtext": flag_sub,
+         "color_class": "warning" if flag == "history rewritten" else "neutral"},
+    ], max_cols=5, key="system-run")
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 2. DATA LAYER HEALTH — cache hit rate + circuit breaker state per source
-    # ═══════════════════════════════════════════════════════════════════════
-    render_section_header(
-        "Data Layer Health",
-        "Two-tier cache statistics and circuit-breaker state for each external service.",
-        icon="database",
-        accent="cyan",
-    )
 
-    # ── Caches ────────────────────────────────────────────────────────────
+def _render_priors() -> None:
+    """The pooled-prior study's provenance, or that it has not run."""
+    pm = st.session_state.get("priors_meta") or {}
+    if pm.get("status") != "loaded":
+        render_kpi_strip([
+            {"label": "Pooled priors", "value": "not yet run",
+             "subtext": f"{pm.get('label', 'no pooled prior')} · POOLED_PRIOR "
+                        f"{KNOBS['POOLED_PRIOR'].value or 'unset'}",
+             "color_class": "neutral"},
+        ], max_cols=1, key="system-priors")
+        return
+    render_kpi_strip([
+        {"label": "Study", "value": str(pm.get("study") or "—"),
+         "subtext": f"run {pm.get('run_date') or '—'}", "color_class": "neutral"},
+        {"label": "Script SHA-256", "value": str(pm.get("sha") or "—")[:12],
+         "subtext": f"git {str(pm.get('git_sha') or '—')[:10]}", "color_class": "neutral"},
+        {"label": "Studied at", "value": f"h {pm.get('h', '—')} · L {pm.get('exec_lag', '—')}",
+         "subtext": "a file studied at another h or L is refused", "color_class": "neutral"},
+    ], max_cols=3, key="system-priors")
+
+
+def _render_coverage(engine) -> None:
+    """The newest session's cross-section, and why any session was not valued."""
+    ts = getattr(engine, "ts_data", None)
+    if ts is None or ts.empty:
+        return
+    last = ts.iloc[-1]
+    printed, sched, admitted = (int(v) if pd.notna(v) else 0 for v in
+                                (pd.to_numeric(last[c], errors="coerce")
+                                 for c in ("NAvailable", "NScheduled", "NAdmitted")))
+    absent = list(getattr(engine, "panel_absent", []) or [])
+    reasons = ts["WithheldReason"].astype(str)
+    counts = reasons[reasons != ""].value_counts()
+    render_kpi_strip([
+        {"label": "Newest session · printed", "value": f"{printed} of {sched}",
+         "subtext": f"instruments whose markets were open, of {admitted} admitted",
+         "color_class": "neutral"},
+        {"label": "Open and not printed", "value": str(len(absent)),
+         "subtext": (", ".join(absent[:6]) + (f" +{len(absent) - 6} more" if len(absent) > 6 else "")
+                     if absent else "none"),
+         "color_class": "warning" if absent else "neutral"},
+        {"label": "Sessions not valued", "value": str(int(counts.sum())),
+         "subtext": " · ".join(f"{k} {int(v)}" for k, v in counts.items()) or "none",
+         "color_class": "neutral"},
+    ], max_cols=3, key="system-coverage")
+
+
+def _render_caches_and_circuits() -> None:
+    """Two-tier cache statistics and circuit-breaker state for each external service."""
     cache_cols = st.columns(len(all_caches()))
     for col, cache in zip(cache_cols, all_caches()):
         s = cache.stats()
@@ -133,7 +147,6 @@ def render_diagnostics_tab(engine, signal):
                 ),
             )
 
-    # ── Circuit Breakers ──────────────────────────────────────────────────
     circ_cols = st.columns(len(all_circuits()))
     for col, cb in zip(circ_cols, all_circuits()):
         st_dict = cb.get_state()
@@ -166,3 +179,69 @@ def render_diagnostics_tab(engine, signal):
                 ),
             )
 
+
+def _knobs_table() -> pd.DataFrame:
+    """The KNOBS registry, one row per knob, as core.knobs declares it."""
+    return pd.DataFrame([{
+        "Knob": k.name, "Value": str(k.value), "Kind": k.kind, "Consumer": k.consumer,
+        "Horizon coupling": k.horizon_coupling,
+        "Reason or study": f"{k.study}@{k.date}" if k.kind == "measured" else k.reason,
+    } for k in KNOBS.values()]).set_index("Knob")
+
+
+def _roles_table() -> pd.DataFrame:
+    """The ROLES registry, one row per role, as core.roles declares it."""
+    return pd.DataFrame([{
+        "Role": r.key, "Kind": r.kind, "Serves": r.target or "—", "Title": r.title,
+        "Graded by": r.grade_key or "—", "Consumer": r.consumer,
+    } for r in ROLES.values()]).set_index("Role")
+
+
+def render_diagnostics_tab(engine, target: str) -> None:
+    """System — the run's identity, the priors, the data's health, the two registries."""
+    render_section_header(
+        "The Run",
+        "INFRASTRUCTURE. Which session the call is about, on which horizon and lag, from which "
+        "fixed start, and which history was valued.",
+        icon="target", accent="cyan",
+    )
+    _render_run(target)
+
+    render_section_header(
+        "Pooled Priors",
+        "INFRASTRUCTURE. The catalogue study whose class priors every posterior is shrunk "
+        "toward, read as data; without it every grade is the instrument's own.",
+        icon="layers", accent="cyan",
+    )
+    _render_priors()
+
+    render_section_header(
+        "Data Health",
+        "INFRASTRUCTURE. The newest session's cross-section, the sessions the engine did not "
+        "value and why, and the state of the cache and each external service.",
+        icon="database", accent="cyan",
+    )
+    _render_coverage(engine)
+    _render_caches_and_circuits()
+
+    render_section_header(
+        "The KNOBS Registry",
+        "INFRASTRUCTURE. Every constant that can move the call, declared once (core.knobs): its "
+        "value, its kind, the role it moves, how it couples to the horizon, and why it is set "
+        "where it is.",
+        icon="cpu", accent="cyan",
+    )
+    render_table_panel(_knobs_table(), "system-knobs", units=f"{len(KNOBS)} knobs",
+                       windowed=False, index_label="Knob", max_height=520)
+    render_note("structural: fixed by an argument, never tuned · structural-inherited: an older "
+                "value kept without a study behind it, not evidence · measured: set by a "
+                "committed study, named with its run date.")
+
+    render_section_header(
+        "The Roles",
+        "INFRASTRUCTURE. What every part of the decision is for (core.roles): the role it "
+        "plays, the role-holder it serves or audits, the grade that grades it and what reads it.",
+        icon="grid", accent="cyan",
+    )
+    render_table_panel(_roles_table(), "system-roles", units=f"{len(ROLES)} roles",
+                       windowed=False, index_label="Role", max_height=520)

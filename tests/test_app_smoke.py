@@ -12,18 +12,27 @@ Data (Convergence and Precedent are gone). The bundle carries the closed loop
 (call_ts, its grades, the evidence and the verdict at d*) and none of the
 parallel opinions' keys; Overview opens with the call, its grade as issued and
 the chain, and prints no tier word and no size as a percentage; the rail reads
-the same verdict; the Data record exports every call_ts column.
+the same verdict; the Data record exports every call_ts column. The Mūla page
+opens with Overview's own chain rows for the claim, its preconditions, its
+trust and the reversion sizer, labels the ECM's move as the gap-implied move
+(drift excluded), carries none of the retired copy, and the one gap-
+stationarity word appears once across Mūla and System.
 """
+import html
 import re
 from types import SimpleNamespace
 
 import numpy as np
 
 from core.call import CALL_COLUMNS, verdict_from_row
+from core.semantics import GAP_STATES
 from pipeline.assemble import NO_PRIOR_LABEL
 
 EDGE_KEYS = {"claim", "claim:buy", "claim:sell", "sizer:swayam", "sizer:reversion",
-             "call", "call:prospective", "evidence:swayam_lean"}
+             "call", "call:prospective", "evidence:swayam_lean", "evidence:ecm_drift"}
+#: Copy the Mūla page must not carry (the retired cards and their advice).
+MULA_BANNED = ("price reverts", "will close", "treat", "with caution", "window agreement",
+               "r² vs trailing mean")
 PAGES = ["Overview", "Mūla", "Swayam", "Grades", "System", "Data"]
 #: Keys of the parallel opinions and learners WP4 deleted: none may come back.
 GONE_KEYS = ("convergence_df", "divergence_events", "hero_series", "intelligence_active_weights",
@@ -103,3 +112,29 @@ def test_the_data_record_exports_every_call_column(gold_app, monkeypatch):
     lean = tab_data._by_date(ss["swayam_daily"])["Lean"].reindex(record.index) * 100.0
     assert np.array_equal(record["Swayam net breadth"].to_numpy(dtype=float),
                           lean.to_numpy(dtype=float), equal_nan=True)
+
+
+def test_the_mula_page_reads_the_verdict_and_carries_no_retired_copy(gold_app):
+    at = gold_app
+    text = {}
+    for page in ("Mūla", "System"):
+        at.session_state["_smoke_page"] = page
+        at.run()
+        assert not at.exception, page
+        text[page] = html.unescape("\n".join(
+            re.sub(r"<[^>]+>", " ", re.sub(r"<style.*?</style>", "", m.value, flags=re.S))
+            for m in at.markdown))
+    mula = text["Mūla"]
+    # Overview's formatted claim, trust and reversion values, verbatim.
+    chain = {r["key"]: r for r in at.session_state["verdict"]["chain"]}
+    for key in ("claim", "precondition", "trust", "sizer:reversion"):
+        for field in ("reading", "effect", "grade", "detail"):
+            assert chain[key][field] in mula, (key, field, chain[key][field])
+    assert "gap-implied 10D move (excludes drift)" in mula
+    low = mula.lower()
+    for phrase in MULA_BANNED:
+        assert phrase not in low, phrase
+    # One definition of the gap's stationarity, shown once.
+    both = text["Mūla"] + text["System"]
+    assert sum(both.count(label) for label in GAP_STATES) == 1
+    assert at.session_state["evidence"]["gap_stationarity"]["state"] in mula

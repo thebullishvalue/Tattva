@@ -1,230 +1,275 @@
 """
-Tattva — Mūla tab: where this instrument should trade, and how far to believe it.
+Tattva — Mūla tab: the one claim, its grade, its evidence, and the reversion sizer.
 तत्त्व (Tattva) — "Principle / Essence"
 
-UI — Mūla engine visualization: the fair-value LEVEL the macro cross-section
-implies, the oscillator the call is made on, whether PRICE (not fair value)
-closes the gap, how well the model locates the level at all, and what the
-call has been worth.
+UI — Mūla makes the one CLAIM Tattva issues: price against the fair-value
+level the macro cross-section implies, in units of the gap's own typical size.
+Its trust is earned only by its graded price-side skill, and its
+error-correction layer feeds the one other sizer that rides on the claim,
+Reversion (ECM). This page shows each of those in the role it plays.
 
 Reading order — the house convention every analysis tab follows:
 
-  1 ANSWER    what does Mūla say?                The read (state · fair value · move)
-  2 ANCHOR    what is the claim made on?         Price & fair value · the oscillator
-  3 SIGNAL    does acting on it make sense?      Error correction: does price revert?
-  4 TRUST     can the level be believed?         Model quality · walk-forward edge
-  5 DETAIL    the evidence behind it             Drivers · window agreement
+  1 ANSWER    what does the call read off Mūla?   The chain rows: claim · preconditions · trust
+  2 TRUST     has the claim paid on price?        GRADE→claim: t_post path · own vs prior · periods · sides
+  3 ANCHOR    what is the claim made on?          EVIDENCE→claim: who closes the gap · price & fair value ·
+                                                  the claim's unit · gap stationarity · model fit · drivers
+  4 SIGNAL    what does the ECM do to the call?   SIZER Reversion · EVIDENCE→sizer:reversion
 
-The answer leads. Every page in this app now opens with the sentence it
-exists to say and the number behind it, then shows why; the Mūla page used to
-open with five model-quality cards and never plotted the oscillator its own
-call was made on.
+Every number is read off the pipeline — the verdict (``call_ts`` at d*),
+``edges``, ``evidence`` and Mūla's published frame. Nothing is estimated,
+thresholded or re-derived here, and evidence is neutral-toned with its own
+grade beside it: directional colour is reserved for the claim's state.
 """
 
 from __future__ import annotations
 
-import numpy as np
+import html
+import math
+
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from analytics.adaptive import tier_now
-from core.semantics import CLAIM_SIGMA, DEEP_SIGMA, valuation_state
+from core.knobs import knob
+from core.semantics import CLAIM_SIGMA, DEEP_SIGMA, edge_tier, valuation_state
 from ui.theme import (chart_layout, style_axes,
                       chart_color, chart_rgba, grid_rgba)
 from ui.components import (
     render_kpi_strip,
-    render_metric_card,
-    render_interpretation_card,
     render_section_header,
     render_sub_header,
     render_chart_panel,
     render_table_panel,
     render_empty_state,
     render_edge_panel,
+    render_gate_rows,
     render_note,
     provisional_note,
 )
-from core.config import (
-    get_instrument_config, InstrumentConfig,
-    UI_R2_STRONG,
-    UI_R2_ACCEPTABLE,
-    UI_CHART_HEIGHT_MEDIUM,
-    UI_CHART_HEIGHT_XLARGE,
-)
+from core.config import UI_CHART_HEIGHT_MEDIUM, UI_CHART_HEIGHT_XLARGE
+
+#: The evidence chip every EVIDENCE section carries (design §11).
+_EVIDENCE = "EVIDENCE → {target} · does not move the call."
 
 # ── Tooltip definitions ────────────────────────────────────────────────────
 TOOLTIPS = {
-    "valuation": (
-        "The Mūla oscillator: how far price sits from the fair-value level the macro "
-        "cross-section implies, in units of the gap's own typical size. Inside ±0.5σ is the "
-        "normal day-to-day noise of price around fair value and no claim is made; ±2σ is a "
-        "deep mispricing. This is the one directional claim Tattva makes."
-    ),
     "fair_value": (
         "The price level the whole traded cross-section implies today, from a recursive "
         "cointegrating regression of log price on the integrated factors of ~200 instruments. "
         "The band is where price itself would be expected 95% of the time if it traded at "
         "fair value plus normal noise."
     ),
-    "reversion": (
-        "Does PRICE move to close the gap? The error-correction layer regresses each day's "
-        "price change on yesterday's gap. κ̂ > 0 means price moves toward fair value; this is "
-        "the probability that it does, from the coefficient's own uncertainty. It matters "
-        "because a gap can also close by fair value moving to price — which is stationary, "
-        "and is not a trade."
+    "no_claim": (
+        f"Inside ±{CLAIM_SIGMA:g}σ of fair value is the normal day-to-day noise of price around "
+        f"it and no claim is made. σ is the gap's own typical size today, so the band in "
+        f"percent of price moves with it."
     ),
-    "drift": (
-        "The price move the error-correction regression expects over the horizon, given "
-        "today's gap and how persistent gaps are, with its one-SD range. A gap that is real "
-        "but small relative to normal price noise shows up here as a small expected move."
+    "gap_half_life": (
+        "How long the gap itself persists, however it closes: the online AR(1) of the gap. "
+        "On most instruments fair value moving toward price does most of the closing, so "
+        "this is not the speed price converges at."
     ),
-    "oos_r2": (
-        "Share of log-price variance explained by the fitted level. A level regression on "
-        "integrated factors reads high by construction (both sides trend), so treat this as "
-        "a sanity check that the cross-section tracks the target at all — not as evidence of "
-        "edge. R² vs Trailing Mean and the walk-forward IC are the discriminating numbers."
+    "price_half_life": (
+        "How long price alone would take to close half the gap if fair value stood still: "
+        "ln 2 / −ln(1 − κ̂), from the error-correction layer's price-side κ̂. Undefined when "
+        "κ̂ ≤ 0 (price has not been moving toward fair value)."
     ),
-    "r2_vs_anchor": (
-        "The published fair value versus the honest competing hypothesis: that price simply "
-        "reverts to its own 252-day trailing mean. Positive = the global cross-section locates "
-        "the level better than the asset's own history does, which is the whole claim of a "
-        "cross-sectional valuation. Note this is deliberately NOT the random-walk test: one "
-        "step ahead, yesterday's close beats any valuation of a near-integrated price, so "
-        "that comparison measures a claim this engine never makes."
+    "reading": (
+        "MRProb, the error-correction layer's evidence that PRICE responds to the gap: "
+        "P(κ̂ > 0) under the coefficient's own uncertainty, where κ̂ is the share of the gap "
+        "price closes per session. 0.5 carries no information."
     ),
-    "xs_consistency": (
-        "Leave-one-block-out agreement: the valuation is refitted with each asset-class block "
-        "(rates, credit, energy, …) removed in turn, and this is how far those independent "
-        "slices of the world agree on the SIGN of today's mispricing. Low = the call depends "
-        "on which part of the world you ask."
+    "z": (
+        "The sizer's input: z = 2·MRProb − 1, unsigned because evidence that price responds "
+        "to the gap supports either side of the claim. 0 when there is no claim to size."
     ),
-    "stationarity": (
-        "Augmented Dickey-Fuller test on the gap itself, with its online half-life. A "
-        "stationary gap is necessary for a valuation to mean anything — but not sufficient for "
-        "a trade, because the gap can close by fair value moving rather than price. The "
-        "reversion read above is the price-side test."
+    "effect": (
+        "The factor the sizer applies: exp(β·z). β = f(t_post) is 0 until the sizer's "
+        "posterior t clears the bar, so an unskilled sizer is exactly ×1.00. A factor is "
+        "positive: it scales the claim and can never veto or invert it."
     ),
-    "model_spread": (
-        "How precisely the engine locates the fair-value LEVEL today: the standard deviation "
-        "of the fair value itself (coefficient and view uncertainty), in basis points — not "
-        "the price noise around it. Wide = the cross-section does not pin the level, so treat "
-        "the mispricing with caution."
-    ),
-    "window_agreement": (
-        "The gap measured against its own trailing distribution over three windows (~1 "
-        "month, ~1 quarter, ~1 year): how many of them read today's gap as unusually cheap "
-        "versus unusually rich, combined and smoothed through a drift-diffusion filter. It "
-        "says how persistent and broad the mispricing is, not which way to trade — that is "
-        "the oscillator's job."
+    "ecm_move": (
+        "The price move over the horizon that today's gap implies under the error-correction "
+        "layer: b·z·Σφᵏ, with the regression's intercept (the drift) deliberately left out, "
+        "so it is not the expected move. Shown beside its own grade."
     ),
 }
 
 
-def _series_tier(col: str, prior: float, q: float = 0.90) -> float:
-    """Display cut-point for ``col``, from that series' own causal past.
-
-    Reads the full (unfiltered) engine frame out of session state so the tier
-    reflects the whole history rather than whatever window the user is looking
-    at — a p90 recomputed over the last 3 months would move every time the
-    window changed, which is not a threshold. Falls back to the config prior
-    whenever the series is missing or too short.
-    """
-    ts = st.session_state.get("fvo_ts")
-    if ts is None or col not in getattr(ts, "columns", ()):
-        return float(prior)
-    v = pd.to_numeric(ts[col], errors="coerce").to_numpy(dtype=float)
-    if "Valid" in ts.columns:
-        v = v[ts["Valid"].astype(bool).to_numpy()]
-    return tier_now(v, prior, q=q)
-
-
-def _active_tiers() -> InstrumentConfig:
-    """This render's instrument config (per-instrument display priors).
-
-    No fallback: app.py resolved this target's config before any page ran.
-    """
-    return get_instrument_config(st.session_state.get("active_target", ""))
-
-
-def _num(d: dict, key: str):
-    """A finite float from the signal dict, else None — never a silent 0."""
+def _num(d, key=None):
+    """A finite float (``d[key]``, or ``d`` itself), else None — never a silent 0."""
     try:
-        v = float(d.get(key))
-    except (TypeError, ValueError):
+        v = float(d.get(key) if key is not None else d)
+    except (TypeError, ValueError, AttributeError):
         return None
-    return v if np.isfinite(v) else None
+    return v if math.isfinite(v) else None
 
 
 def _state_tone(state: str) -> str:
     return "success" if "CHEAP" in state else "danger" if "RICH" in state else "neutral"
 
 
+def _grade_sub(e: dict | None) -> str:
+    """'± 0.075 · t 1.06 · n/h 136 · unproven' for an edge, or why it has none."""
+    e = e or {}
+    se, t = _num(e, "se"), _num(e, "t")
+    if _num(e, "ic") is None or se is None:
+        return str(e.get("status") or "not yet graded")
+    return f"± {se:.3f} · t {t:.2f} · n/h {int(e.get('n_win') or 0)} · {edge_tier(t)[0]}"
+
+
+def _row_at(frame: pd.DataFrame | None, asof):
+    """d*'s row of a date-indexed frame (call_ts, Mūla's fvo_ts), or None."""
+    if frame is None or asof is None or asof not in frame.index:
+        return None
+    return frame.loc[asof]
+
+
 # ═══════════════════════════════════════════════════════════════════════
-#  1 · THE READ
+#  2 · GRADE → claim
 # ═══════════════════════════════════════════════════════════════════════
 
-def _render_read(signal: dict, ts: pd.DataFrame, edge: dict | None, horizon: int) -> None:
-    fvo = _num(signal, "fvo")
-    pct = (_num(signal, "pct_mispricing") or 0.0) * 100.0
+def _render_t_path(call_ts: pd.DataFrame | None, since) -> None:
+    """The claim's as-of posterior t at every session, against the bars f opens and fills at."""
+    if call_ts is None or call_ts.empty or "claim_t" not in call_ts.columns:
+        return
+    ct = call_ts if since is None else call_ts[call_ts.index >= since]
+    t = pd.to_numeric(ct["claim_t"], errors="coerce")
+    if t.notna().sum() == 0:
+        render_empty_state(
+            "No as-of grade yet",
+            f"The claim's as-of grade appears once {knob('GRADE_WARMUP_WIN')} independent "
+            f"windows have resolved in this window.",
+            eyebrow="GRADE → claim",
+        )
+        return
+    t0, t1 = knob("STRENGTH_T0"), knob("STRENGTH_T1")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=ct.index, y=t, mode="lines", name="Claim t_post",
+                             line=dict(color=chart_color("violet"), width=1.4),
+                             hovertemplate="t_post %{y:.2f}<extra></extra>"))
+    for y, dash in ((t0, "dot"), (t1, "dash")):
+        fig.add_hline(y=y, line_dash=dash, line_color=chart_rgba("slate", 0.55), line_width=0.8)
+    fig.add_hline(y=0, line_color=grid_rgba(0.10), line_width=0.6)
+    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM))
+    style_axes(fig, y_title="t_post")
+    render_chart_panel(fig, "mula_t_path", units="posterior t, as of each session",
+                       footer=html.escape(f"Trust opens at t_post {t0:g} (dotted) and is full at "
+                                          f"{t1:g} (dashed); below {t0:g} the claim is a HOLD."))
+
+
+def _render_own_vs_prior(edge: dict | None, row, verdict: dict) -> None:
+    """What trust read at d*: the own as-of grade, the class prior, and their combination."""
+    g = (edge or {}).get("asof_grade") or {}
+    ic, se, n_win = _num(g, "ic"), _num(g, "se"), int(_num(g, "n_win") or 0)
+    mu, sd, scope = _num(g, "prior_mu"), _num(g, "prior_sd"), str(g.get("prior_scope") or "none")
+    has_prior = scope not in ("none", "ungraded") and mu is not None and sd is not None
+    w_own = _num(row, "claim_w_own") if row is not None else None
+    t = verdict.get("claim_t")
+    prior_label = (st.session_state.get("priors_meta") or {}).get("label", "no pooled prior")
+    render_kpi_strip([
+        {"label": "Own grade · as of d*", "value": f"{ic:+.3f}" if ic is not None else "warming up",
+         "subtext": (f"± {se:.3f} · {n_win} windows" if ic is not None and se is not None
+                     else f"{n_win} of {knob('GRADE_WARMUP_WIN')} windows"),
+         "color_class": "neutral"},
+        {"label": "Class prior", "value": scope if has_prior else "none",
+         "subtext": f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label, "color_class": "neutral"},
+        {"label": "Weight on own", "value": f"{w_own:.2f}" if w_own is not None else "—",
+         "subtext": "1.00 with no prior; the rest is the class's", "color_class": "neutral"},
+        {"label": "t_post", "value": f"{t:.2f}" if t is not None else "ungraded",
+         "subtext": edge_tier(t)[0], "color_class": "neutral"},
+        {"label": "Trust", "value": f"{verdict['trust']:.2f}",
+         "subtext": (f"f(t_post): 0 below {knob('STRENGTH_T0'):g}, full at "
+                     f"{knob('STRENGTH_T1'):g}"), "color_class": "neutral"},
+    ], max_cols=5, key="mula-own-prior")
+
+
+def _render_sides(edges: dict) -> None:
+    """The claim by side: hit against the side-matched no-skill rate, and payoff."""
+    def _side(e):
+        hit, base, pay = _num(e, "hit"), _num(e, "base"), _num(e, "payoff")
+        value = f"{hit:.0f}% vs {base:.0f}%" if hit is not None and base is not None else "—"
+        sub = (f"drift-neutral payoff {pay * 100:+.2f}% · n/h {int(e.get('n_win') or 0)}"
+               if pay is not None else "not yet graded")
+        return value, sub
+
+    items = []
+    for key, name in (("claim:buy", "BUY claims hit"), ("claim:sell", "SELL claims hit")):
+        value, sub = _side(edges.get(key) or {})
+        items.append({"label": name, "value": value,
+                      "subtext": f"vs the side-matched no-skill rate · {sub}",
+                      "color_class": "neutral"})
+    render_kpi_strip(items, max_cols=2, key="mula-sides")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  3 · EVIDENCE → claim
+# ═══════════════════════════════════════════════════════════════════════
+
+def _render_gap_split(evidence: dict, mula, horizon: int) -> None:
+    """Who closes the gap, and the gap's two half-lives (d*'s published row)."""
+    gs = evidence.get("gap_split") or {}
+    share, se_share = _num(gs, "price_share"), _num(gs, "se_share")
+    b_fv, se_fv = _num(gs, "b_fv"), _num(gs, "se_b_fv")
+    gap_hl, price_hl = _num(mula, "GapHalfLife"), _num(mula, "MulaHalfLife")
+    render_kpi_strip([
+        {"label": "Price's share", "value": f"{share * 100:+.0f}%" if share is not None else "—",
+         "subtext": (f"± {se_share * 100:.0f}% · of the gap closed in {horizon}D · "
+                     f"{gs.get('n_win', 0)} windows" if se_share is not None else "not measured"),
+         "color_class": "neutral"},
+        {"label": "Fair value toward price", "value": f"{b_fv:+.2f}" if b_fv is not None else "—",
+         "subtext": (f"± {se_fv:.2f} of each unit of gap, over {horizon}D" if se_fv is not None
+                     else f"of each unit of gap, over {horizon}D"), "color_class": "neutral"},
+        {"label": "Gap half-life", "value": f"{gap_hl:.0f}d" if gap_hl is not None else "—",
+         "subtext": "the gap's own persistence, however it closes", "color_class": "neutral",
+         "tooltip": TOOLTIPS["gap_half_life"]},
+        {"label": "Price-side half-life",
+         "value": f"{price_hl:.0f}d" if price_hl is not None else "—",
+         "subtext": ("price alone, if fair value stood still" if price_hl is not None
+                     else "undefined: price-side κ̂ ≤ 0"), "color_class": "neutral",
+         "tooltip": TOOLTIPS["price_half_life"]},
+    ], max_cols=4, key="mula-gap-split")
+    if share is not None and se_share is not None:
+        render_note(
+            f"While the gap was open, price closed {share:.0%} (± {se_share:.0%}) of it within "
+            f"{horizon} sessions; fair value moving toward price did the rest. Tattva therefore "
+            f"does not assume price does the closing: it acts only when the claim's price-side "
+            f"grade clears the bar.")
+
+
+def _render_fair_value_kpis(mula) -> None:
+    """The claim's reading at d*: the gap, the level, and the no-claim band in price terms."""
+    fvo, pct = _num(mula, "FVO"), _num(mula, "PctMispricing")
+    fv, gs = _num(mula, "FairValue"), _num(mula, "GapScale")
+    lo, hi = _num(mula, "FairValueLo"), _num(mula, "FairValueHi")
     state = valuation_state(fvo)
-    fv = _num(signal, "fair_value")
-    lo = hi = None
-    if {"FairValueLo", "FairValueHi"} <= set(ts.columns):
-        _b = ts[["FairValueLo", "FairValueHi"]].dropna()
-        if len(_b):
-            lo, hi = float(_b["FairValueLo"].iloc[-1]), float(_b["FairValueHi"].iloc[-1])
-    rev = _num(signal, "mr_prob")
-    hl = _num(signal, "mula_half_life")
-    drift = _num(signal, "expected_drift_pct")
-    dsd = _num(signal, "drift_sd_pct")
-    ic = (edge or {}).get("ic")
-
     render_kpi_strip([
         {"label": "Valuation", "value": state if fvo is not None else "—",
-         "subtext": (f"{fvo:+.2f}σ · {abs(pct):.1f}% {'below' if pct < 0 else 'above'} fair value"
-                     if fvo is not None else "no published valuation"),
-         "color_class": _state_tone(state), "tooltip": TOOLTIPS["valuation"]},
+         "subtext": (f"{fvo:+.2f}σ · {abs(pct) * 100:.1f}% {'below' if pct < 0 else 'above'} fair value"
+                     if fvo is not None and pct is not None else "no published valuation"),
+         "color_class": _state_tone(state)},
         {"label": "Fair Value", "value": f"{fv:,.2f}" if fv is not None else "—",
-         "subtext": (f"95% band {lo:,.2f} – {hi:,.2f}" if lo is not None else "level the world implies"),
-         "color_class": "violet", "tooltip": TOOLTIPS["fair_value"]},
-        {"label": "Price Reverts", "value": f"{rev:.0%}" if rev is not None else "—",
-         "subtext": (f"price-side half-life {hl:.0f}d" if hl is not None and hl < 2000
-                     else "price does not close the gap" if rev is not None and rev < 0.5
-                     else "P(price moves toward fair value)"),
-         "color_class": ("success" if rev is not None and rev >= 0.8 else
-                         "warning" if rev is not None and rev >= 0.5 else "danger"),
-         "tooltip": TOOLTIPS["reversion"]},
-        {"label": f"Expected {horizon}D Move", "value": f"{drift:+.2f}%" if drift is not None else "—",
-         "subtext": f"± {dsd:.2f}% (1 SD) from error correction" if dsd is not None else "error-correction read",
-         "color_class": ("success" if drift is not None and drift > 0 else
-                         "danger" if drift is not None and drift < 0 else "neutral"),
-         "tooltip": TOOLTIPS["drift"]},
-        {"label": "Walk-Forward IC", "value": f"{ic:+.3f}" if ic is not None else "—",
-         "subtext": f"the claim's sign, claim sessions, {horizon}d from the next close" if ic is not None else "not yet graded",
-         "color_class": ("success" if ic is not None and ic >= 0.05 else
-                         "warning" if ic is not None and ic > 0 else
-                         "danger" if ic is not None else "neutral")},
-    ], max_cols=5, key="mula-read")
+         "subtext": (f"95% band {lo:,.2f} – {hi:,.2f}" if lo is not None and hi is not None
+                     else "level the world implies"),
+         "color_class": "neutral", "tooltip": TOOLTIPS["fair_value"]},
+        {"label": "No-claim band", "value": f"±{CLAIM_SIGMA:g}σ",
+         "subtext": (f"±{CLAIM_SIGMA * gs * 100:.1f}% of fair value at today's gap scale"
+                     if gs is not None else "the gap's own typical size"),
+         "color_class": "neutral", "tooltip": TOOLTIPS["no_claim"]},
+    ], max_cols=3, key="mula-read")
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  2 · PRICE & FAIR VALUE
-# ═══════════════════════════════════════════════════════════════════════
 
 def _render_fair_value_chart(ts_filtered, x_axis, active_target):
-    """Price against fair value (top) and the oscillator the call is made on (bottom).
+    """Price against fair value (top) and the oscillator the claim is made on (bottom).
 
-    The bottom pane used to be the raw log gap with an OU projection of it
-    closing. Two things were wrong with that. The call is made on the
-    OSCILLATOR — the gap in units of its own typical size, against the ±0.5σ
-    no-claim band — and the page never drew it. And the projection showed the
-    gap closing as if price would do the closing, while the engine's own
-    evidence says gaps mostly close by fair value moving to price; the
-    error-correction section below is the honest version of that forecast.
+    The bottom pane is the OSCILLATOR — the gap in units of its own typical
+    size — against the ±CLAIM_SIGMA no-claim band and the ±DEEP_SIGMA deep
+    lines. (It used to be the raw log gap with an OU projection of it closing,
+    drawn as if price would do the closing; the gap split above measures who
+    does.)
     """
-    has_price = "Price" in ts_filtered.columns
     has_band = {"FairValueLo", "FairValueHi"}.issubset(ts_filtered.columns)
 
     fig = make_subplots(rows=2, cols=1, row_heights=[0.6, 0.4],
@@ -250,19 +295,16 @@ def _render_fair_value_chart(ts_filtered, x_axis, active_target):
         line=dict(color=chart_color("violet"), width=1.4),
         hovertemplate="%{y:,.2f}<extra>Fair value</extra>",
     ), row=1, col=1)
-    # Price is the instrument — the primary series — so it is drawn in full
-    # ink. It used to be the faintest line on the chart (slate at 40%).
-    top_series = ts_filtered["Price"] if has_price else ts_filtered["Actual"]
+    # Price is the instrument — the primary series — so it is drawn in full ink.
     fig.add_trace(go.Scatter(
-        x=x_axis, y=top_series, mode="lines", name=f"{active_target}",
+        x=x_axis, y=ts_filtered["Price"], mode="lines", name=f"{active_target}",
         line=dict(color=chart_color("accent"), width=1.6),
         hovertemplate="%{y:,.2f}<extra>Price</extra>",
     ), row=1, col=1)
 
-    # ── Bottom: the oscillator, against the bands the call is made on ──
+    # ── Bottom: the oscillator, against the bands the claim is made on ──
     osc = pd.to_numeric(ts_filtered["FVO"], errors="coerce")
-    gap_pct = (pd.to_numeric(ts_filtered.get("PctMispricing"), errors="coerce") * 100.0
-               if "PctMispricing" in ts_filtered.columns else osc * np.nan)
+    gap_pct = pd.to_numeric(ts_filtered["PctMispricing"], errors="coerce") * 100.0
     fig.add_hrect(y0=-CLAIM_SIGMA, y1=CLAIM_SIGMA, fillcolor=grid_rgba(0.05), line_width=0,
                   row=2, col=1)
     fig.add_trace(go.Scatter(
@@ -290,169 +332,68 @@ def _render_fair_value_chart(ts_filtered, x_axis, active_target):
     render_chart_panel(fig, "fvo_fairvalue", units="price · oscillator σ", window=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  3 · ERROR CORRECTION
-# ═══════════════════════════════════════════════════════════════════════
+def _render_claim_unit(evidence: dict) -> None:
+    """The claim's unit against the C12 contract, and Decision A's status."""
+    cu = evidence.get("claim_unit") or {}
+    c = cu.get("contract") or {}
+    mean, sd, rc, sell = (_num(cu, k) for k in ("mean", "sd", "rich_cheap", "sell_share"))
 
-def _render_error_correction(ts_filtered, x_axis, signal, horizon):
-    """Does PRICE close the gap — and which forecast family has been right?
+    def _holds(k):
+        return "holds" if c.get(k) else "fails"
 
-    The valuation regression says where fair value is; it cannot say whether
-    price goes there. That is what the error-correction layer measures, on
-    differenced data where fast memories are legitimate: the response of each
-    day's price change to yesterday's gap (κ̂), and a pooled contest between
-    a valuation-led, a momentum-led and a full forecast of the price change,
-    weighted by their own discounted predictive likelihood.
-    """
-    need = {"WValuation", "WMomentum", "WFull"}
-    if not need <= set(ts_filtered.columns) or ts_filtered[list(need)].dropna().empty:
-        render_empty_state(
-            "No error-correction read yet",
-            "The error-correction layer publishes once it has learned from enough sessions "
-            "after the valuation's own burn-in.",
-            eyebrow="Mūla · ECM",
-        )
-        return
-
-    w_led = (_num(signal, "w_valuation") or 0.0) + (_num(signal, "w_full") or 0.0)
-    kappa = _num(signal, "mula_kappa")
-    gap_hl = _num(signal, "gap_half_life")
-    c1, c2, c3 = st.columns(3, gap="small")
-    with c1:
-        render_metric_card(
-            "Price-Side κ̂", f"{kappa:+.4f}/d" if kappa is not None else "—",
-            "Response of each day's price change to yesterday's gap. Positive = price "
-            "moves toward fair value.",
-            "success" if kappa is not None and kappa > 0 else "danger" if kappa is not None else "neutral",
-            tooltip=TOOLTIPS["reversion"])
-    with c2:
-        render_metric_card(
-            "Valuation-Led Weight", f"{w_led:.0%}",
-            "Predictive weight on the forecasts that let the gap move price, against a "
-            "momentum-only forecast. Below ~40%: momentum has been the better forecaster.",
-            "success" if w_led >= 0.55 else "warning" if w_led >= 0.4 else "danger")
-    with c3:
-        render_metric_card(
-            "Gap Half-Life", f"{gap_hl:.0f}d" if gap_hl else "—",
-            "How long the gap itself persists, however it closes — mostly by fair value "
-            "moving on most instruments. Not the speed price converges at.",
-            "info", tooltip=TOOLTIPS["stationarity"])
-
-    fig = make_subplots(rows=2, cols=1, row_heights=[0.55, 0.45], shared_xaxes=True,
-                        vertical_spacing=0.08)
-    for col, name, colour in (("WValuation", "Valuation-led", "violet"),
-                              ("WFull", "Full (valuation + momentum)", "cyan"),
-                              ("WMomentum", "Momentum-led", "slate")):
-        fig.add_trace(go.Scatter(
-            x=x_axis, y=ts_filtered[col], mode="lines", stackgroup="pool", name=name,
-            line=dict(width=0.5, color=chart_color(colour)),
-            fillcolor=chart_rgba(colour, 0.35),
-            hovertemplate="%{y:.0%}<extra>" + name + "</extra>",
-        ), row=1, col=1)
-    if "MulaDriftPct" in ts_filtered.columns:
-        d = pd.to_numeric(ts_filtered["MulaDriftPct"], errors="coerce")
-        sd = (pd.to_numeric(ts_filtered["MulaSdPct"], errors="coerce")
-              if "MulaSdPct" in ts_filtered.columns else d * 0)
-        fig.add_trace(go.Scatter(x=x_axis, y=d + sd, mode="lines", line=dict(width=0),
-                                 showlegend=False, hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=x_axis, y=d - sd, mode="lines", line=dict(width=0),
-                                 fill="tonexty", fillcolor=chart_rgba("slate", 0.10),
-                                 showlegend=False, hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(
-            x=x_axis, y=d, mode="lines", name=f"Expected {horizon}d move",
-            line=dict(color=chart_color("accent"), width=1.4),
-            hovertemplate="%{y:+.2f}%<extra>Expected move</extra>",
-        ), row=2, col=1)
-        fig.add_hline(y=0, line_color=grid_rgba(0.10), line_width=0.6, row=2, col=1)
-    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM + 80))
-    style_axes(fig, y_title="Pool weight", y_range=[0, 1], row=1, col=1)
-    style_axes(fig, y_title=f"{horizon}d move %", row=2, col=1)
-    render_chart_panel(fig, "mula_ecm", units="pool weight · expected move")
+    render_kpi_strip([
+        {"label": "Mean", "value": f"{mean:+.2f}σ" if mean is not None else "—",
+         "subtext": f"contract |mean| < 0.15 · {_holds('mean')}", "color_class": "neutral"},
+        {"label": "SD", "value": f"{sd:.2f}" if sd is not None else "—",
+         "subtext": f"contract 0.8 – 1.2 · {_holds('sd')}", "color_class": "neutral"},
+        {"label": "RICH : CHEAP", "value": f"{rc:.1f}" if rc is not None else "—",
+         "subtext": f"contract 0.67 – 1.5 · {_holds('rich_cheap')}", "color_class": "neutral"},
+        {"label": "SELL share", "value": f"{sell:.0%}" if sell is not None else "—",
+         "subtext": f"of {int(cu.get('n') or 0)} valued sessions' claims", "color_class": "neutral"},
+    ], max_cols=4, key="mula-claim-unit")
+    render_note(
+        f"C12 contract {'holds' if cu.get('passes') else 'fails'} on the valued sessions through "
+        f"d*. Decision A (a trailing-year centring of the claim) is pre-registered with the pooled-"
+        f"prior study and reads '{knob('CLAIM_CENTRING')}': the study records it, and nothing "
+        f"applies it without an owner-signed change.")
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  4 · MODEL QUALITY
-# ═══════════════════════════════════════════════════════════════════════
-
-def _render_model_quality_cards(model_stats, signal):
-    """Model Quality — does the cross-section locate this instrument's level?
-
-    Read left to right as a chain of increasingly demanding questions. Does the
-    cross-section track this asset at all (OOS R²)? Does it locate the level
-    better than the asset's own trailing mean does (R² vs Trailing Mean)? Do
-    independent slices of the world agree on the mispricing's sign
-    (Cross-Section)? Is the gap stationary (Stationarity)? And how precisely
-    is the level pinned today (Model Spread)?
-
-    A high R² with a negative R²-vs-anchor is the diagnostic worth knowing: the
-    regression is fitting the trend, not the mispricing.
-    """
-    _t = _active_tiers()
-    UI_MODEL_SPREAD_LOW = _series_tier("ModelSpread", _t.ui_model_spread_low / 1e4, 0.10) * 1e4
-    UI_MODEL_SPREAD_HIGH = _series_tier("ModelSpread", _t.ui_model_spread_high / 1e4, 0.90) * 1e4
-    q1, q2, q3, q4, q5 = st.columns(5, gap="small")
-
-    with q1:
-        r2 = float(model_stats.get("r2_oos", np.nan))
-        render_metric_card(
-            "OOS R²", f"{r2:.3f}",
-            "Log-price variance explained by the fitted level. High is expected for a level "
-            "regression — the next card is the discriminating one.",
-            "success" if r2 > UI_R2_STRONG else "warning" if r2 > UI_R2_ACCEPTABLE else "danger",
-            tooltip=TOOLTIPS["oos_r2"],
-        )
-    with q2:
-        r2_anchor = float(model_stats.get("r2_vs_anchor", 0.0) or 0.0)
-        render_metric_card(
-            "R² vs Trailing Mean", f"{r2_anchor:+.3f}",
-            "Edge over 'price reverts to its own 252d mean'. Negative = a moving average "
-            "locates fair value better than the global cross-section does.",
-            "success" if r2_anchor > 0.05 else "warning" if r2_anchor > -0.05 else "danger",
-            tooltip=TOOLTIPS["r2_vs_anchor"],
-        )
-    with q3:
-        xs = _num(signal, "xs_consistency")
-        render_metric_card(
-            "Cross-Section", f"{xs:.2f}" if xs is not None else "—",
-            "How far independent asset-class slices agree on the sign of today's gap.",
-            "success" if xs is not None and xs >= 0.75 else
-            "warning" if xs is not None and xs >= 0.5 else "danger",
-            tooltip=TOOLTIPS["xs_consistency"],
-        )
-    with q4:
-        adf_p = _num(signal, "adf_pvalue")
-        render_metric_card(
-            "Gap Stationarity", f"p={adf_p:.3f}" if adf_p is not None else "—",
-            ("The gap is stationary — a valuation is meaningful here." if adf_p is not None and adf_p < 0.05
-             else "Unit root not rejected — the gap may be a permanent re-rating."
-             if adf_p is not None and adf_p > 0.10 else "Borderline — treat the valuation as unproven."),
-            "success" if adf_p is not None and adf_p < 0.05 else
-            "warning" if adf_p is not None and adf_p <= 0.10 else "danger",
-            tooltip=TOOLTIPS["stationarity"],
-        )
-    with q5:
-        sp = (_num(signal, "model_spread") or 0.0) * 10000
-        render_metric_card(
-            "Model Spread", f"{sp:.0f} bps",
-            f"SD of the fair-value level itself. Above {UI_MODEL_SPREAD_HIGH:.0f} bps "
-            f"(p90 of history) = the level is poorly pinned.",
-            "success" if sp < UI_MODEL_SPREAD_LOW else "warning" if sp < UI_MODEL_SPREAD_HIGH else "danger",
-            tooltip=TOOLTIPS["model_spread"],
-        )
+def _render_gap_stationarity(evidence: dict) -> None:
+    """The one gap-stationarity word, from ADF and KPSS on the published gap."""
+    gt = evidence.get("gap_stationarity") or {}
+    adf, kp = _num(gt, "adf_pvalue"), _num(gt, "kpss_pvalue")
+    render_kpi_strip([
+        {"label": "Full-history diagnostic", "value": str(gt.get("state") or "—"),
+         "subtext": f"{int(gt.get('n') or 0)} valued sessions through d*", "color_class": "neutral"},
+        {"label": "ADF p-value", "value": f"{adf:.3f}" if adf is not None else "—",
+         "subtext": (f"null: a unit root; rejected below {knob('STATIONARITY_ALPHA'):g}"),
+         "color_class": "neutral"},
+        {"label": "KPSS p-value", "value": f"{kp:.3f}" if kp is not None else "—",
+         "subtext": (f"null: a constant level; rejected below {knob('STATIONARITY_ALPHA'):g} "
+                     f"(reported within 0.01 – 0.10)"), "color_class": "neutral"},
+    ], max_cols=3, key="mula-gap-tests")
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  5 · DRIVERS
-# ═══════════════════════════════════════════════════════════════════════
+def _render_model_fit(model_stats: dict, mula) -> None:
+    """What the fit is made of and how closely it tracks the level — facts, no advice."""
+    r2 = _num(model_stats, "r2_oos")
+    n_inst = int(model_stats.get("n_features", 0) or 0)
+    n_blocks = int(model_stats.get("n_blocks", 0) or 0)
+    k = int(_num(mula, "KFactors") or 0)
+    sp = _num(mula, "ModelSpread")
+    render_kpi_strip([
+        {"label": "OOS R²", "value": f"{r2:.3f}" if r2 is not None else "—",
+         "subtext": "log-price variance the one-step fitted level tracks", "color_class": "neutral"},
+        {"label": "Cross-section", "value": f"{n_inst} instruments",
+         "subtext": f"in {n_blocks} asset-class blocks · {k} latent factors on d*",
+         "color_class": "neutral"},
+        {"label": "Model spread", "value": f"{sp * 1e4:.0f} bps" if sp is not None else "—",
+         "subtext": "SD of the fair-value level itself on d*", "color_class": "neutral"},
+    ], max_cols=3, key="mula-model-fit")
+
 
 def _render_drivers(engine) -> None:
-    """Which asset-class blocks the fair value leans on (leave-one-block-out).
-
-    An ablation, not a coefficient read-off: each block is removed, the
-    valuation refitted, and the move in fair value recorded. Lives here
-    rather than on the System page because it is evidence about THIS
-    engine's claim — every page now carries its own evidence.
-    """
+    """Which asset-class blocks the fitted level is made of (the engine's own decomposition)."""
     impacts = getattr(engine, "latest_feature_impacts", None) or {}
     if not impacts:
         render_empty_state(
@@ -472,96 +413,114 @@ def _render_drivers(engine) -> None:
         hovertemplate="%{y}: %{x:.1f}%<extra></extra>",
     ))
     fig.update_layout(**chart_layout(height=max(240, len(labels) * 26), show_legend=False))
-    style_axes(fig, x_title="Contribution %")
+    style_axes(fig, x_title="Share of the fitted level %")
     fig.update_yaxes(showgrid=False)
-    render_chart_panel(fig, "mula_drivers", units="contribution to fair value", windowed=False,
-                       footer=f"{len(labels)} of {len(impacts)} asset-class blocks by current contribution.")
-    hist = engine.get_feature_impact_history() if hasattr(engine, "get_feature_impact_history") else None
+    render_chart_panel(fig, "mula_drivers", units="share of the fitted level", windowed=False,
+                       footer=f"{len(labels)} of {len(impacts)} asset-class blocks by current share.")
+    hist = engine.get_feature_impact_history()
     if hist is not None and not hist.empty:
-        render_sub_header("Contribution over time")
-        render_table_panel(hist.tail(10), "mula-drivers-history", units="latest sessions",
-                           windowed=False, max_rows=10, max_height=240)
+        render_sub_header("Share over time")
+        render_table_panel(hist.tail(10), "mula-drivers-history", units="every 21 sessions",
+                           windowed=False, index_label="Date", max_rows=10, max_height=240)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  6 · WINDOW AGREEMENT
+#  4 · SIZER Reversion · EVIDENCE → sizer:reversion
 # ═══════════════════════════════════════════════════════════════════════
 
-def _render_window_agreement(ts_filtered, x_axis, signal, windows):
-    """How broad and persistent the mispricing is across 1m / 1q / 1y windows.
-
-    Evidence about the claim, not a second claim: no BUY/SELL words here. The
-    stack used to be built on 3/5/10-day windows, which made it a two-week
-    timing read wearing valuation labels ("OVERSOLD" while the oscillator said
-    fair). On month / quarter / year windows it describes the same mispricing
-    the oscillator does, from a different angle — how unusual it is for this
-    instrument.
-    """
-    _t = _active_tiers()
-    strong = _series_tier("ConvictionBounded", _t.conviction_strong, 0.90)
-    moderate = _series_tier("ConvictionBounded", _t.conviction_moderate, 0.75)
-
-    fig = make_subplots(rows=2, cols=1, row_heights=[0.55, 0.45], shared_xaxes=True,
-                        vertical_spacing=0.08)
-    if {"ConvictionUpper", "ConvictionLower"} <= set(ts_filtered.columns):
-        fig.add_trace(go.Scatter(x=x_axis, y=ts_filtered["ConvictionUpper"], mode="lines",
-                                 line=dict(width=0), showlegend=False, hoverinfo="skip"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=x_axis, y=ts_filtered["ConvictionLower"], mode="lines",
-                                 line=dict(width=0), fill="tonexty",
-                                 fillcolor=chart_rgba("slate", 0.06),
-                                 showlegend=False, hoverinfo="skip"), row=1, col=1)
-    cb = pd.to_numeric(ts_filtered["ConvictionBounded"], errors="coerce")
-    fig.add_trace(go.Scatter(x=x_axis, y=cb.clip(lower=0), fill="tozeroy",
-                             fillcolor=chart_rgba("rose", 0.08), line=dict(width=0),
-                             showlegend=False, hoverinfo="skip"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_axis, y=cb.clip(upper=0), fill="tozeroy",
-                             fillcolor=chart_rgba("emerald", 0.08), line=dict(width=0),
-                             showlegend=False, hoverinfo="skip"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_axis, y=cb, mode="lines", name="Window agreement (DDM)",
-                             line=dict(color=chart_color("violet"), width=1.4)), row=1, col=1)
-    for y, nm in ((strong, "rose"), (-strong, "emerald")):
-        fig.add_hline(y=y, line_dash="dot", line_color=chart_rgba(nm, 0.25), line_width=0.5,
-                      row=1, col=1)
-    fig.add_hline(y=0, line_color=grid_rgba(0.06), line_width=0.5, row=1, col=1)
-
-    fig.add_trace(go.Scatter(x=x_axis, y=ts_filtered["OversoldBreadth"], name="Windows reading cheap",
-                             fill="tozeroy", fillcolor=chart_rgba("emerald", 0.1),
-                             line=dict(color=chart_color("emerald"), width=1.2)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x_axis, y=ts_filtered["OverboughtBreadth"], name="Windows reading rich",
-                             fill="tozeroy", fillcolor=chart_rgba("rose", 0.1),
-                             line=dict(color=chart_color("rose"), width=1.2)), row=2, col=1)
-    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM + 80))
-    style_axes(fig, y_title="Agreement", y_range=[-100, 100], row=1, col=1)
-    style_axes(fig, y_title="% of windows", y_range=[0, 100], row=2, col=1)
-    render_chart_panel(fig, "fvo_ddm", units=f"windows {'/'.join(str(w) for w in windows)}d")
-
-    cv = _num(signal, "conviction_score")
-    if cv is None:
+def _render_reversion_sizer(verdict: dict, edge: dict | None, row) -> None:
+    """The reversion sizer on d*, as the verdict's chain row reads it — Overview's numbers."""
+    chain = next((r for r in verdict.get("chain") or [] if r["key"] == "sizer:reversion"), None)
+    render_section_header(
+        "Reversion (ECM) — P(price-side κ > 0)",
+        ("SIZER → call. The sizer scales the claim by exp(β·z), z = 2·MRProb − 1, and is ×1.00 "
+         "until its own grade earns a weight; it can never veto or invert the claim, and a "
+         "grade measured against it leaves it neutral." if chain else
+         "SIZER → call. No published valuation yet, so there is no claim to scale."),
+        icon="activity", accent="violet",
+    )
+    if chain is None:
         return
-    os_, ob_ = signal.get("oversold_breadth", 0) or 0, signal.get("overbought_breadth", 0) or 0
-    n_w = len(windows)
-    if abs(cv) >= strong:
-        title, tone = ("BROADLY CHEAP" if cv < 0 else "BROADLY RICH"), ("success" if cv < 0 else "danger")
-        body = (f"Window agreement {cv:+.0f} — beyond this instrument's own p90. The gap is unusually "
-                f"{'low' if cv < 0 else 'high'} against its 1m, 1q and 1y history alike.")
-    elif abs(cv) >= moderate:
-        title, tone = ("LEANS CHEAP" if cv < 0 else "LEANS RICH"), ("success" if cv < 0 else "danger")
-        body = (f"Window agreement {cv:+.0f} — past p75. Most windows read the gap as "
-                f"{'cheap' if cv < 0 else 'rich'} for this instrument, not all.")
-    else:
-        title, tone = "NOT UNUSUAL", "neutral"
-        body = f"Window agreement {cv:+.0f} — the gap is within its ordinary range on these windows."
-    body += (f" Right now {os_:.0f}% of the {n_w} windows read it cheap and {ob_:.0f}% rich.")
-    render_interpretation_card(title=title, body=body, color=tone)
+    render_gate_rows(verdict, ["sizer:reversion"])
+    if row is None:
+        return
+    mr, kappa = _num(row, "mr_prob"), _num(row, "kappa")
+    z, t = _num(row, "reversion_z"), _num(row, "reversion_t")
+    beta, factor = _num(row, "reversion_beta") or 0.0, _num(row, "reversion_factor") or 1.0
+    g = (edge or {}).get("asof_grade") or {}
+    ic, se, n_win = _num(g, "ic"), _num(g, "se"), int(_num(g, "n_win") or 0)
+    mu, sd, scope = _num(g, "prior_mu"), _num(g, "prior_sd"), str(g.get("prior_scope") or "none")
+    has_prior = scope not in ("none", "ungraded") and mu is not None and sd is not None
+    prior_label = (st.session_state.get("priors_meta") or {}).get("label", "no pooled prior")
+    render_kpi_strip([
+        {"label": "Reading on d*", "value": f"{mr:.2f}" if mr is not None else "—",
+         "subtext": (f"MRProb · κ̂ {kappa:+.4f}/d" if kappa is not None
+                     else "the error-correction layer is warming up"),
+         "color_class": "neutral", "tooltip": TOOLTIPS["reading"]},
+        {"label": "z = 2·MRProb − 1", "value": f"{z:+.2f}" if z is not None else "—",
+         "subtext": ("the reading the sizer scales by" if verdict.get("direction")
+                     else "0: no claim to size"), "color_class": "neutral",
+         "tooltip": TOOLTIPS["z"]},
+        {"label": "Own grade · as of d*",
+         "value": f"{ic:+.3f}" if ic is not None else "warming up",
+         "subtext": (f"± {se:.3f} · {n_win} windows" if ic is not None and se is not None
+                     else f"{n_win} of {knob('GRADE_WARMUP_WIN')} windows"),
+         "color_class": "neutral"},
+        {"label": "Prior", "value": scope if has_prior else "none",
+         "subtext": f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label, "color_class": "neutral"},
+        {"label": "t_post", "value": f"{t:.2f}" if t is not None else "ungraded",
+         "subtext": edge_tier(t)[0], "color_class": "neutral"},
+        {"label": "Effect", "value": f"×{factor:.2f}",
+         "subtext": (f"β {beta:.2f}; opens at t_post {knob('STRENGTH_T0'):g}, full at "
+                     f"{knob('STRENGTH_T1'):g}"),
+         "color_class": "neutral", "tooltip": TOOLTIPS["effect"]},
+    ], max_cols=6, key="mula-reversion-sizer")
+
+
+def _render_ecm_move(evidence: dict, edge: dict | None, ts_filtered, x_axis, horizon: int) -> None:
+    """The ECM's gap-implied move (drift excluded), neutral, beside its own grade."""
+    em = evidence.get("ecm_drift") or {}
+    label = str(em.get("label") or f"gap-implied {horizon}D move (excludes drift)")
+    v, sd = _num(em, "value"), _num(em, "sd")
+    ic = _num(edge, "ic") if edge else None
+    render_kpi_strip([
+        {"label": label, "value": f"{v:+.2f}%" if v is not None else "—",
+         "subtext": (f"± {sd:.2f}% (1 SD, {horizon} sessions) on d*" if sd is not None
+                     else "the error-correction layer is warming up"),
+         "color_class": "neutral", "tooltip": TOOLTIPS["ecm_move"]},
+        {"label": "Its grade · IC", "value": f"{ic:+.3f}" if ic is not None else "—",
+         "subtext": _grade_sub(edge), "color_class": "neutral"},
+    ], max_cols=2, key="mula-ecm-move")
+    if "MulaDriftPct" not in ts_filtered.columns:
+        return
+    d = pd.to_numeric(ts_filtered["MulaDriftPct"], errors="coerce")
+    band = pd.to_numeric(ts_filtered["MulaSdPct"], errors="coerce")
+    if d.notna().sum() == 0:
+        return
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x_axis, y=d + band, mode="lines", line=dict(width=0),
+                             showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=x_axis, y=d - band, mode="lines", line=dict(width=0),
+                             fill="tonexty", fillcolor=chart_rgba("slate", 0.10),
+                             name="± 1 SD", hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=x_axis, y=d, mode="lines", name=label,
+                             line=dict(color=chart_color("slate"), width=1.4),
+                             hovertemplate="%{y:+.2f}%<extra>gap-implied move</extra>"))
+    fig.add_hline(y=0, line_color=grid_rgba(0.10), line_width=0.6)
+    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM))
+    style_axes(fig, y_title=f"{horizon}D move %")
+    render_chart_panel(fig, "mula_ecm", units="% over the horizon, drift excluded")
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  MAIN RENDER FUNCTION
 # ═══════════════════════════════════════════════════════════════════════
 
-def render_mula_tab(engine, ts_filtered, x_axis, signal, model_stats, ts, active_target,
-                    edge: dict | None = None, horizon: int = 10):
-    """Mūla tab — the valuation call, its evidence, and its record."""
+def render_mula_tab(engine, ts_filtered, x_axis, signal, model_stats, active_target, *,
+                    verdict: dict, edges: dict, evidence: dict, call_ts: pd.DataFrame | None,
+                    horizon: int):
+    """Mūla tab — the claim and what it has earned, its evidence, the reversion sizer."""
+    edges, evidence = edges or {}, evidence or {}
     fvo = _num(signal, "fvo")
     pct = (_num(signal, "pct_mispricing") or 0.0) * 100.0
     _n_inst = int(model_stats.get("n_features", 0) or 0)
@@ -580,57 +539,96 @@ def render_mula_tab(engine, ts_filtered, x_axis, signal, model_stats, ts, active
         claim += (f" The latest session was not valued ({signal.get('withheld_reason') or 'withheld'}); "
                   f"this is the last session that was.")
 
-    render_section_header("Mūla — The Valuation Call", claim, icon="target", accent="violet")
-    _render_read(signal, ts, edge, horizon)
+    # ── 1 · the chain rows Overview reads off Mūla ──────────────────────
+    render_section_header("Mūla — The Claim", claim, icon="target", accent="violet")
+    render_gate_rows(verdict, ["claim", "precondition", "trust"])
+
+    # ── 2 · GRADE → claim ───────────────────────────────────────────────
+    asof = verdict.get("asof")
+    row = _row_at(call_ts, asof)
+    since = (pd.to_datetime(x_axis).min() if x_axis is not None and len(x_axis) else None)
+    render_section_header(
+        "Has the Claim Paid on Price?",
+        f"GRADE → claim. The claim's sign against the drift-neutral {horizon}-session return from "
+        f"the next close, on its claim sessions: its posterior t as of every session (what trust "
+        f"read), its own grade beside the class prior at d*, period by period over the full "
+        f"history, and by side.",
+        icon="trending", accent="violet",
+    )
+    _render_t_path(call_ts, since)
+    _render_own_vs_prior(edges.get("claim"), row, verdict)
+    render_edge_panel(edges.get("claim"), "mula", what="the claim's sign on its claim sessions")
+    rule = (edges.get("claim") or {}).get("stated_rule")
+    if rule:
+        render_note(f"Stated rule (C12): {rule}.")
+    _render_sides(edges)
+
+    # ── 3 · EVIDENCE → claim ────────────────────────────────────────────
+    ev = _EVIDENCE.format(target="claim")
+    render_section_header(
+        "Who Closes the Gap?",
+        f"{ev} When Mūla's gap was open, how much of its closing over the next {horizon} sessions "
+        f"did price do, and how much did fair value do by moving toward price? Beside it, the "
+        f"gap's own half-life and price's.",
+        icon="layers", accent="violet",
+    )
+    mula = _row_at(st.session_state.get("fvo_ts"), signal.get("asof"))
+    _render_gap_split(evidence, mula, horizon)
 
     render_section_header(
         "Price & Fair Value",
-        "Top: price against the fair-value level and its 95% band. Bottom: the oscillator the "
-        f"call is made on — inside the shaded ±{CLAIM_SIGMA:g}σ band no claim is made; beyond "
+        f"{ev} Top: price against the fair-value level and its 95% band. Bottom: the oscillator "
+        f"the claim is made on — inside the shaded ±{CLAIM_SIGMA:g}σ band no claim is made; beyond "
         f"±{DEEP_SIGMA:g}σ (dotted) is a deep mispricing. Below zero (green) = cheap.",
         icon="trending", accent="violet",
     )
+    _render_fair_value_kpis(mula)
     _render_fair_value_chart(ts_filtered, x_axis, active_target)
 
     render_section_header(
-        "Error Correction — Does Price Close the Gap?",
-        "A stationary gap is not yet a trade: it can close by fair value moving to price. This "
-        "is the price-side read — how today's price change responds to yesterday's gap, and "
-        "which forecast family has actually predicted it.",
+        "The Claim's Unit",
+        f"{ev} Is the oscillator in the unit its ±{CLAIM_SIGMA:g}σ and ±{DEEP_SIGMA:g}σ cuts "
+        f"assume? Centred, unit SD, RICH and CHEAP claims balanced (charter C12), on the valued "
+        f"sessions through d*.",
         icon="crosshair", accent="violet",
     )
-    _render_error_correction(ts_filtered, x_axis, signal, horizon)
+    _render_claim_unit(evidence)
 
     render_section_header(
-        "Model Quality",
-        "Does the cross-section locate this instrument's level at all — and better than its "
-        "own trailing mean?",
+        "Gap Stationarity",
+        f"{ev} ADF (null: a unit root) and KPSS (null: a constant level) on the published gap, "
+        f"read into one word. One test of the whole record, not an as-of series, and no "
+        f"precondition of the call.",
+        icon="crosshair", accent="violet",
+    )
+    _render_gap_stationarity(evidence)
+
+    render_section_header(
+        "Model Fit",
+        f"{ev} What the valuation is fitted on and how closely its level tracks log price.",
         icon="cpu", accent="violet",
     )
-    _render_model_quality_cards(model_stats, signal)
-
-    render_section_header(
-        "Walk-Forward Edge",
-        f"When Mūla called this instrument cheap or rich, did it move that way over the next "
-        f"{horizon} sessions? Scored on non-overlapping windows, period by period.",
-        icon="trending", accent="violet",
-    )
-    render_edge_panel(edge, "mula", what="the claim")
+    _render_model_fit(model_stats, mula)
 
     render_section_header(
         "What Drives Fair Value",
-        "How far fair value moves when each asset-class block is removed and the valuation "
-        "refitted — an ablation, not a coefficient read-off.",
+        f"{ev} Each asset-class block's share of the fitted fair-value level: the engine's own "
+        f"exact decomposition of the level into the instruments it is made of, summed by block "
+        f"— not a refit and not a coefficient read-off.",
         icon="bar-chart", accent="violet",
     )
     _render_drivers(engine)
 
-    _windows = tuple(getattr(engine, "lookback_windows", ()) or ())
+    # ── 4 · SIZER Reversion · EVIDENCE → sizer:reversion ────────────────
+    _render_reversion_sizer(verdict, edges.get("sizer:reversion"), row)
+    em_label = str((evidence.get("ecm_drift") or {}).get("label")
+                   or f"gap-implied {horizon}D move (excludes drift)")
     render_section_header(
-        "Window Agreement",
-        "The gap against its own 1-month, 1-quarter and 1-year history: how broad and how "
-        "unusual the mispricing is for this instrument. Evidence about the call, not a second "
-        "call.",
-        icon="layers", accent="violet",
+        em_label[:1].upper() + em_label[1:],
+        f"{_EVIDENCE.format(target='sizer:reversion')} The move over the next {horizon} sessions "
+        f"today's gap implies under the error-correction layer, with its drift left out: the "
+        f"reversion sizer's mechanism in price units, neutral-toned, graded on its own on the "
+        f"valued sessions (drift-neutral).",
+        icon="activity", accent="violet",
     )
-    _render_window_agreement(ts_filtered, x_axis, signal, _windows)
+    _render_ecm_move(evidence, edges.get("evidence:ecm_drift"), ts_filtered, x_axis, horizon)

@@ -7,6 +7,9 @@ Two synthetic worlds with the same stationary gap z:
       Price ignores the gap: κ ≈ 0, P(κ > 0) ≈ ½.
 The published drift used to have the opposite sign to the model's own expected
 move and roughly one day's size (corr −0.89 with the truth in world A).
+
+A provisional (still forming) session is READ, never absorbed: reading it
+leaves the layer's state — and so every later published row — unchanged.
 """
 import numpy as np
 import pandas as pd
@@ -15,13 +18,17 @@ from analytics.causal import OnlineAR1
 from engines.mula.ecm import MulaLayer
 
 
-def _run(p, z, h=10):
+def _run(p, z, h=10, read_at=None):
+    """The layer over (p, z); with ``read_at``, a provisional read of an extreme
+    gap is published just before that session is absorbed."""
     layer, ar = MulaLayer(horizon=h), OnlineAR1(halflife=504.0)
     last = prev = None
     last_dp = np.nan
     for t in range(len(p)):
         ar.update(z[t])
         phi = ar.solve()[0]
+        if t == read_at:
+            layer.read(z[last], z[last] - z[prev], last_dp, 25.0 * z[t], phi)
         if last is None:
             layer.skip()
         else:
@@ -30,7 +37,7 @@ def _run(p, z, h=10):
             layer.step(z[last], dz, last_dp, dp, z[t], phi)
             last_dp = dp
         prev, last = last, t
-    return layer.frame(pd.RangeIndex(len(p)))
+    return layer.frame(pd.RangeIndex(len(layer.out["MRProb"])))
 
 
 def _worlds(seed=0, T=3000, phi=0.95):
@@ -58,14 +65,14 @@ def test_price_closes_the_gap():
     assert 0.6 < np.median(f["MulaDriftPct"][ok] / true[ok]) < 1.4
     # κ̂ is published positive when price reverts, near its true value.
     assert 0.02 < f["MulaKappa"].median() < 0.08
-    assert f["MulaRevProb"].median() > 0.9
+    assert f["MRProb"].median() > 0.9
 
 
 def test_fair_value_closes_the_gap():
     _, _, pb, zb = _worlds()
     g = _run(pb, zb)
     assert abs(g["MulaKappa"].median()) < 0.01
-    assert 0.3 < g["MulaRevProb"].median() < 0.75
+    assert 0.3 < g["MRProb"].median() < 0.75
 
 
 def test_h_day_sd_is_an_h_day_sd():
@@ -75,3 +82,18 @@ def test_h_day_sd_is_an_h_day_sd():
     fwd = (pd.Series(pa).shift(-h) - pd.Series(pa)).to_numpy() * 100
     realised = np.nanstd(fwd)
     assert 0.7 * realised < f["MulaSdPct"].median() < 1.4 * realised
+
+
+def test_a_provisional_row_leaves_the_ecm_state_unchanged():
+    pa, za, _, _ = _worlds(T=1200)
+    t_read = 900
+    plain = _run(pa, za)
+    read = _run(pa, za, read_at=t_read)
+    assert len(read) == len(plain) + 1
+    # The read published a row of its own (from the state as of t_read − 1) …
+    assert np.isfinite(read["MRProb"].iloc[t_read])
+    # … and every row the layer published afterwards is the one it publishes
+    # without it: nothing the read saw entered the regression.
+    rest = read.drop(index=t_read).reset_index(drop=True)
+    for col in plain.columns:
+        assert np.array_equal(rest[col].to_numpy(), plain[col].to_numpy(), equal_nan=True), col

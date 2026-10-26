@@ -226,6 +226,18 @@ _register(
     horizon_coupling="horizon-free: a share of Swayam's views (net breadth)",
     reason="a net breadth inside ±10 points is under one view in ten either way: split; "
            "the one Swayam dead band (U39), formerly hard-coded four times")
+_register(
+    "STATIONARITY_ALPHA", 0.05, "structural",
+    consumer="evidence:gap_stationarity: ADF must reject a unit root, and KPSS must not "
+             "reject stationarity, at this size (core.semantics.gap_stationarity)",
+    horizon_coupling="horizon-free: the size of a test on the gap's levels",
+    reason="the conventional 5% size of both tests; evidence about the claim, it moves nothing")
+_by_ref("CLAIM_CENTRING_WINDOW",
+        consumer="claim: Decision A's candidate unit, core.semantics.claim_oscillator "
+                 "(dormant: recorded by the study, never applied without an owner-signed change)",
+        horizon_coupling="horizon-free: a year of published sessions, not rescaled with h",
+        reason="the one-year window the candidate centres and scales FVO on, pre-registered "
+               "for the pooled-prior study before any IC was computed on it")
 
 # ════════════════════════════════════════════════════════════════════════
 # Swayam's kernel (engines.swayam; values live in core.config)

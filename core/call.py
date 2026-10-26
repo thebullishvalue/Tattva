@@ -297,8 +297,8 @@ def _sizer_reading(key: str, r: dict, d: int) -> tuple[str, str]:
     if mr is None:
         return "no ECM read", "the error-correction layer is warming up: ×1.00"
     kap = f"κ̂ {kappa:+.4f}/d" if kappa is not None else "κ̂ —"
-    return (f"P(price-side κ > 0) {mr:.2f}",
-            f"MRProb {mr:.2f} · {kap} · z = 2·MRProb − 1 = {2 * mr - 1:+.2f}")
+    z = f"z = 2·MRProb − 1 = {r['reversion_z']:+.2f}" if d else "no claim to size: z = 0"
+    return f"P(price-side κ > 0) {mr:.2f}", f"MRProb {mr:.2f} · {kap} · {z}"
 
 
 def _payoff(p: dict | None) -> dict | None:

@@ -2,18 +2,17 @@
 Tattva — Configuration constants, thresholds, column mappings, and shared defaults.
 तत्त्व (Tattva) — "Principle / Essence"
 
-CORE — macro universe, target catalogue, structural knobs and warm-up priors.
+CORE — macro universe, target catalogue and structural knobs.
 
 The engine-tuning constants below are the DEFAULTS of the per-instrument config
-registry: `InstrumentConfig` (routing + every Mūla / Swayam knob and the
-horizon) → `CLASS_CONFIG_DEFAULTS` (per asset class) → `INSTRUMENT_CONFIGS`
-(one explicit entry per catalogue target). The five catalogue classes (commodity,
-fx, crypto, india_index, us_index) are tuned PER INSTRUMENT via `PER_INSTRUMENT_TUNING`
-/ `_PER_INSTRUMENT_OVERRIDES`; India/US stocks are tuned at ASSET level via
-`STOCK_CONFIGS`. `get_instrument_config(target)` is the single read path (no silent
-global fallback). See the InstrumentConfig section lower in this file. What each
-target IS (ticker, asset class, currency, tradeable, twins) lives in
-`core.instruments`, which is built from the maps below.
+registry: `InstrumentConfig` (every Mūla / Swayam knob and the horizon) →
+`CLASS_CONFIG_DEFAULTS` (per asset class) → `INSTRUMENT_CONFIGS` (one explicit
+entry per catalogue target, its class's config). India/US stocks are configured
+at ASSET level via `STOCK_CONFIGS`. `get_instrument_config(target)` is the single
+read path (no silent global fallback). See the InstrumentConfig section lower in
+this file. What each target IS (ticker, asset class, currency, tradeable, twins,
+leakage exclusions) lives in `core.instruments`, which is built from the maps
+below.
 """
 
 import pandas as pd
@@ -38,23 +37,14 @@ COMPANY = "@thebullishvalue"
 # Where a value below was set by a measurement, the measurement is quoted next
 # to it; the CHANGELOG carries the history of each change.
 
-# Window lengths for the Z_lb / AvgZ / window-breadth STATE features — each a
-# robust z-score of the mispricing gap against its own trailing window.
-#
-# ~1 month, ~1 quarter, ~1 year. These used to be (3, 5, 10) — an "ultra-short"
-# grid that made every reading built on it (the engine's zone labels, its
-# window breadth, ConvictionRaw/Bounded) a measure of how far the gap had moved
-# over the last one-to-two weeks: corr 0.85 with the 5-day CHANGE in the gap,
-# 0.3 with its level. That is a timing read, while every page labels Mūla as
-# "is this cheap or dear?" — so the engine pointed two ways at once (Gold on
-# 2026-10-16: zone stack "OVERSOLD / BUY", oscillator +0.01σ, fair). At these
-# memories the gap (half-life ~1-2 weeks) completes several cycles inside every
-# window, so each Z_lb reads the LEVEL of the mispricing against its own
-# history and the stack describes the same thing the oscillator does. The 10d
-# IC of neither grid was distinguishable from zero on the evidence, so
-# coherence, not a measured edge, decided it. (The 3-day window was also never
-# populated: its min_periods of 5 could not fit in 3 rows.)
-LOOKBACK_WINDOWS = (21, 63, 252)
+# STRUCTURAL — the window of Decision A's candidate claim unit,
+# core.semantics.claim_oscillator(FVO, 'robust_z_252'): FVO against the median
+# and MAD of the 252 published sessions before it (a year). Pre-registered for
+# the pooled-prior study, which records the decision; nothing applies it
+# without an owner-signed change. (The 21/63/252-session stack of robust
+# z-scores of the gap whose one-year window this keeps read ρ 0.96–0.99 with
+# FVO itself, and went.)
+CLAIM_CENTRING_WINDOW = 252
 
 # Observations absorbed before a valuation is published. One year is where an
 # exponentially weighted correlation matrix over ~200 instruments has enough
@@ -74,7 +64,6 @@ FVO_MIN_PRINTS = 250
 # not a long-run relation. Within the slow family the data still selects.
 FVO_VALUATION_DELTAS = (0.999, 0.9995, 0.9999, 1.0)
 
-OU_PROJECTION_DAYS = 90
 # A TARGET-history precondition, nothing more: a run needs this many sessions
 # of the target's own prints on the prepared spine (data.prep.prepare_panel
 # raises below it). It no longer decides which predictors survive — young
@@ -95,9 +84,6 @@ ANALYSIS_EPOCH = pd.Timestamp("2017-01-02")
 # holding period every grade scores against and the window the UI projects the
 # current mispricing over. Data stays DAILY.
 FORECAST_HORIZON = 10       # scoring / display horizon (trading days)
-# A second horizon list the retired calibration frame carried. Every published
-# grade is scored at FORECAST_HORIZON.
-HOLD_HORIZONS = (5, 10)
 
 # Predictors that are RAW YIELD LEVELS (e.g. ^TNX at 4.25), not prices. The Mūla
 # cross-section is a panel of PRICES: it takes logs and first differences, and
@@ -108,25 +94,11 @@ RAW_YIELD_PREDICTORS = frozenset({
     "US 13-Week T-Bill Yield", "US 5-Year Treasury Yield",
     "US 10-Year Treasury Yield", "US 30-Year Treasury Yield"})
 
-# Warm-up priors for the tiers of Mūla's WINDOW AGREEMENT (ConvictionBounded,
-# ±100) — the engine's zone labels and the Mūla page's "broadly / leans" read.
-# p90 / p75 of |ConvictionBounded| on the 21/63/252-session windows, measured
-# 2026-10-17 on Gold / S&P 500 / USD-INR (70.2/57.3, 74.1/59.6, 69.8/54.4).
-# Each instrument's own causal quantiles replace them after a year.
-CONVICTION_STRONG = 70.0
-CONVICTION_MODERATE = 57.0
-
 # Staleness (in TRADING days behind — weekends ignored).
 STALENESS_DAYS = 3
 
 # Timeframe filter mapping (trading days)
 TIMEFRAME_TRADING_DAYS = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504}
-
-# ENGINE DDM smoothing (daily conviction series). ddm 2026-07-20: leak 0.03.
-# GUARD: sweep leak WITH drift co-scaled (drift = leak × gain 1.88), never alone.
-DDM_LEAK_RATE = 0.03
-DDM_DRIFT_SCALE = 0.056
-DDM_LONG_RUN_VAR = 100.0
 
 # ─── Swayam Breadth Defaults ─────────────────────────────────────────────────
 # The per-series kernel's structural knobs. These are shared by every member of
@@ -657,9 +629,8 @@ def register_stock_target(display_name: str, ticker: str, market: str) -> None:
     ALL_TARGETS and the market-based Mūla predictor exclusions (own-market
     index targets + broad ETFs — the same guard that feeds the Swayam MMR
     leakage filter via TARGET_EXCLUDED_PREDICTORS, see swayam_macro_columns
-    below). Also installs the instrument's own InstrumentConfig, cloned from
-    the market's STOCK_CONFIGS asset-class config with its market-based
-    exclusions, and its core.instruments entry. Does NOT append to
+    below). Also installs the instrument's InstrumentConfig (the market's
+    STOCK_CONFIGS asset-class config) and its core.instruments entry. Does NOT append to
     TARGET_CATEGORIES — freeform categories render a text input, not a list.
     """
     ALL_TARGETS[display_name] = ticker
@@ -667,11 +638,9 @@ def register_stock_target(display_name: str, ticker: str, market: str) -> None:
     excl = list(_INDEX_NAMES)
     excl += _INDIA_INDEX_ETFS if market == "india" else _US_INDEX_ETFS
     TARGET_EXCLUDED_PREDICTORS.setdefault(display_name, excl)
-    # Per-instrument config from the asset-class stock config (India / US).
-    INSTRUMENT_CONFIGS.setdefault(display_name, _dc_replace(
-        STOCK_CONFIGS.get(market, CLASS_CONFIG_DEFAULTS["stock_us"]),
-        excluded_predictors=tuple(excl),
-    ))
+    # The instrument's config is its market's asset-class stock config.
+    INSTRUMENT_CONFIGS.setdefault(display_name,
+                                  STOCK_CONFIGS.get(market, CLASS_CONFIG_DEFAULTS["stock_us"]))
     # Local import: core.instruments is built FROM this module.
     from core.instruments import register_stock_instrument
     register_stock_instrument(display_name, ticker, market)
@@ -706,50 +675,40 @@ def swayam_macro_columns(target: str, macro_cols: list[str]) -> list[str]:
 # ═══════════════════════════════════════════════════════════════════════════
 # Per-instrument configuration registry
 # ═══════════════════════════════════════════════════════════════════════════
-# Every named target has its OWN full config — structure (leakage exclusions,
-# view bank, horizons), estimability floors, and warm-up priors. app.py reads get_instrument_config(target),
-# so any instrument retunes in isolation. EVERY catalogue target has an explicit
-# INSTRUMENT_CONFIGS entry (no silent fallback — get_instrument_config raises for an
-# unregistered target); free-form stocks are configured per ASSET CLASS
-# (STOCK_CONFIGS), registered at resolution time. Field defaults equal the former
-# global constants, so the registry is behaviour-preserving until a config diverges.
-from dataclasses import dataclass, replace as _dc_replace, fields as _dc_fields  # noqa: E402
+# Every named target has its OWN config entry — structure (view bank, horizon)
+# and estimability floors. app.py reads get_instrument_config(target). EVERY
+# catalogue target has an explicit INSTRUMENT_CONFIGS entry (no silent fallback —
+# get_instrument_config raises for an unregistered target); free-form stocks are
+# configured per ASSET CLASS (STOCK_CONFIGS), registered at resolution time. Field
+# defaults equal the global constants above. Every field has a reader on the
+# claim, sizer or grade path (tests/test_consumers.py).
+from dataclasses import dataclass  # noqa: E402
 
 
 @dataclass(frozen=True)
 class InstrumentConfig:
     """Per-instrument configuration.
 
-    Read the three sections below as three different KINDS of thing, because
+    Read the two sections below as two different KINDS of thing, because
     they are:
 
-    **Structure** — what question to ask. Horizons (what you intend to hold),
-    the Swayam view bank and the Mūla discount grid (the hypothesis space to
-    average over), the leakage exclusions (which predictors would let a target
-    explain itself). These are declared because no amount of data tells you
-    what you are trying to do.
+    **Structure** — what question to ask. The horizon (what you intend to
+    hold), the Swayam view bank and the Mūla discount grid (the hypothesis
+    space to average over). These are declared because no amount of data tells
+    you what you are trying to do.
 
     **Estimability floors** — how much evidence before publishing anything.
     The Mūla burn-in and print floor. Argued from first principles, not swept.
 
-    **Warm-up priors** — the ``*_strong`` / ``*_moderate`` / ``ui_*`` numbers.
-    These used to BE the thresholds, anchored by full-history studies. They are
-    now only the value used until an instrument has accumulated enough of its
-    own history for :mod:`analytics.adaptive` to estimate the cut-point from
-    the causal empirical distribution of the signal itself. After that the
-    prior is superseded. Keeping them means an instrument's first year behaves
-    exactly as it always did rather than flapping on a quantile of forty
-    points; it does not mean they are still tuned.
-
     What is NO LONGER here: routing (``archetype`` / ``polarity`` / ``basket``
     / ``basket_alias``) died with the basket breadth engine, and the Swayam
     basket knobs (``swayam_msf_length`` / ``swayam_roc_len``) with it. The
-    Swayam kernel knobs kept their values but are named for the engine that
-    now owns them.
+    leakage exclusions are read from ``core.instruments`` (built from
+    ``TARGET_EXCLUDED_PREDICTORS``); the copy this config carried had no
+    reader. The display warm-up priors (``conviction_*``, ``ui_*``) went with
+    the tiers they seeded, and the second horizon list (``hold_horizons``)
+    with the calibration frame that read it: one h, ``forecast_horizon``.
     """
-
-    # ── Structure: leakage guard ────────────────────────────────────────────
-    excluded_predictors: tuple[str, ...] = ()      # Mūla + Swayam-MMR leakage guard
 
     # ── Structure: Swayam breadth ───────────────────────────────────────────
     # `swayam_lengths` is a SPAN of timescales, not a length to pick — every
@@ -762,54 +721,32 @@ class InstrumentConfig:
     swayam_oversold: float = SWAYAM_OVERSOLD
     swayam_overbought: float = SWAYAM_OVERBOUGHT
 
-    # ── Scoring / display horizons ──────────────────────────────────────────
+    # ── Structure: the horizon ──────────────────────────────────────────────
     # THE horizon h of the estimand: resolved once per run from this field and
     # passed explicitly everywhere (no default, no fallback downstream).
     forecast_horizon: int = FORECAST_HORIZON
-    hold_horizons: tuple[int, ...] = HOLD_HORIZONS
 
     # ── Estimability floors: Mūla valuation engine ──────────────────────────
-    # Default to the global constants; a per-instrument / asset-class override
-    # (via _PER_INSTRUMENT_OVERRIDES / STOCK_CONFIGS) retunes them for one
-    # target. Note what is NOT here: the engine is recursive, so it has no
-    # training window, refit cadence, ensemble roster or regularisation path
-    # to tune. What remains are estimability floors (how much history before
-    # publishing, how many prints before an instrument may join the
-    # cross-section) and the coefficient-memory grid.
+    # Default to the global constants; an asset-class config (CLASS_CONFIG_
+    # DEFAULTS / STOCK_CONFIGS) can retune them. Note what is NOT here: the
+    # engine is recursive, so it has no training window, refit cadence,
+    # ensemble roster or regularisation path to tune. What remains are
+    # estimability floors (how much history before publishing, how many
+    # prints before an instrument may join the cross-section) and the
+    # coefficient-memory grid.
     fvo_burn_in: int = FVO_BURN_IN
     fvo_min_prints: int = FVO_MIN_PRINTS
     fvo_valuation_deltas: tuple[float, ...] = FVO_VALUATION_DELTAS
-    fvo_lookback_windows: tuple[int, ...] = LOOKBACK_WINDOWS
 
     # (The Convergence layer's knobs — its drift-diffusion filter, its prior
     # dimension weights and its agreement tiers — and the Precedent matcher's
     # term structure and state window left with the parallel opinions they
     # tuned: none moved the call.)
 
-    # ── Warm-up priors for the adaptive thresholds ─────────────────────────
-    # Each is the p90 ("strong") / p75 ("moderate") / p50 ("weak") of its own
-    # signal's distribution, measured once by a pooled study. analytics.adaptive
-    # now re-derives exactly those quantiles from the signal's OWN causal past,
-    # per instrument; these values hold only until it has enough history.
-    # Structural cut-points (R²/ADF/KPSS/HMM) stay fixed — they are properties
-    # of a statistical test, not of an instrument's distribution.
-    # Mūla window agreement (ConvictionBounded, ±100) — p90 / p75.
-    conviction_strong: float = CONVICTION_STRONG
-    conviction_moderate: float = CONVICTION_MODERATE
-    # Model spread (SD of the fair-value level), basis points — p10 / p90. The
-    # spread now measures the fair value's own uncertainty, not the residual
-    # noise around it, and runs ~17-77 bps across instruments (2026-10-17), so
-    # the prior is wide and each instrument's own history takes over.
-    ui_model_spread_low: float = 20.0
-    ui_model_spread_high: float = 80.0
-    # (The Swayam average-signal and agreement tiers went with the average
-    # signal and the agreement they coloured; nine other display fields went
-    # with the cards and markers that read them.)
-
     def __post_init__(self) -> None:
         """The horizon is THE estimand's h, so a config that cannot carry it
-        fails at construction — including every clone register_stock_target
-        makes — rather than somewhere downstream that would substitute another."""
+        fails at construction — the class and stock configs included — rather
+        than somewhere downstream that would substitute another."""
         h = self.forecast_horizon
         assert isinstance(h, int) and not isinstance(h, bool), (
             f"forecast_horizon must be an int, got {h!r}")
@@ -839,8 +776,9 @@ CLASS_CONFIG_DEFAULTS: dict[str, InstrumentConfig] = {
     "stock_us":    InstrumentConfig(swayam_lengths=(10, 14, 20, 28, 40), swayam_roc_frac=0.55)}
 
 # Free-form stock ASSET-CLASS configs — one per market, applied to any symbol
-# entered under India Stocks / US Stocks (register_stock_target clones the
-# right one per resolved symbol, filling in its market-based exclusions).
+# entered under India Stocks / US Stocks (register_stock_target installs the
+# right one per resolved symbol; its market-based exclusions go to
+# TARGET_EXCLUDED_PREDICTORS).
 STOCK_CONFIGS: dict[str, InstrumentConfig] = {
     "india": CLASS_CONFIG_DEFAULTS["stock_india"],
     "us":    CLASS_CONFIG_DEFAULTS["stock_us"]}
@@ -852,87 +790,16 @@ _CATEGORY_TO_CLASS: dict[str, str] = {
     "India Indices": "india_index",
     "US Indices":    "us_index"}
 
-# ── PER-INSTRUMENT vs ASSET-LEVEL tuning ─────────────────────────────────────
-# The 5 catalogue classes are tuned PER INSTRUMENT (each target carries its own
-# knobs on its class default); the India/US STOCK classes stay ASSET-LEVEL
-# (STOCK_CONFIGS) since free-form symbols can't be pre-tuned. Invariant: the
-# per-instrument classes are exactly the catalogue (non-stock) classes.
-PER_INSTRUMENT_CLASSES: tuple[str, ...] = tuple(dict.fromkeys(_CATEGORY_TO_CLASS.values()))
-ASSET_LEVEL_CLASSES: tuple[str, ...] = ("stock_india", "stock_us")
-assert set(PER_INSTRUMENT_CLASSES).isdisjoint(ASSET_LEVEL_CLASSES)
-
-# Fields that MAY be set per instrument = every InstrumentConfig knob EXCEPT the
-# routing/identity fields (those come from the routing maps, not the tuner).
-_ROUTING_FIELDS: frozenset[str] = frozenset({"excluded_predictors"})
-_TUNABLE_FIELDS: frozenset[str] = frozenset(f.name for f in _dc_fields(InstrumentConfig)) - _ROUTING_FIELDS
-
-# Explicit per-instrument tuning SLOT per catalogue target (auto-seeded, so it
-# can't drift). Empty dict = inherits the class default; the slot marks the wiring target.
-PER_INSTRUMENT_TUNING: dict[str, dict] = {
-    _nm: {}
+# One explicit InstrumentConfig per named target: its class's config. (Each
+# catalogue target used to carry a per-instrument override slot on top of its
+# class default. The last overrides — a display prior on Gold and Jeera — left
+# with the Swayam average signal they coloured, and the empty slots went with
+# them: a retune now lands in CLASS_CONFIG_DEFAULTS or as a new entry here.)
+INSTRUMENT_CONFIGS: dict[str, InstrumentConfig] = {
+    _nm: CLASS_CONFIG_DEFAULTS[_cls]
     for _cat, _cls in _CATEGORY_TO_CLASS.items()
-    if _cls in PER_INSTRUMENT_CLASSES
     for _nm in TARGET_CATEGORIES.get(_cat, [])
 }
-
-# Per-instrument overrides, PRUNED to only those that clear a REAL statistical bar
-# (2026-07-21 suite). The studies' own gates (breadth margin>=0.03) are a fraction
-# of one IC standard error (SE ~= 1/sqrt(n-3) ~= 0.09 at n~130), so they rubber-stamp
-# noise. Re-gated here at ~1 SE, everything dropped inheriting the (coherent)
-# class default:
-#   - swayam_lengths: both candidate spans beat their default by only ~0.03 (< bar) -> revert
-#     to the class Swayam grid (the target keeps its breadth signal, just not a bespoke span).
-#   - analog_w_*: dropped (the analog study's own verdict is that the class default 1/0/0 stands).
-#   - ui_swayam_avg_threshold (Gold/Jeera): gone with the Swayam average signal it coloured.
-#
-# The per-instrument ENGINE tunings that used to live here were all Aarambh
-# walk-forward knobs (refit cadence / train window / ensemble roster / ridge
-# alphas / huber epsilon / PCA components). The Mūla engine that replaced
-# it has none of them — it is recursive, so there is no window to size and
-# no ensemble to select — and a tuning measured on a retired model is not
-# evidence about the current one, so they were removed rather than remapped.
-# The Mūla knobs (fvo_burn_in / fvo_min_prints / fvo_valuation_deltas) are
-# estimability floors and a memory grid, not free parameters, and stay at their
-# class defaults until a study measures otherwise.
-_PER_INSTRUMENT_OVERRIDES: dict[str, dict] = {
-    # -- Commodities --
-    'Gold': {},
-    'Jeera': {},
-    # -- Currency (FX) --
-    'USD/INR': {},
-    # -- India Indices --
-    'Nifty Pharma': {},
-    # -- US Indices --
-    'S&P 500': {},
-    'Nasdaq 100': {}}
-_bad_fields = {k for _ov in _PER_INSTRUMENT_OVERRIDES.values() for k in _ov if k not in _TUNABLE_FIELDS}
-assert not _bad_fields, (
-    f"_PER_INSTRUMENT_OVERRIDES sets non-tunable/unknown fields {sorted(_bad_fields)} "
-    f"(routing fields come from the routing maps; valid tuning fields: {sorted(_TUNABLE_FIELDS)})")
-_bad_names = [n for n in _PER_INSTRUMENT_OVERRIDES if n not in PER_INSTRUMENT_TUNING]
-assert not _bad_names, (
-    f"_PER_INSTRUMENT_OVERRIDES targets {_bad_names} are not per-instrument-class "
-    "catalogue targets (stocks are tuned at asset-class level via STOCK_CONFIGS)")
-for _nm, _ov in _PER_INSTRUMENT_OVERRIDES.items():
-    PER_INSTRUMENT_TUNING[_nm].update(_ov)
-
-# Build one explicit InstrumentConfig per named target: class-default tuning +
-# that instrument's own leakage exclusions (from
-# the maps above) + its per-instrument tuning overrides (empty until wired).
-# Every India index gets its own entry copying the Nifty 50 baseline; Nifty 50
-# and Nifty 50 - PE differ only where their routing/tuning differ.
-INSTRUMENT_CONFIGS: dict[str, InstrumentConfig] = {}
-for _cat, _names in TARGET_CATEGORIES.items():
-    _cls = _CATEGORY_TO_CLASS.get(_cat)
-    if _cls is None:
-        continue   # free-form stock categories — configured per-symbol at runtime
-    _base = CLASS_CONFIG_DEFAULTS[_cls]
-    for _nm in _names:
-        INSTRUMENT_CONFIGS[_nm] = _dc_replace(
-            _base,
-            excluded_predictors=tuple(TARGET_EXCLUDED_PREDICTORS.get(_nm, ())),
-            **PER_INSTRUMENT_TUNING.get(_nm, {}),   # per-instrument knob overrides
-        )
 
 # Completeness guard ("defining them is a must"): every non-stock catalogue
 # target must have resolved to an explicit config at import time.
@@ -1004,19 +871,11 @@ COLOR_ACCENT = _palette_hex("accent")   # #4C7DF0 — primary/interactive; use f
                                          # series & emphasis, never for warning semantics.
 COLOR_PURPLE = _palette_hex("violet")   # #9B8FD4
 
-# ─── UI Thresholds ───────────────────────────────────────────────────────────
-# Display tiers that belong to an INSTRUMENT (agreement, Swayam signal, model
-# spread, window agreement) live on InstrumentConfig as warm-up priors for that
-# instrument's own causal quantiles. What stays here are properties of a
-# statistic or of the layout, the same for every instrument.
-
-# OOS R² thresholds
-UI_R2_STRONG = 0.7
-UI_R2_ACCEPTABLE = 0.4
-
-# (UI_BAND_NARROW/WIDE were removed: the CI band width is pinned by the DDM's
-# mean-reverting variance — measured degenerate, the tiers could never fire.
-# The band itself is still drawn on the conviction chart.)
+# ─── UI Layout ───────────────────────────────────────────────────────────────
+# (The display tiers that used to live here and on InstrumentConfig — R² and
+# model-spread colour cuts, window-agreement and Swayam-signal tiers — went with
+# the advisory colour they set: evidence is neutral-toned and carries its own
+# grade instead.)
 
 # Chart height defaults
 UI_CHART_HEIGHT_MEDIUM = 340

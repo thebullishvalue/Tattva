@@ -53,6 +53,7 @@ _ROWS: tuple[tuple[str, str, str], ...] = (
     ("claim:buy", "evidence:claim_side", "The claim, BUY side"),
     ("claim:sell", "evidence:claim_side", "The claim, SELL side"),
     ("evidence:swayam_lean", "evidence:swayam_lean", "Swayam's lean, standalone"),
+    ("evidence:ecm_drift", "evidence:ecm_drift", "ECM gap-implied move"),
 )
 
 #: The paths drawn in section 2: ``(call_ts column, legend name, colour)``.

@@ -43,7 +43,6 @@ import streamlit as st
 from core.config import UI_CHART_HEIGHT_LARGE
 from core.knobs import knob
 from core.semantics import SWAYAM_DEAD, edge_tier
-from engines.swayam import voting_views
 from ui.theme import chart_layout, style_axes, chart_color, chart_rgba, grid_rgba
 from ui.components import (render_kpi_strip, render_section_header, render_empty_state,
                            render_chart_panel, render_table_panel, render_edge_panel,
@@ -219,15 +218,22 @@ def _render_breadth_chart(df_n: pd.DataFrame) -> None:
     render_chart_panel(fig, "swayam_breadth", units="pts · % of views", window=True)
 
 
-def _render_bank(cfg, n_run: int, n_eff: float | None) -> None:
-    """What the breadth is made of: who can vote, how they are weighted, how many they are worth."""
-    n_vote, n_bank = voting_views(cfg)
+def _render_bank(cfg, row: pd.Series | None, n_eff: float | None) -> None:
+    """What the breadth is made of: who can vote, how they are weighted, how many they are worth.
+
+    The counts are the published ones (``aggregate_views``' ``N_Voting`` and
+    ``Total_Analyzed``) on d*'s Swayam row, so the page counts the views the
+    breadth was actually made of.
+    """
+    n_vote = int(row["N_Voting"]) if row is not None and pd.notna(row["N_Voting"]) else 0
+    n_run = int(row["Total_Analyzed"]) if row is not None and pd.notna(row["Total_Analyzed"]) else 0
     lengths = sorted(cfg.swayam_lengths)
     mid = lengths[len(lengths) // 2]
     render_kpi_strip([
-        {"label": "Views that can vote", "value": f"{n_vote} of {n_bank}",
-         "subtext": (f"can reach the ±{cfg.swayam_overbought:g} vote: the macro-anchored views; a "
-                     f"price-only view cannot at the shipped blend weight, and sits in the shares' "
+        {"label": "Views that can vote", "value": f"{n_vote} of {n_run}",
+         "subtext": (f"on d*, of the views that reported, the ones that can reach the "
+                     f"±{cfg.swayam_overbought:g} vote: the macro-anchored views; a price-only "
+                     f"view cannot at the shipped blend weight, and sits in the shares' "
                      f"denominator"),
          "color_class": "neutral"},
         {"label": "Weighting", "value": "equal",
@@ -301,7 +307,9 @@ def render_swayam_tab(verdict: dict, edges: dict, cfg, *, selected_tf: str | Non
         "counted, and how many uncorrelated views they amount to.",
         icon="grid", accent="cyan",
     )
-    _render_bank(cfg, len(view_dfs), st.session_state.get("swayam_n_eff"))
+    asof = verdict.get("asof")
+    _render_bank(cfg, full.loc[asof] if asof is not None and asof in full.index else full.iloc[-1],
+                 st.session_state.get("swayam_n_eff"))
 
     render_section_header(
         "Swayam's Lean, Standalone",

@@ -330,11 +330,16 @@ def grade_all(call_ts: pd.DataFrame, inputs: pd.DataFrame, price: pd.Series, evi
     * ``call:prospective`` — the same on sessions after the priors' run date;
     * ``evidence:swayam_lean`` — Swayam's published Lean on its own, as a
       lean, on the valued sessions with a native Swayam row: EVIDENCE about
-      the sizer's input, read by the Swayam page; it moves nothing.
+      the sizer's input, read by the Swayam page; it moves nothing;
+    * ``evidence:ecm_drift`` — the reversion sizer's gap-implied h-session
+      move (``evidence['ecm_drift']['lean']``, MulaDriftPct) as a lean, on the
+      valued sessions: EVIDENCE→sizer:reversion, read by the Mūla page; it
+      moves nothing.
 
-    ``evidence`` is ``build_evidence``'s output; none of its pieces is a lean,
-    so no grade is computed from it. A key that raises reads as an empty grade
-    with ``status 'failed: …'``; every key carries ``horizon``.
+    ``evidence`` is ``build_evidence``'s output; its one lean, the ECM's
+    gap-implied move, is graded here (the other pieces are not leans). A key
+    that raises reads as an empty grade with ``status 'failed: …'``; every key
+    carries ``horizon``.
     """
     rows = _claim_rows(inputs)
     claim = inputs["claim"].astype(float)
@@ -364,6 +369,8 @@ def grade_all(call_ts: pd.DataFrame, inputs: pd.DataFrame, price: pd.Series, evi
         "evidence:swayam_lean": lambda: grade(inputs["swayam_lean"],
                                               inputs["valid"] & inputs["printed"]
                                               & inputs["swayam_native"]),
+        "evidence:ecm_drift": lambda: grade(evidence["ecm_drift"]["lean"].reindex(price.index),
+                                            inputs["valid"] & inputs["printed"]),
     }
     edges: dict = {}
     for key, fn in specs.items():

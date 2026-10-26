@@ -82,15 +82,23 @@ ROLES: dict[str, Role] = {r.key: r for r in (
     Role("grade:sizer:reversion", "GRADE", "sizer:reversion", "Reversion sizer grade", "sizer:reversion",
          "β of the reversion sizer: its z against d·Y on claim rows"),
     Role("evidence:gap_split", "EVIDENCE", "claim", "Who closes the gap?", None,
-         "Overview: the measured split of gap closure between price and fair value"),
+         "Overview and Mūla: the measured split of gap closure between price and fair value"),
     Role("evidence:claim_unit", "EVIDENCE", "claim", "The claim's unit", None,
-         "Overview: FVO's causal mean, SD and RICH:CHEAP balance against the C12 contract"),
+         "Overview and Mūla: FVO's causal mean, SD and RICH:CHEAP balance against the C12 "
+         "contract"),
+    Role("evidence:gap_stationarity", "EVIDENCE", "claim", "Gap stationarity", None,
+         "Mūla: ADF and KPSS on the published gap through d*, one word "
+         "(core.semantics.gap_stationarity), a full-history diagnostic"),
     Role("evidence:claim_side", "EVIDENCE", "claim", "The claim by side", None,
          "Overview: hit against the side-matched base, read off edges claim:buy and claim:sell"),
     Role("evidence:swayam_lean", "EVIDENCE", "sizer:swayam", "Swayam's lean, standalone",
          "evidence:swayam_lean",
          "the Swayam page: the published Lean graded on its own, on the valued sessions with a "
          "native Swayam row"),
+    Role("evidence:ecm_drift", "EVIDENCE", "sizer:reversion", "Gap-implied move",
+         "evidence:ecm_drift",
+         "the Mūla page: the ECM's gap-implied h-session move (MulaDriftPct, the drift "
+         "excluded), graded on its own on the valued sessions"),
     Role("infra:asof", "INFRASTRUCTURE", None, "As of d*", None,
          "every verdict input is read at d*, Mūla's latest published session"),
 )}

@@ -196,10 +196,11 @@ class BatchDLM:
     F = (1,0) gives the local linear trend of Harvey (1989).
 
     Every member may carry its own discount factor *and* its own regressor
-    vector, which is what the leave-one-block-out ablation needs.  The
-    batching is not an optimisation detail: the engines advance banks of
-    5-15 filters at each of several thousand timestamps, and a Python-level
-    loop over them dominates the runtime.
+    vector; :class:`DynamicModelAverage` runs one bank per discount grid,
+    every member on the same regressors.  The batching is not an
+    optimisation detail: the engines advance banks of 4-5 filters at each of
+    several thousand timestamps, and a Python-level loop over them dominates
+    the runtime.
 
     Everything emitted at time t is a function of y_{1:t-1} and F_t.
     """
@@ -412,12 +413,6 @@ class DynamicModelAverage:
         par = np.maximum(qs - self.bank.S, 0.0)
         var_par = float(self.w @ (par * infl)) + spread
         return mean, max(var, VAR_FLOOR), max(var_par, 0.0)
-
-    @property
-    def effective_memory(self) -> float:
-        """Posterior-mean adaptation memory 1/(1-delta), in observations."""
-        mem = np.array([1.0 / max(1.0 - d, 1e-4) for d in self.grid])
-        return float(self.w @ mem)
 
 
 def norm_cdf_scalar(x: float) -> float:

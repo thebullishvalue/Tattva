@@ -55,8 +55,8 @@ import streamlit as st
 # (overflow, invalid divide, degenerate log/sqrt) anywhere in the math stack,
 # not just the known-noisy sources it was meant to cover (audit finding C6).
 # The one legitimate source found by auditing (nanmean's "Mean of empty
-# slice" on the engine's own warm-up rows) is now scoped locally at its call
-# site (engines/mula/base.py._compute_breadth_metrics) instead. FutureWarning
+# slice" on the engine's own warm-up rows) was scoped locally at its call site,
+# and has since gone with the window stack that raised it. FutureWarning
 # stays broadly suppressed — it's pandas/numpy API-deprecation noise, not a
 # correctness signal, so it doesn't carry the same risk of masking a real bug.
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -127,6 +127,7 @@ from core.config import (MIN_DATA_POINTS, STALENESS_DAYS, ANALYSIS_EPOCH, ALL_TA
                          register_stock_target, get_instrument_config)
 from core.instruments import instrument
 from core.call import format_size
+from core.semantics import valuation_state
 from core.knobs import knob
 from core.trust import load_priors
 
@@ -141,7 +142,7 @@ from core.trust import load_priors
 # derived from one. `mula_summary` used to sit outside the bundle as a parallel
 # copy, so a cached switch-back showed the PREVIOUS target's error-correction
 # read on the hero — the ECM gate, and so the conviction, belonged to the
-# wrong instrument. It is now read off the bundled engine.
+# wrong instrument. It is gone: the reversion read is call_ts's, at d*.
 #
 #: ``call_ts`` (the call at every session), ``grades_ts`` (the as-of grades it
 #: read), ``evidence`` and ``verdict`` (call_ts at d*) are the closed loop
@@ -167,7 +168,7 @@ _RESULTS_CACHE_MAX = 6
 #: drifted (Refresh cleared the Swayam caches, Reset did not, so a Reset an
 #: hour later paired fresh Mūla data with stale Swayam frames).
 _SESSION_RESULT_KEYS = _BUNDLE_KEYS + (
-    "engine_cache", "fvo_engine", "fvo_fit_key", "results_cache",
+    "engine_cache", "mula_fit_checkpoint", "results_cache",
     "_swayam_fetch_cache", "_swayam_analysis_cache",
 )
 
@@ -1126,29 +1127,29 @@ def main():
         console.item("Print Floor", f"{_icfg.fvo_min_prints} prints before an instrument may join")
         console.item("Coefficient Memory", f"deltas {_icfg.fvo_valuation_deltas}")
         console.item("Min Data Points", MIN_DATA_POINTS)
-        console.item("Lookback Windows", f"{tuple(_icfg.fvo_lookback_windows)}")
 
         console.section("Recursive Valuation")
-        # Reuse an already-fit Mūla engine for this exact config if a prior
-        # (possibly interrupted) execution in THIS session already produced one.
-        # `engine_cache` is only set at the end of Phase 5, so a Streamlit rerun
-        # mid-pipeline (yfinance retry, cloud reconnect, stray interaction) would
-        # otherwise re-enter this block and re-run the expensive valuation pass.
-        # Keyed by cache_key → identical inputs → identical fit, so reuse is safe.
-        if (st.session_state.get("fvo_fit_key") == cache_key
-                and isinstance(st.session_state.get("fvo_engine"), FairValueEngine)):
-            engine = st.session_state["fvo_engine"]
+        # THE MŪLA FIT CHECKPOINT: reuse an already-fit Mūla engine for this
+        # exact config if a prior (possibly interrupted) execution in THIS
+        # session already produced one. `engine_cache` is only set at the end of
+        # Phase 5, so a Streamlit rerun mid-pipeline (yfinance retry, cloud
+        # reconnect, stray interaction) would otherwise re-enter this block and
+        # re-run the expensive valuation pass. Keyed by cache_key → identical
+        # inputs → identical fit, so reuse is safe. (It is a resume point with
+        # its own lifecycle, not a second copy of `engine`.)
+        _ckpt = st.session_state.get("mula_fit_checkpoint") or {}
+        if _ckpt.get("key") == cache_key and isinstance(_ckpt.get("engine"), FairValueEngine):
+            engine = _ckpt["engine"]
             console.item("Valuation", "reused cached fit (resumed run)")
             progress_bar(progress_container, 40, "Mūla Engine Reused", "Cached valuation pass")
         else:
             console.item("Valuation Core", "Mūla — cointegrating core + error-correction layer")
             # `_icfg` threads this instrument's own Mūla knobs (burn-in, print
-            # floor, discount grid, lookback windows) and THE horizon h. The
-            # engine publishes `Price` itself; its output is not edited here.
+            # floor, discount grid) and THE horizon h. The engine publishes
+            # `Price` itself; its output is not edited here.
             engine = fit_mula(prep, _icfg, progress=lambda pct, msg: progress_bar(
                 progress_container, int(20 + pct * 20), "Running Mūla Engine", msg))
-            st.session_state["fvo_engine"] = engine
-            st.session_state["fvo_fit_key"] = cache_key
+            st.session_state["mula_fit_checkpoint"] = {"key": cache_key, "engine": engine}
 
         sig = engine.get_current_signal()
         stats = engine.get_model_stats()
@@ -1160,25 +1161,23 @@ def main():
                 return none
             return format(v, spec) if np.isfinite(v) else none
 
+        # d*'s published row, for the readings the signal does not carry.
+        _row = (engine.ts_data.iloc[sig["published_row"]] if sig.get("published_row") is not None
+                else pd.Series(dtype=float))
         console.section("Engine Results")
-        console.item("Valuation", f"{sig.get('valuation_state', '?')} · oscillator "
+        console.item("Valuation", f"{valuation_state(sig.get('fvo'))} · oscillator "
                      f"{_fmt(sig.get('fvo'), '+.2f')}σ ({_fmt((sig.get('pct_mispricing') or 0) * 100, '+.2f')}% vs fair value)")
-        console.item("Fair Value", f"{_fmt(sig.get('fair_value'), ',.2f')} vs price {_fmt(sig.get('actual'), ',.2f')}")
+        console.item("Fair Value", f"{_fmt(_row.get('FairValue'), ',.2f')} vs price {_fmt(_row.get('Price'), ',.2f')}")
         if sig.get("asof_row_withheld"):
             console.warning(f"Latest session not valued ({sig.get('withheld_reason')}) — reading is the last valued session")
         console.item("OOS R²", f"{_fmt(stats.get('r2_oos'), '.3f')} (log price vs fitted level)")
-        console.item("R² vs Trailing Mean", f"{_fmt(stats.get('r2_vs_anchor'), '+.3f')} (edge over a 252d anchor)")
-        console.item("Model Spread", f"{_fmt((sig.get('model_spread') or 0) * 10000, '.1f')} bps (SD of the fair-value level)")
-        console.item("Cross-Section", f"{_fmt(sig.get('xs_consistency'), '.2f')} (leave-one-block-out sign agreement)")
-        console.item("Price Reverts", f"P={_fmt(sig.get('mr_prob'), '.2f')} · κ̂ {_fmt(sig.get('mula_kappa'), '+.4f')}/d · "
-                     f"expected {FWD_HORIZON}d move {_fmt(sig.get('expected_drift_pct'), '+.2f')}% "
-                     f"± {_fmt(sig.get('drift_sd_pct'), '.2f')}%")
-        console.item("Gap Half-Life", f"{_fmt(sig.get('gap_half_life'), '.0f')}d (online AR1) · "
-                     f"OU {_fmt(sig.get('ou_half_life'), '.0f')}d (full history)")
-        _adf = sig.get("adf_pvalue")
-        console.item("Gap Stationarity", f"ADF p={_fmt(_adf, '.4f')}"
-                     + (" (stationary)" if _adf is not None and np.isfinite(_adf) and _adf < 0.05
-                        else " (unit root not rejected)"))
+        console.item("Model Spread", f"{_fmt(_row.get('ModelSpread', np.nan) * 10000, '.1f')} bps (SD of the fair-value level)")
+        console.item("Reversion", f"P(price-side κ > 0) {_fmt(_row.get('MRProb'), '.2f')} · "
+                     f"κ̂ {_fmt(_row.get('MulaKappa'), '+.4f')}/d · gap-implied {FWD_HORIZON}d move "
+                     f"{_fmt(_row.get('MulaDriftPct'), '+.2f')}% ± {_fmt(_row.get('MulaSdPct'), '.2f')}% "
+                     f"(excludes drift)")
+        console.item("Gap Half-Life", f"{_fmt(_row.get('GapHalfLife'), '.0f')}d (online AR1) · "
+                     f"price-side {_fmt(_row.get('MulaHalfLife'), '.0f')}d")
         # Name any gap the reader can see on the chart. A break is never "the
         # value was zero" — it is the system declining to publish — and the
         # causes want different responses. Only "incomplete fetch" is worth
@@ -1207,14 +1206,13 @@ def main():
 
         # `n_available` is the count that PRINTED today, not the count admitted
         # past the print floor — early in a session that is a fraction of it.
-        console.item("Factors", f"k={sig.get('k_factors')} above the MP edge · "
+        console.item("Factors", f"k={_fmt(_row.get('KFactors'), '.0f')} above the MP edge · "
                                 f"{sig.get('n_available')} instruments printed so far today")
-        console.item("Market Regime", f"{sig.get('market_regime')} (stress pct {_fmt(sig.get('stress'), '.2f')})")
         console.success(f"Mūla engine complete | {len(engine.ts_data)} output rows "
                         f"({int(engine.ts_data['Valid'].sum())} valued, {engine.min_train_size} burn-in)")
         console.end_phase("MŪLA ENGINE")
         progress_bar(progress_container, 40, "Mūla Engine Complete",
-                     f"{sig.get('valuation_state', '')} · {_fmt(sig.get('fvo'), '+.2f')}σ")
+                     f"{valuation_state(sig.get('fvo'))} · {_fmt(sig.get('fvo'), '+.2f')}σ")
 
         # ── Phase 3: Swayam Breadth ───────────────────────────────────────
         # pipeline.run.build_swayam: the view bank on the target's own bars,
@@ -1420,7 +1418,7 @@ def main():
                 f"from a prior cached snapshot: {_sb_preview}{_sb_more}. A rebuilt column "
                 f"is not merely staler than a live one — it is a different series, so "
                 f"this run's published history may differ from a run that fetched "
-                f"cleanly. Compare the history fingerprint before treating past values as "
+                f"cleanly. Compare the history fingerprint before reading past values as "
                 f"final; refresh once the source is healthy for an authoritative record.",
             )
 
@@ -1568,8 +1566,9 @@ def main():
     def _page_mula() -> None:
         _top_bar(windowed=True)
         _safe_render("Mūla", lambda: render_mula_tab(
-            engine, ts_filtered, x_axis, signal, model_stats, ts, active_target,
-            edge=_edges.get("claim"), horizon=FWD_HORIZON))
+            engine, ts_filtered, x_axis, signal, model_stats, active_target,
+            verdict=verdict, edges=_edges, evidence=st.session_state.get("evidence") or {},
+            call_ts=st.session_state.get("call_ts"), horizon=FWD_HORIZON))
 
     def _page_swayam() -> None:
         _top_bar(windowed=True)
@@ -1584,7 +1583,7 @@ def main():
 
     def _page_system() -> None:
         _top_bar()
-        _safe_render("System", lambda: render_diagnostics_tab(engine, signal))
+        _safe_render("System", lambda: render_diagnostics_tab(engine, active_target))
 
     def _page_data() -> None:
         _top_bar(windowed=True)

@@ -244,7 +244,8 @@ _BLOCK_TICKERS: dict[str, tuple[str, ...]] = {
     ),
     # IIND.L is India equity (16-17% vol, 10d corr 0.87 with INDA, 0.18 with
     # India 8-13Y G-Sec). It sat in Rates on its column name, which put an
-    # equity fund in the block the leave-one-block-out refits ablate as "rates".
+    # equity fund in the Rates block of the valuation's block view (and of the
+    # Mūla page's drivers table).
     "Equity": ("IIND.L",),
 }
 

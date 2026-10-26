@@ -22,23 +22,22 @@ reading of that one gap:
   (``GapScale``). Positive = rich, negative = cheap. The system's directional
   claim and the Cheap / Fair / Rich state (``core.semantics``) come from it,
   and from nothing else.
-* **Its persistence** — ``GapHalfLife`` online, the OU half-life and ADF /
-  KPSS on the full history. These say the GAP is short-lived; they do not say
+* **Its persistence** — ``GapPhi`` / ``GapHalfLife``, the online AR(1) of the
+  gap. They say how long a gap survives however it closes; they do not say
   which side closes it.
 * **The error-correction read** (``ecm.py``) — whether PRICE responds to the
-  gap (κ̂, its evidence ``MRProb``, the implied h-session move), and whether
-  valuation-led forecasts are winning the predictive pool today.
-* **Cross-sectional agreement** — whether independent slices of the world
-  (leave-one-block-out refits) agree on the gap's sign.
-* **The window stack** — robust z-scores of the gap against its own trailing
-  1-month / 1-quarter / 1-year history, the share of windows reading it
-  cheap or rich, and a drift-diffusion filter of their agreement. Evidence
-  about how unusual today's gap is; never a rival direction.
+  gap (κ̂, its evidence ``MRProb``, the reversion sizer's reading) and the
+  h-session move the gap implies.
+
+``PUBLISHED_COLUMNS`` is the whole published frame (``ts_data``), and each of
+its columns has a named reader outside the engine (tests/test_consumers.py).
+The window stack, its drift-diffusion filter, the leave-one-block-out
+cross-section score, the HMM regime label and the OU projection that used to
+ride along were near-copies of the claim, write-only, or read by nothing that
+moves the call, and went.
 
 The public surface is ``fit`` / ``get_current_signal`` / ``get_model_stats``
-/ ``get_regime_stats`` / ``ts_data`` / ``ou_params`` / ``mula_summary``, plus
-``get_block_betas`` / ``get_instrument_attribution`` /
-``get_feature_impact_history`` for the auditable block view.
+/ ``ts_data`` / ``latest_feature_impacts`` / ``get_feature_impact_history``.
 
 No Streamlit dependency.
 
@@ -55,43 +54,38 @@ Bierens, H. J. & Martins, L. F. (2010). "Time-Varying Cointegration."
 from __future__ import annotations
 
 import logging
-import warnings
 from typing import Callable
 
 import numpy as np
 import pandas as pd
 
-from core.config import (
-    DDM_DRIFT_SCALE,
-    DDM_LEAK_RATE,
-    DDM_LONG_RUN_VAR,
-    LOOKBACK_WINDOWS,
-    OU_PROJECTION_DAYS,
-)
-from core.semantics import VALUATION_STATES, claim_direction, valuation_state
-
-try:
-    from statsmodels.tsa.stattools import adfuller, kpss
-    _HAS_STATSMODELS = True
-except ImportError:  # pragma: no cover — optional dependency
-    _HAS_STATSMODELS = False
-
-from analytics.ddm_filter import drift_diffusion_filter
-from analytics.ou_process import ornstein_uhlenbeck_estimate
-from analytics.robust_z import rolling_robust_z
-from analytics.utils import (
-    _apply_conviction_bounds,
-    _classify_zones,
-    _detect_crossover_signals,
-)
-
 from .ecm import COLUMNS as ECM_COLUMNS
 from .ecm import MulaLayer
 from .valuation import (BURN_IN, MIN_PRINTS, PANEL_MIN_COVERAGE, PANEL_MIN_PRINTS,
-                        SESSION_SPARSE_FRACTION,
-                        VALUATION_DELTAS, MarketValuationEngine)
+                        PUBLISH_WARMUP_PRINTS, PUBLISH_WARMUP_WINDOW,
+                        SESSION_SPARSE_FRACTION, VALUATION_DELTAS,
+                        MarketValuationEngine)
 
 log = logging.getLogger(__name__)
+
+#: The published frame, ``ts_data``, in order: the valuation and its band, the
+#: claim's oscillator and the gap it is made of, the gap's persistence, the
+#: error-correction read, the cross-section it was valued on, and the
+#: publication flags.
+PUBLISHED_COLUMNS: tuple[str, ...] = (
+    "Price", "FairValue", "FairValueLo", "FairValueHi", "FVO", "PctMispricing",
+    "GapScale", "ModelSpread", "GapPhi", "Residual", "GapHalfLife",
+    *ECM_COLUMNS,
+    "KFactors", "NAvailable", "NAdmitted", "NScheduled",
+    "Valid", "Provisional", "WithheldReason",
+)
+
+#: The valuation family: the columns that are a claim about the cross-section
+#: and so follow the publication rule (``Price`` is an observed print and does
+#: not).
+_VALUATION_FAMILY: tuple[str, ...] = (
+    "FairValue", "FairValueLo", "FairValueHi", "Residual", "ModelSpread", "GapScale",
+    "FVO", "PctMispricing")
 
 
 class MulaEngine:
@@ -102,26 +96,17 @@ class MulaEngine:
            latent factors AND the integrated asset-class block aggregates of
            the macro cross-section, each view a discount-factor mixture, the
            two views averaged by their own out-of-sample predictive evidence
-        2. Rolling robust z-scores of the gap against its own 1m / 3m / 1y
-           history, and zone classification
-        3. The panel-completeness gate (what is published, what is trusted),
-           window breadth and raw window agreement
-        4. Drift-diffusion filtering of that agreement
-        5. The error-correction read: does price respond to the gap?
-        6. Fit quality, block-ablation driver importance, OU diagnostics
+        2. The publication rule: the warm-up and the panel-completeness gate
+           (what is published, what is trusted, and why a session is not)
+        3. The error-correction read: does price respond to the gap?
+        4. Fit quality and the blocks the fitted level is made of
     """
 
     def __init__(self) -> None:
         self.ts_data: pd.DataFrame = pd.DataFrame()
-        self.lookback_data: dict = {}
         self.model_stats: dict = {}
-        self.ou_params: dict = {}
-        self.ou_projection: np.ndarray = np.array([])
-        self.ou_projection_upper: np.ndarray = np.array([])
-        self.ou_projection_lower: np.ndarray = np.array([])
         self.latest_feature_impacts: dict = {}
-        self.feature_impact_history: list[dict] = []
-        self.theta_history: list[float] = []
+        self.feature_impact_history: pd.DataFrame = pd.DataFrame()
         self.feature_names: list[str] = []
         self.n_samples: int = 0
         self.y: np.ndarray = np.array([])
@@ -133,18 +118,12 @@ class MulaEngine:
         self.gap_scale: np.ndarray = np.array([])
         self.residuals: np.ndarray = np.array([])
         self.price: np.ndarray | None = None
-        #: The error-correction read as of the last published session — what
-        #: the hero's reversion gate and the Precedent state vector consume.
-        #: Keys: kappa, half_life, rev_prob, expected_drift_pct,
-        #: drift_sd_pct, w_valuation, w_momentum, w_full.
-        self.mula_summary: dict = {}
         #: Instruments whose exchange was open on the newest row and that did
-        #: not print — the panel-composition channel that moves history.
+        #: not print — the panel-composition channel that moves history. The
+        #: System page names them beside the newest row's coverage.
         self.panel_absent: list[str] = []
-        #: Raw Mūla result bundle (block betas, factor levels, loadings,
-        #: leave-one-block-out importance, instrument attribution). Kept whole
-        #: so the diagnostics tab can render attribution without the engine
-        #: having to flatten every view into ts_data.
+        #: Raw Mūla result bundle: the per-session series and the blocks the
+        #: fitted level is made of (``block_attribution``).
         self.mve: dict = {}
         self.block_names: list[str] = []
         #: The engine has exactly one mode. Its predecessor carried
@@ -160,7 +139,6 @@ class MulaEngine:
         self.burn_in: int = int(BURN_IN)
         self.min_prints: int = int(MIN_PRINTS)
         self.valuation_deltas: tuple = tuple(VALUATION_DELTAS)
-        self.lookback_windows: tuple = tuple(LOOKBACK_WINDOWS)
         #: THE horizon h (InstrumentConfig.forecast_horizon) — the error-
         #: correction read projects over it. Set by fit(); there is no default.
         self.horizon: int | None = None
@@ -171,9 +149,8 @@ class MulaEngine:
         #: (data.prep), so the fit says which history it valued.
         self.epoch: pd.Timestamp | None = None
         self.fingerprint: str = ""
-        #: First index carrying a published valuation. Named `min_train_size`
-        #: because downstream consumers (OU slicing, the run console) read
-        #: that attribute as "where does honest output begin".
+        #: First index carrying a valuation (the end of the burn-in), for the
+        #: run console.
         self.min_train_size: int = int(BURN_IN)
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -190,7 +167,7 @@ class MulaEngine:
         exchange: str = "",
         epoch: pd.Timestamp | None = None,
         fingerprint: str = "",
-    ) -> "FairValueEngine":
+    ) -> "MulaEngine":
         """Run the full valuation pipeline.
 
         target_px: the target's price LEVEL, strictly positive. Its index is
@@ -210,8 +187,8 @@ class MulaEngine:
             forward-filled.
 
         config: the instrument's InstrumentConfig — required. Its knobs
-            (burn-in, print floor, discount grid, lookback windows) and its
-            ``forecast_horizon``, the one h, are read from it directly.
+            (burn-in, print floor, discount grid) and its ``forecast_horizon``,
+            the one h, are read from it directly.
 
         exchange: the target's exchange (``data.calendars.resolve_exchange``);
             its local date decides whether the newest row is a session still
@@ -223,7 +200,6 @@ class MulaEngine:
         self.burn_in = int(config.fvo_burn_in)
         self.min_prints = int(config.fvo_min_prints)
         self.valuation_deltas = tuple(config.fvo_valuation_deltas)
-        self.lookback_windows = tuple(config.fvo_lookback_windows)
         self.horizon = int(config.forecast_horizon)
         self._exchange = str(exchange or "")
         self.epoch = pd.Timestamp(epoch) if epoch is not None else None
@@ -247,8 +223,8 @@ class MulaEngine:
         # gate exists to prevent.
         self._row_index = target_px.index
         self.price = target_px.to_numpy(dtype=np.float64)
-        # `y` is the modelled quantity: log price. Kept under the historical
-        # name because the analytics stack and the Data tab read `self.y`.
+        # `y` is the modelled quantity: log price, which the error-correction
+        # read differences.
         with np.errstate(divide="ignore", invalid="ignore"):
             self.y = np.log(np.where(self.price > 0, self.price, np.nan))
 
@@ -260,7 +236,7 @@ class MulaEngine:
             printed.index = target_px.index
         # Retained for the panel-completeness gate, which needs per-instrument
         # prints (not just the daily count) to ask "did the instruments whose
-        # exchanges were OPEN actually print?" — see _compute_breadth_metrics.
+        # exchanges were OPEN actually print?" — see _apply_publication_rule.
         self._printed = printed
 
         # (A "structural break" test ran here, surfaced as `break_detected`.
@@ -289,9 +265,8 @@ class MulaEngine:
         series = self.mve["series"]
         gap = series["gap"].to_numpy(dtype=np.float64)
         # The mispricing gap IS the tradeable spread: positive = price above
-        # the level the cross-section implies (rich), negative = cheap. That
-        # is the same polarity the zone/breadth/conviction stack expects, so
-        # no sign flip is needed (Aarambh had to negate its forecast).
+        # the level the cross-section implies (rich), negative = cheap — the
+        # oscillator's own orientation (Aarambh had to negate its forecast).
         self.residuals = gap
         # Fair value as a PRICE level; the uncertainty about that level, in
         # log units (ModelSpread — the tab renders it ×1e4 as basis points);
@@ -299,18 +274,16 @@ class MulaEngine:
         self.predictions = series["fair_value"].to_numpy(dtype=np.float64)
         self.model_spread = series["fv_sd"].to_numpy(dtype=np.float64)
         self.gap_scale = series["pred_sd"].to_numpy(dtype=np.float64)
-        # First published row — everything before it is burn-in with no
-        # honest valuation, and every consumer must be able to exclude it.
+        # First row carrying a valuation — everything before it is burn-in.
         finite = np.isfinite(gap)
         self.min_train_size = int(np.argmax(finite)) if finite.any() else self.n_samples
 
-        self._compute_multi_lookback_signals(series)
-        self._compute_breadth_metrics()
-        self._compute_ddm_conviction()
+        self._publish_frame(series)
+        self._apply_publication_rule()
         self._compute_error_correction(series)
-        self._compute_model_stats(series)
+        self.ts_data = self.ts_data[list(PUBLISHED_COLUMNS)]
+        self._compute_model_stats()
         self._compute_block_impacts()
-        self._compute_ou_diagnostics()
 
         r = self._last_published_row()
         self.asof = (pd.Timestamp(self._row_index[r])
@@ -343,29 +316,20 @@ class MulaEngine:
         it is not today's: ``asof_row_withheld`` and ``withheld_reason``
         describe the newest row, ``asof`` is the returned row's date (d*) and
         ``provisional`` says whether that row is a session still forming.
+
+        It is the session's identity and the claim's reading, nothing more:
+        every other value of d* is read off the published frame by date
+        (``fvo_ts.loc[d*]``). Every key has a reader: the Mūla page's claim
+        sentence and the app's as-of status and session notices. The state
+        word is ``core.semantics.valuation_state(fvo)``, derived where it is
+        shown.
         """
         r = self._last_published_row()
         if r is None:
             return {
-                "valuation_state": "NO VALUATION", "direction": 0,
-                "regime": "NO VALUATION", "fvo": float("nan"),
-                "pct_mispricing": float("nan"), "fair_value": float("nan"),
-                "actual": float("nan"), "residual": float("nan"),
-                "gap_scale": float("nan"), "model_spread": float("nan"),
-                "valuation_confidence": float("nan"), "xs_consistency": float("nan"),
-                "mr_prob": float("nan"), "gap_half_life": float("nan"),
-                "ou_half_life": float("nan"), "adf_pvalue": 1.0, "kpss_pvalue": 0.0,
-                "theta_stable": True, "conviction_score": 0.0,
-                "conviction_upper": 0.0, "conviction_lower": 0.0,
-                "oversold_breadth": float("nan"), "overbought_breadth": float("nan"),
-                "avg_z": float("nan"), "market_regime": "initialising",
-                "stress": float("nan"), "k_factors": 0, "n_available": 0,
-                "mula_kappa": float("nan"), "mula_half_life": float("nan"),
-                "expected_drift_pct": float("nan"), "drift_sd_pct": float("nan"),
-                "w_valuation": float("nan"), "w_momentum": float("nan"),
-                "w_full": float("nan"), "asof_row_withheld": True,
-                "withheld_reason": "no valuation published", "published_row": None,
-                "asof": None, "provisional": False,
+                "fvo": float("nan"), "pct_mispricing": float("nan"), "n_available": 0,
+                "asof_row_withheld": True, "withheld_reason": "no valuation published",
+                "published_row": None, "asof": None, "provisional": False,
             }
 
         row = self.ts_data.iloc[r]
@@ -379,54 +343,13 @@ class MulaEngine:
                 return float("nan")
             return v if np.isfinite(v) else float("nan")
 
-        theta_stable = True
-        if len(self.theta_history) >= 10:
-            theta_cv = np.std(self.theta_history[-10:]) / max(np.mean(self.theta_history[-10:]), 1e-6)
-            theta_stable = bool(theta_cv < 0.5)
-
-        fvo = _f("FVO")
         withheld = r != len(self.ts_data) - 1
         return {
             # ── the claim ────────────────────────────────────────────────
-            "valuation_state": valuation_state(fvo),
-            "direction": claim_direction(fvo),
-            "regime": valuation_state(fvo),
-            "fvo": fvo,
+            "fvo": _f("FVO"),
             "pct_mispricing": _f("PctMispricing"),
-            "fair_value": _f("FairValue"),
-            "actual": _f("Actual"),
-            "residual": _f("Residual"),
-            "gap_scale": _f("GapScale"),
-            "model_spread": _f("ModelSpread"),
-            # ── evidence about the claim ────────────────────────────────
-            "valuation_confidence": _f("Confidence"),
-            "xs_consistency": _f("XSConsistency"),
-            "mr_prob": _f("MRProb"),
-            "gap_half_life": _f("GapHalfLife"),
-            "ou_half_life": float(self.ou_params.get("half_life", np.nan)),
-            "adf_pvalue": float(self.ou_params.get("adf_pvalue", 1.0)),
-            "kpss_pvalue": float(self.ou_params.get("kpss_pvalue", 0.0)),
-            "theta_stable": theta_stable,
-            # ── the window stack (evidence, not a second direction) ─────
-            "conviction_score": _f("ConvictionBounded"),
-            "conviction_upper": _f("ConvictionUpper"),
-            "conviction_lower": _f("ConvictionLower"),
-            "oversold_breadth": _f("OversoldBreadth"),
-            "overbought_breadth": _f("OverboughtBreadth"),
-            "avg_z": _f("AvgZ"),
-            # ── the world it was valued in ──────────────────────────────
-            "market_regime": str(row.get("MarketRegime", "initialising")),
-            "stress": _f("Stress"),
-            "k_factors": int(np.nan_to_num(_f("KFactors"))),
+            # ── how much of the cross-section has printed on it ─────────
             "n_available": int(np.nan_to_num(_f("NAvailable"))),
-            # ── error correction: does price close the gap? ─────────────
-            "mula_kappa": _f("MulaKappa"),
-            "mula_half_life": _f("MulaHalfLife"),
-            "expected_drift_pct": _f("MulaDriftPct"),
-            "drift_sd_pct": _f("MulaSdPct"),
-            "w_valuation": _f("WValuation"),
-            "w_momentum": _f("WMomentum"),
-            "w_full": _f("WFull"),
             # ── which session this is ───────────────────────────────────
             "asof_row_withheld": bool(withheld),
             "withheld_reason": str(last.get("WithheldReason", "")) if withheld else "",
@@ -438,38 +361,9 @@ class MulaEngine:
     def get_model_stats(self) -> dict:
         return self.model_stats
 
-    def get_regime_stats(self) -> dict:
-        """How this instrument's history divides across the valuation states.
-
-        Counted on trusted (``Valid``) rows only: the burn-in and the withheld
-        holiday sessions carry no valuation, and including them would dilute
-        every share by the unvalued fraction.
-        """
-        ts = self.ts_data
-        if ts.empty or "Regime" not in ts.columns:
-            return {s.lower().replace(" ", "_"): 0 for s in VALUATION_STATES} | {
-                "current_regime": "NO VALUATION"}
-        regimes = ts["Regime"]
-        if "Valid" in ts.columns:
-            _v = regimes[ts["Valid"].astype(bool)]
-            regimes = _v if not _v.empty else regimes
-        counts = regimes.value_counts()
-        out = {s.lower().replace(" ", "_"): int(counts.get(s, 0)) for s in VALUATION_STATES}
-        out["current_regime"] = self.get_current_signal()["valuation_state"]
-        return out
-
     def get_feature_impact_history(self) -> pd.DataFrame:
-        if not self.feature_impact_history:
-            return pd.DataFrame()
-        return pd.DataFrame(self.feature_impact_history)
-
-    def get_block_betas(self) -> pd.DataFrame:
-        """Time-varying coefficient on each named asset-class block."""
-        return self.mve.get("block_beta", pd.DataFrame())
-
-    def get_instrument_attribution(self) -> pd.DataFrame:
-        """Per-instrument contribution to the fitted fair-value level."""
-        return self.mve.get("instrument_attribution", pd.DataFrame())
+        """Each block's share of the fitted level at every attribution session."""
+        return self.feature_impact_history
 
     # ── Private: input preparation ────────────────────────────────────────
 
@@ -498,195 +392,55 @@ class MulaEngine:
 
     # ── Private: Analytics Pipeline ───────────────────────────────────────
 
-    def _compute_model_stats(self, series: pd.DataFrame) -> None:
-        """Out-of-sample fit quality of the published valuation.
+    def _publish_frame(self, series: pd.DataFrame) -> None:
+        """The valuation pass's readings, on the engine's row positions.
 
-        A level regression on integrated regressors reports a high R² by
-        construction — both sides trend — so that number alone says little.
-        The comparison that carries information is ``r2_vs_anchor``, and the
-        choice of baseline is the whole point.
-
-        The random-walk null Aarambh was scored against ("fair value =
-        yesterday's close") is the WRONG yardstick here and is deliberately
-        not reported. One step ahead, yesterday's close is unbeatable for any
-        near-integrated price, so that comparison returns a large negative
-        number for a perfectly sound cointegrating relation — it measures a
-        claim this engine never makes. The claim it does make is about the
-        *level* price reverts to, and its live competitor is the asset's own
-        trailing mean: "price reverts to where it has been" versus "price
-        reverts to where the global cross-section says it should be". So the
-        anchor is a causal 252-day trailing mean of log price, lagged one
-        session. Positive = the cross-section locates the level better than
-        the asset's own history does; negative = it does not, and the
-        valuation is not adding anything over a moving average.
+        ``Price`` is the observed level the grader, the gap split and the
+        pages key off — published here, by the engine, rather than written
+        onto its output by the orchestrator. ``Residual`` is the log gap
+        ``p − fv`` the oscillator divides by ``GapScale``.
         """
-        gap = self.residuals
-        p = self.y
-        valid = np.isfinite(gap) & np.isfinite(p)
-        n_valid = int(valid.sum())
+        n = self.n_samples
 
-        if n_valid > 2:
-            g = gap[valid]
-            pv = p[valid]
-            ss_res = float(np.sum(g ** 2))
-            ss_tot = float(np.sum((pv - np.mean(pv)) ** 2))
-            r2 = 1.0 - ss_res / max(ss_tot, 1e-10)
-            rmse = float(np.sqrt(np.mean(g ** 2)))
-            mae = float(np.mean(np.abs(g)))
-
-            anchor = (pd.Series(p).rolling(252, min_periods=60).mean()
-                      .shift(1).to_numpy(dtype=np.float64))
-            cmp_ok = valid & np.isfinite(anchor)
-            if cmp_ok.sum() > 2:
-                ss_anchor = float(np.sum((p[cmp_ok] - anchor[cmp_ok]) ** 2))
-                r2_vs_anchor = 1.0 - float(np.sum(gap[cmp_ok] ** 2)) / max(ss_anchor, 1e-10)
-            else:
-                r2_vs_anchor = 0.0
-        else:
-            r2, rmse, mae, r2_vs_anchor = 0.0, 0.0, 0.0, 0.0
-
-        # Averages over TRUSTED rows (`Valid`), the same population every
-        # other statistic of this engine is quoted on.
-        trusted = (self.ts_data["Valid"].to_numpy(dtype=bool)
-                   if "Valid" in self.ts_data.columns else valid)
-
-        def _mean(col: str) -> float:
-            if col not in self.ts_data.columns:
-                return float("nan")
-            v = pd.to_numeric(self.ts_data[col], errors="coerce").to_numpy(dtype=np.float64)
-            v = v[trusted & np.isfinite(v)]
-            return float(np.mean(v)) if len(v) else float("nan")
-
-        self.model_stats = {
-            "r2_oos": r2,
-            "r2_vs_anchor": r2_vs_anchor,
-            "rmse_oos": rmse,
-            "mae_oos": mae,
-            "n_obs": n_valid,
-            "n_features": len(self.feature_names),
-            # Uncertainty about the fair-value level, and the typical size of
-            # the gap — two different numbers since ModelSpread stopped
-            # including the residual noise (valuation.py, `fv_sd`).
-            "avg_model_spread": _mean("ModelSpread"),
-            "avg_gap_scale": _mean("GapScale"),
-            # ── Mūla-native quality readings ───────────────────────────────
-            "avg_confidence": _mean("Confidence"),
-            "avg_xs_consistency": _mean("XSConsistency"),
-            "avg_mr_prob": _mean("MRProb"),
-            "avg_k_factors": _mean("KFactors"),
-            "avg_explained_var": _mean("ExplainedVar"),
-            "avg_n_available": _mean("NAvailable"),
-            "n_blocks": len(self.block_names),
-            "burn_in": int(self.min_train_size),
-        }
-
-    def _compute_multi_lookback_signals(self, series: pd.DataFrame) -> None:
-        r = self.residuals
-        n = len(r)
-        self.lookback_data = {}
-
-        for lb in self.lookback_windows:
-            if n < lb:
-                continue
-            # Half the window, floored at 5 — and never more than the window
-            # itself. The floor alone gave the old 3-day window a minimum of 5
-            # observations it could not hold, so Z_3 was NaN on every row while
-            # still being counted as one of three windows: breadth topped out
-            # at 66.7% and the "HIGH" confidence tier was unreachable.
-            min_periods = min(lb, max(lb // 2, 5))
-            # Zero-centred: the gap's zero is fair value, and the window says
-            # only how LARGE today's gap is against its own typical size there
-            # (analytics/robust_z.py explains why median-centring broke this).
-            z_scores, lower_bounds, upper_bounds = rolling_robust_z(
-                r, window=lb, min_periods=min_periods, alpha=0.05, center="zero"
-            )
-            zones = _classify_zones(z_scores)
-            buy_signals, sell_signals = _detect_crossover_signals(z_scores)
-            self.lookback_data[lb] = {
-                "z_scores": z_scores, "zones": zones,
-                "buy_signals": buy_signals, "sell_signals": sell_signals,
-                "lower_bounds": lower_bounds, "upper_bounds": upper_bounds,
-            }
-
-        def _col(name: str, default=np.nan) -> np.ndarray:
-            if name not in series.columns:
-                return np.full(n, default)
+        def _col(name: str) -> np.ndarray:
             return series[name].to_numpy()
 
         self.ts_data = pd.DataFrame({
-            # `Actual` is the observed price level, `FairValue` the level the
-            # cross-section implies, `Residual` the log gap between them.
-            # `Price` is the same level under the name the grader, the analog
-            # matcher and the pages key off — published here, by the engine,
-            # rather than written onto its output by the orchestrator.
-            "Actual": self.price,
             "Price": self.price,
             "FairValue": self.predictions,
-            "Residual": self.residuals,
-            "ModelSpread": self.model_spread,
-            "GapScale": self.gap_scale,
-            # ── published Mūla diagnostics (column key stays "FVO") ────────
-            "FVO": _col("fvo"),
-            "PctMispricing": _col("pct_mispricing"),
             "FairValueLo": _col("ci_lo"),
             "FairValueHi": _col("ci_hi"),
-            "XSConsistency": _col("xs_consistency"),
-            "GapHalfLife": _col("gap_halflife"),
+            "FVO": _col("fvo"),
+            "PctMispricing": _col("pct_mispricing"),
+            "GapScale": self.gap_scale,
+            "ModelSpread": self.model_spread,
             "GapPhi": _col("gap_phi"),
-            "GapPercentile": _col("gap_percentile"),
-            "Stress": _col("stress"),
+            "Residual": self.residuals,
+            "GapHalfLife": _col("gap_halflife"),
             "KFactors": _col("k_factors"),
-            "ExplainedVar": _col("explained_var"),
-            "WLatent": _col("w_latent"),
-            "WBlock": _col("w_block"),
-            "NAvailable": _col("n_available", 0),
-            "NAdmitted": _col("n_admitted", 0),
-            "MarketRegime": _col("regime_label", "initialising"),
+            "NAvailable": _col("n_available"),
+            "NAdmitted": _col("n_admitted"),
         }, index=pd.RangeIndex(n))
-        for lb, data in self.lookback_data.items():
-            self.ts_data[f"Z_{lb}"] = data["z_scores"]
-            self.ts_data[f"Zone_{lb}"] = data["zones"]
-            self.ts_data[f"Buy_{lb}"] = data["buy_signals"]
-            self.ts_data[f"Sell_{lb}"] = data["sell_signals"]
 
-    def _compute_breadth_metrics(self) -> None:
-        n = len(self.ts_data)
-        valid_lookbacks = [lb for lb in self.lookback_windows if f"Z_{lb}" in self.ts_data.columns]
+    def _apply_publication_rule(self) -> None:
+        """Which sessions are published, which are trusted, and why one is not.
 
-        oversold = np.zeros(n)
-        overbought = np.zeros(n)
-        extreme_os = np.zeros(n)
-        extreme_ob = np.zeros(n)
-        buy_count = np.zeros(n)
-        sell_count = np.zeros(n)
-        z_scores_list = []
-
-        for lb in valid_lookbacks:
-            zones = self.ts_data[f"Zone_{lb}"].values
-            z = self.ts_data[f"Z_{lb}"].values
-            extreme_os += (zones == "Extreme Under")
-            oversold += (zones == "Undervalued")
-            extreme_ob += (zones == "Extreme Over")
-            overbought += (zones == "Overvalued")
-            buy_count += self.ts_data[f"Buy_{lb}"].values
-            sell_count += self.ts_data[f"Sell_{lb}"].values
-            z_scores_list.append(z)
-
-        # A row with no finite z-score in ANY lookback window has no genuine
-        # signal — true both of the ordinary rolling-window warm-up and of the
-        # engine's own burn-in, where no valuation is published at all.
-        # Without this guard the breadth/count sums are just 0 for a missing
-        # row (every zone comparison is False against "N/A"), which silently
-        # fabricates a confident "neutral" ConvictionRaw == 0 reading for a
-        # period that was never valued — exactly the region the Intelligence
-        # calibration frame and the analog feature pool must be able to drop.
-        finite_stack = np.vstack([np.isfinite(z) for z in z_scores_list]) if z_scores_list else np.zeros((0, n), dtype=bool)
-        valid_row = finite_stack.any(axis=0) if len(finite_stack) else np.zeros(n, dtype=bool)
-        # Breadth is a share of the windows that HAVE a reading on that row.
-        # The 1-year window needs ~6 months of published gap before it reads
-        # at all; counting it as a silent "not cheap" in the meantime would cap
-        # every early breadth reading at two-thirds.
-        num_lb = np.maximum(finite_stack.sum(axis=0), 1).astype(float) if len(finite_stack) else np.ones(n)
+        A session is VALUED once the gap has printed on PUBLISH_WARMUP_PRINTS of
+        the PUBLISH_WARMUP_WINDOW sessions before it (the warm-up after the
+        burn-in, valuation.py), and published if it also passes the panel-
+        completeness gate below. Writes ``NScheduled``, ``Valid``,
+        ``Provisional`` and ``WithheldReason``, masks the valuation family to
+        the published rows, and records ``panel_absent``.
+        """
+        gap = self.residuals
+        n = len(gap)
+        finite = np.isfinite(gap)
+        # Prints of the gap in the WARMUP_WINDOW sessions strictly before each
+        # row: the count a session's own value is never part of.
+        prior = np.concatenate([[0], np.cumsum(finite)])
+        lag = np.arange(n) - PUBLISH_WARMUP_WINDOW
+        before = prior[np.arange(n)] - np.where(lag >= 0, prior[np.maximum(lag, 0)], 0)
+        valid_row = finite & (lag >= 0) & (before >= PUBLISH_WARMUP_PRINTS)
 
         # ---- panel-completeness gate ------------------------------------
         # A row fitted on a fraction of the cross-section is not a valuation,
@@ -726,20 +480,19 @@ class MulaEngine:
         #   publish   -- the value is emitted, and the UI may show it
         #   Valid     -- the value may be TRUSTED by the statistics
         #
-        # `Valid` is not a display flag. It gates the analog/precedent feature
-        # pool (analytics/analogs.py), the error-correction regressions, the
-        # adaptive tier estimation on the Mūla page, and the regime
-        # distribution. A conviction computed on 4% of the panel must
-        # not become a historical precedent that today gets matched against, so
-        # holidays stay Valid=False AND unpublished, exactly as before. Today's
-        # forming row is published, flagged `Provisional`, and still excluded
-        # from all of the above — the error-correction read included: it is
-        # READ from the state at the last Valid row, never absorbed.
+        # `Valid` is not a display flag. It gates the error-correction
+        # regressions, every grade and every piece of evidence (they are all
+        # computed on Valid rows). A valuation computed on 4% of the panel
+        # must not become history the call is graded on, so holidays stay
+        # Valid=False AND unpublished. Today's forming row is published,
+        # flagged `Provisional`, and still excluded from all of the above —
+        # the error-correction read included: it is READ from the state at the
+        # last Valid row, never absorbed.
         publish = valid_row
-        # Pre-gate validity: a row can be withheld because no lookback z-score
-        # is finite yet (warm-up) OR because the panel was too thin (the gate
-        # below). Those are different answers to "why is there a gap here", so
-        # keep them separable before the two get ANDed together.
+        # Pre-gate validity: a row can be withheld because the warm-up has not
+        # run (no published gap history yet) OR because the panel was too thin
+        # (the gate below). Those are different answers to "why is there a gap
+        # here", so keep them separable before the two get ANDed together.
         finite_ok = valid_row.copy()
         _pr = getattr(self, "_printed", None)
         if _pr is not None and len(_pr) == len(valid_row):
@@ -778,33 +531,6 @@ class MulaEngine:
             publish = valid_row & (complete | forming)
             valid_row = valid_row & complete
 
-        # nanmean legitimately warns "Mean of empty slice" on the burn-in rows
-        # (all-NaN across every lookback window) — expected and handled (the
-        # result is NaN, masked out below via valid_row), so scope the
-        # suppression to this exact expected case rather than relying on a
-        # blanket global RuntimeWarning filter.
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            avg_z = np.nan_to_num(np.nanmean(np.vstack(z_scores_list), axis=0), nan=0.0) if z_scores_list else np.zeros(n)
-
-        # Wire names kept ("Oversold"/"Overbought" — every consumer reads
-        # them): the share of the 1m / 3m / 1y windows that read the gap as
-        # unusually CHEAP / RICH against that window's own history.
-        self.ts_data["OversoldBreadth"] = np.where(
-            publish, (oversold + extreme_os) / num_lb * 100, np.nan)
-        self.ts_data["OverboughtBreadth"] = np.where(
-            publish, (overbought + extreme_ob) / num_lb * 100, np.nan)
-        self.ts_data["BuySignalBreadth"] = buy_count
-        self.ts_data["SellSignalBreadth"] = sell_count
-        self.ts_data["AvgZ"] = np.where(publish, avg_z, np.nan)
-        # Window agreement: +100 when every window reads the gap rich, an
-        # extra half again for each window reading it extreme. Positive =
-        # rich, the oscillator's own orientation.
-        conviction_raw = (
-            (overbought - oversold) / num_lb * 100
-            + (extreme_ob - extreme_os) / num_lb * 100 * 1.5
-        )
-        self.ts_data["ConvictionRaw"] = np.where(publish, conviction_raw, np.nan)
         self.ts_data["Valid"] = valid_row
         # Published but not trusted: the newest session, still filling. Consumers
         # that must not learn from a partial cross-section filter on `Valid`;
@@ -862,9 +588,9 @@ class MulaEngine:
             # called the admission ramp a holiday, and then, once that was
             # fixed, the ramp became "incomplete fetch" — because those rows
             # pass BOTH the coverage test and the print floor (31 printed of 31
-            # scheduled of 31 admitted) and are withheld by the finite-z
-            # condition instead. A row is only a data problem if the GATE is
-            # what stopped it.
+            # scheduled of 31 admitted) and are withheld by the warm-up
+            # instead. A row is only a data problem if the GATE is what
+            # stopped it.
             warming = withheld & ~finite_ok & ~burn
             reason = np.where(withheld & burn, "burn-in",
                       np.where(warming, "warming up",
@@ -876,21 +602,17 @@ class MulaEngine:
         # A fair value is a statement about a cross-section. On the four sessions
         # that fail the gate outright (Christmas, Good Friday, two New Year's
         # Days: 10-17 instruments printing of 49-75 scheduled) the TARGET did not
-        # trade either, so `Actual` is a carried-forward quote and `FairValue` is
+        # trade either, so `Price` is a carried-forward quote and `FairValue` is
         # a regression against a tenth of the panel. Publishing that as a point
         # on the chart asserts a valuation that was never made.
         #
-        # `Actual` is deliberately NOT masked — it is an observed price, not a
+        # `Price` is deliberately NOT masked — it is an observed price, not a
         # claim of ours, and the Data tab should still show what the vendor
-        # returned. AvgZ/ConvictionRaw above already follow `publish`, so this
-        # makes the rest of the family consistent with them rather than
-        # introducing a new convention. Today's forming row is in `publish`, so
-        # the live reading is unaffected.
-        for _c in ("FairValue", "FairValueLo", "FairValueHi", "Residual",
-                   "ModelSpread", "GapScale", "FVO", "PctMispricing"):
-            if _c in self.ts_data.columns:
-                _v = pd.to_numeric(self.ts_data[_c], errors="coerce").to_numpy(float)
-                self.ts_data[_c] = np.where(publish, _v, np.nan)
+        # returned. Today's forming row is in `publish`, so the live reading is
+        # unaffected.
+        for _c in _VALUATION_FAMILY:
+            _v = pd.to_numeric(self.ts_data[_c], errors="coerce").to_numpy(float)
+            self.ts_data[_c] = np.where(publish, _v, np.nan)
 
         # ---- diagnostic: which instruments SHOULD have printed and did not ---
         # Now that "closed" and "missing" are distinguishable, an instrument whose
@@ -907,38 +629,6 @@ class MulaEngine:
             except Exception:                       # never break a run to report
                 self.panel_absent = []
 
-    def _compute_ddm_conviction(self) -> None:
-        """Drift-diffusion filter of window agreement, and the state word.
-
-        ``ConvictionRaw`` (how many windows read the gap cheap or rich) is
-        noisy session to session; the filter integrates it into a persistent
-        reading with an uncertainty band. It is evidence about the claim — how
-        consistently the gap has looked stretched against its own history — and
-        it is deliberately NOT a direction of its own any more.
-
-        It used to be one. Its adaptive tiers drove the engine's BUY / SELL /
-        STRENGTH and the ``Regime`` labels (STRONGLY OVERSOLD … OVERBOUGHT),
-        while the hero took Mūla's direction from the oscillator — so one
-        engine published two directions, and on the 3/5/10-day windows they
-        regularly disagreed (Gold, 2026-10-16: "BUY · OVERSOLD" beside an
-        oscillator of +0.01σ). ``Regime`` is now the valuation state of the
-        oscillator itself (``core.semantics.valuation_state``), the same word
-        every page shows.
-
-        The DDM constants are the global ``DDM_*`` (config): a filter of a
-        bounded agreement score, not an instrument property.
-        """
-        raw = self.ts_data["ConvictionRaw"].values
-        filtered, _gains, variances = drift_diffusion_filter(
-            raw, leak_rate=DDM_LEAK_RATE, drift_scale=DDM_DRIFT_SCALE, long_run_var=DDM_LONG_RUN_VAR
-        )
-        ddm_std = np.sqrt(np.maximum(variances, 0))
-        self.ts_data["ConvictionScore"] = filtered
-        self.ts_data["ConvictionBounded"] = _apply_conviction_bounds(filtered)
-        self.ts_data["ConvictionUpper"] = _apply_conviction_bounds(filtered + 1.96 * ddm_std)
-        self.ts_data["ConvictionLower"] = _apply_conviction_bounds(filtered - 1.96 * ddm_std)
-        self.ts_data["Regime"] = [valuation_state(v) for v in self.ts_data["FVO"].to_numpy(dtype=float)]
-
     def _compute_error_correction(self, series: pd.DataFrame) -> None:
         """Run the price-side ECM read (``ecm.MulaLayer``) over the published gap.
 
@@ -953,17 +643,15 @@ class MulaEngine:
         (``MulaLayer.read``), with its own gap used only for the projection —
         so the live κ̂ is estimated on the population the graded history is.
 
-        Publishes MulaKappa / MulaRevProb / MulaHalfLife / MulaDriftPct /
-        MulaSdPct / WValuation / WMomentum / WFull, and from them:
+        Publishes the layer's columns (``ecm.COLUMNS``): MulaKappa, MRProb —
+        P(κ̂ > 0), the evidence that PRICE responds to the gap and the
+        reversion sizer's reading — MulaHalfLife, MulaDriftPct and MulaSdPct.
+        Each is NaN off the absorbed and provisional rows, which are published
+        rows by construction.
 
-          MRProb      := MulaRevProb — P(κ̂ > 0), the evidence that PRICE
-                         responds to the gap.
-          Confidence  := sqrt(MRProb × XSConsistency) — price-side reversion
-                         evidence AND cross-sectional agreement on the sign.
-
-        Failure posture: if the layer raises, its columns (and MRProb /
-        Confidence) publish as NaN and the valuation itself is untouched —
-        the read may fail, the valuation must not.
+        Failure posture: if the layer raises, its columns publish as NaN and
+        the valuation itself is untouched — the read may fail, the valuation
+        must not.
         """
         n = len(self.ts_data)
         nan = np.full(n, np.nan)
@@ -1001,147 +689,66 @@ class MulaEngine:
 
         for c, v in cols.items():
             self.ts_data[c] = v
-        rev = cols["MulaRevProb"]
-        xs = pd.to_numeric(self.ts_data["XSConsistency"], errors="coerce").to_numpy(dtype=np.float64)
-        with np.errstate(invalid="ignore"):
-            conf = np.sqrt(np.clip(rev, 0.0, None) * np.clip(xs, 0.0, None))
-        publish = np.isfinite(pd.to_numeric(self.ts_data["FVO"], errors="coerce").to_numpy(dtype=float))
-        self.ts_data["MRProb"] = np.where(publish, rev, np.nan)
-        self.ts_data["Confidence"] = np.where(publish & np.isfinite(rev) & np.isfinite(xs), conf, np.nan)
 
-        r = self._last_published_row()
-        if r is None:
-            self.mula_summary = {}
-            return
-        row = self.ts_data.iloc[r]
+    def _compute_model_stats(self) -> None:
+        """How much of log price the fitted level tracks, and what it is fitted on.
 
-        def _g(col: str) -> float:
-            v = float(row.get(col, np.nan))
-            return v if np.isfinite(v) else float("nan")
-
-        self.mula_summary = {
-            "kappa": _g("MulaKappa"),
-            "half_life": _g("MulaHalfLife"),
-            "rev_prob": _g("MulaRevProb"),
-            "expected_drift_pct": _g("MulaDriftPct"),
-            "drift_sd_pct": _g("MulaSdPct"),
-            "w_valuation": _g("WValuation"),
-            "w_momentum": _g("WMomentum"),
-            "w_full": _g("WFull"),
+        ``r2_oos`` is the share of log-price variance the one-step-ahead fitted
+        level explains. A level regression on integrated regressors reads high
+        by construction — both sides trend — so it is a check that the
+        cross-section tracks the target at all, never a skill number: the
+        claim's only skill number is its grade on price (``edges['claim']``).
+        (An 'R² vs trailing mean' used to be shown here as the discriminating
+        number. A fair value of yesterday's close beat it on every instrument,
+        so it measured level tracking, not skill, and went.)
+        """
+        gap = self.residuals
+        p = self.y
+        valid = np.isfinite(gap) & np.isfinite(p)
+        if int(valid.sum()) > 2:
+            ss_res = float(np.sum(gap[valid] ** 2))
+            ss_tot = float(np.sum((p[valid] - np.mean(p[valid])) ** 2))
+            r2 = 1.0 - ss_res / max(ss_tot, 1e-10)
+        else:
+            r2 = float("nan")
+        self.model_stats = {
+            "r2_oos": r2,
+            "n_features": len(self.feature_names),
+            "n_blocks": len(self.block_names),
         }
 
     def _compute_block_impacts(self) -> None:
-        """Driver importance from the leave-one-block-out ablations.
+        """What the fitted level is made of, by asset-class block.
 
-        This replaces Aarambh's ``coef @ pca.components_`` attribution, which
-        was a linear read-off of a fitted model. Here the importance of a
-        block is measured by *refitting without it* and reporting how far the
-        mispricing moves — an ablation, so it survives the collinearity that
-        makes coefficient magnitudes uninterpretable across ~200 macro series
-        that all load on the same few factors. The values are already
-        normalised to sum to 1 per row by the core engine; they are scaled to
-        percent here to match the contract the diagnostics tab renders.
+        Factor and block levels are linear in the standardised returns, so the
+        fitted level decomposes exactly into per-instrument contributions
+        (valuation.py); summed to their blocks they say which parts of the
+        world the published fair value leans on. Each attribution session's
+        blocks are shown as their share (%) of the absolute contributions, so
+        a block's weight reads on one scale whatever the level's sign. The
+        engine's own decomposition, not a refit — the leave-one-block-out
+        ablation that used to produce this was a separate model and went.
         """
-        imp = self.mve.get("block_importance")
-        if imp is None or imp.empty:
+        att = self.mve.get("block_attribution")
+        if att is None or att.empty:
             self.latest_feature_impacts = {}
-            self.feature_impact_history = []
+            self.feature_impact_history = pd.DataFrame()
             return
-
-        pct = imp.astype(float) * 100.0
-        rows = pct.dropna(how="all")
+        mag = att.astype(float).abs()
+        tot = mag.sum(axis=1)
+        share = mag.div(tot.where(tot > 0), axis=0) * 100.0
+        rows = share.dropna(how="all")
         if rows.empty:
             self.latest_feature_impacts = {}
-            self.feature_impact_history = []
+            self.feature_impact_history = pd.DataFrame()
             return
-
         latest = rows.iloc[-1].dropna()
         self.latest_feature_impacts = dict(
             sorted({str(k): float(v) for k, v in latest.items()}.items(),
                    key=lambda kv: kv[1], reverse=True))
-        # One row per rebalance-scale sample rather than every session: the
-        # history feeds a stacked-area chart, and ~2,300 near-identical rows
-        # render no better than ~110 while costing the tab a full redraw.
-        step = max(1, len(rows) // 120)
-        pos = {ts: i for i, ts in enumerate(pct.index)}
-        self.feature_impact_history = [
-            {"index": pos[ts], **{str(k): float(v) for k, v in row.items()
-                                  if np.isfinite(v)}}
-            for ts, row in rows.iloc[::step].iterrows()
-        ]
-
-    def _compute_ou_diagnostics(self) -> None:
-        """OU fit of the published gap: full-history half-life, ADF / KPSS.
-
-        These describe the GAP's persistence — how long a mispricing of this
-        size typically survives — not which side closes it (that is the ECM's
-        question; see ``_compute_error_correction``).
-
-        The headline half-life and the decay projection use the FULL-history
-        fit. They used to use the last 60-session rolling estimate while the
-        Mūla page called the number "a full-history fit": Gold read 4.3d on
-        the window against 8.2d on its history, S&P 500 2.0d against 6.2d. A
-        60-observation AR(1) is too noisy to headline. The rolling estimates
-        are kept for one purpose — ``theta_stable``, whether the reversion
-        speed itself has been steady lately.
-        """
-        r = self.residuals
-        oos_r = r[self.min_train_size:]
-        oos_r = oos_r[np.isfinite(oos_r)]
-
-        if len(oos_r) > 30:
-            theta, mu, sigma = ornstein_uhlenbeck_estimate(oos_r)
-            try:
-                with warnings.catch_warnings():
-                    # statsmodels 0.15 announces a return-type change; the
-                    # p-value is element [1] under both.
-                    warnings.simplefilter("ignore", category=FutureWarning)
-                    adf_pvalue = float(adfuller(oos_r, autolag="AIC")[1]) if _HAS_STATSMODELS else 1.0
-            except Exception:
-                adf_pvalue = 1.0
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    kpss_pvalue = float(kpss(oos_r, regression="c", nlags="auto")[1]) if _HAS_STATSMODELS else 0.0
-            except Exception:
-                kpss_pvalue = 0.0
-
-            vol_multiplier = 1.0
-            window_size = min(60, len(oos_r) // 3)
-            self.theta_history = []
-            for i in range(window_size, len(oos_r)):
-                theta_roll, _, _ = ornstein_uhlenbeck_estimate(oos_r[i - window_size : i])
-                self.theta_history.append(theta_roll)
-
-            theta_std = np.std(self.theta_history) if len(self.theta_history) > 1 else 0.0
-            dynamic_theta = self.theta_history[-1] if self.theta_history else theta
-        else:
-            _finite = r[np.isfinite(r)]
-            theta, mu, sigma = 0.05, 0.0, max(float(np.std(_finite)) if len(_finite) else 0.0, 1e-6)
-            adf_pvalue, kpss_pvalue, vol_multiplier = 1.0, 0.0, 1.0
-            dynamic_theta, theta_std = theta, 0.0
-
-        self.ou_params = {
-            "theta": theta, "dynamic_theta": dynamic_theta, "mu": mu, "sigma": sigma,
-            "half_life": np.log(2) / max(theta, 1e-4),
-            "half_life_recent": np.log(2) / max(dynamic_theta, 1e-4),
-            "stationary_std": sigma / np.sqrt(2 * max(theta, 1e-4)),
-            "adf_pvalue": adf_pvalue, "kpss_pvalue": kpss_pvalue,
-            "vol_multiplier": vol_multiplier, "theta_std": theta_std,
-        }
-
-        current_r = float(oos_r[-1]) if len(oos_r) else 0.0
-        proj_days = np.arange(1, OU_PROJECTION_DAYS + 1)
-        self.ou_projection = mu + (current_r - mu) * np.exp(-theta * proj_days)
-
-        # The band brackets the decay at the speeds the rolling fits have
-        # actually wandered across (±1 sd of the 60-session theta).
-        if theta_std > 0:
-            self.ou_projection_upper = mu + (current_r - mu) * np.exp(-max(theta - theta_std, 1e-4) * proj_days)
-            self.ou_projection_lower = mu + (current_r - mu) * np.exp(-(theta + theta_std) * proj_days)
-        else:
-            self.ou_projection_upper = self.ou_projection.copy()
-            self.ou_projection_lower = self.ou_projection.copy()
+        hist = rows.copy()
+        hist.index.name = "Date"
+        self.feature_impact_history = hist
 
 
 #: The engine's former name (codename FVO, "fair value oscillator"). Kept so

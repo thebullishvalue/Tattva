@@ -140,8 +140,7 @@ def test_a_provisional_row_is_read_not_absorbed(monkeypatch):
     b = fit_with_close(tgt.iloc[-2] * 0.97)
     assert a["Provisional"].iloc[-1] and not a["Valid"].iloc[-1]   # … and is published
     # Nothing the read learns can depend on the provisional close.
-    for col in ("MulaKappa", "MulaRevProb", "MulaHalfLife", "MulaSdPct",
-                "WValuation", "WMomentum", "WFull"):
+    for col in ("MulaKappa", "MRProb", "MulaHalfLife", "MulaSdPct"):
         x, y = a[col].to_numpy(dtype=float), b[col].to_numpy(dtype=float)
         assert np.isfinite(x[-1]) or col == "MulaHalfLife", col
         assert np.array_equal(x, y, equal_nan=True), col

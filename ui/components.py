@@ -642,8 +642,8 @@ def render_empty_state(
     One system for every "nothing to show yet" moment in the app — cold
     start (no data loaded), "not yet graded", "no Swayam breadth", short-
     history guards — rather than each tab hand-rolling its own notice.
-    ``body`` may carry simple inline HTML (``<strong>``, line breaks), same
-    convention as ``render_interpretation_card``. ``action_label`` is a short
+    ``body`` may carry simple inline HTML (``<strong>``, line breaks).
+    ``action_label`` is a short
     hint at what to do next (e.g. "Pick a target in the sidebar, then Run
     Analysis"), not a real button — the actual control lives wherever it
     already does (sidebar, etc.); this just points at it.
@@ -656,27 +656,6 @@ def render_empty_state(
         f'<div class="es-title">{html_mod.escape(title)}</div>'
         f'<div class="es-body">{body}</div>'
         f'{action_html}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def render_interpretation_card(
-    title: str,
-    body: str,
-    color: str = "neutral",
-) -> None:
-    """Render a state-aware interpretation card — terminal readout style.
-
-    Args:
-        title: Short state label (e.g. "NEUTRAL", "STRONG OVERSOLD").
-        body: One-paragraph explanation (raw HTML allowed — caller is trusted).
-        color: Semantic color — "neutral", "success", "danger", "warning", "info".
-    """
-    st.markdown(
-        f'<div class="interp-card {html_mod.escape(color)}">'
-        f'<div class="interp-title">{html_mod.escape(title)}</div>'
-        f'<div class="interp-body">{body}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -841,8 +820,24 @@ def render_hero_card(verdict: dict) -> None:
     )
 
     _render_call_grade(verdict["call_grade"], h)
+    render_gate_rows(verdict)
 
+
+def render_gate_rows(verdict: dict, keys: "list[str] | None" = None) -> None:
+    """The verdict's chain rows — the ones Overview draws — for ``keys``.
+
+    ``keys`` are chain keys (``core.roles.CHAIN``: claim, precondition, trust,
+    each ``sizer:<name>``, size), drawn in decision order whatever order they
+    are given in; None draws the whole chain, with the size's arithmetic as
+    its foot. An engine page opens with its own rows through this, so it reads
+    the same numbers, in the same words, as Overview: nothing is re-derived.
+    """
+    esc = html_mod.escape
+    cls = _ACTION_CLASS.get(verdict["action"], "hold")
     binding = f"sizer:{verdict['binding']}" if verdict.get("binding") else None
+    chain = [r for r in verdict["chain"] if keys is None or r["key"] in keys]
+    if not chain:
+        return
     rows = "".join(
         f'<div class="hero-gate{" binding" if r["key"] == binding else ""}">'
         f'<span class="hero-gate-name">{esc(r["role"])}</span>'
@@ -852,13 +847,16 @@ def render_hero_card(verdict: dict) -> None:
         + (f' &middot; {esc(r["grade"])}' if r["grade"] else "")
         + f' &middot; {esc(r["detail"])}</span>'
         f'</div>'
-        for r in verdict["chain"]
+        for r in chain
     )
+    eyebrow = ("The chain &bull; in decision order" if keys is None
+               else "The chain &bull; as Overview reads it")
+    foot = (f'<div class="hero-foot">{esc(verdict["size_formula"])} &mdash; trust is the claim&rsquo;s '
+            f'earned base size; a sizer is &times;1.00 until its own grade earns a weight.</div>'
+            if keys is None else "")
     st.markdown(
-        f'<div class="hero-card {cls}"><div class="hero-eyebrow">The chain &bull; in decision '
-        f'order</div><div class="hero-gates">{rows}</div>'
-        f'<div class="hero-foot">{esc(verdict["size_formula"])} &mdash; trust is the claim&rsquo;s '
-        f'earned base size; a sizer is &times;1.00 until its own grade earns a weight.</div></div>',
+        f'<div class="hero-card {cls}"><div class="hero-eyebrow">{eyebrow}</div>'
+        f'<div class="hero-gates">{rows}</div>{foot}</div>',
         unsafe_allow_html=True,
     )
 

@@ -17,13 +17,15 @@ from core.call import CALL_COLUMNS
 from core.config import InstrumentConfig
 from core.instruments import instrument
 from core.knobs import knob
-from core.semantics import breadth_lean
+from core.semantics import breadth_lean, valuation_state
 from engines.mula import MulaEngine
+from engines.mula.base import PUBLISHED_COLUMNS
 from pipeline.assemble import assemble
 
-COLS = ("FairValue", "FVO", "ModelSpread", "MRProb", "Confidence", "XSConsistency",
-        "MulaKappa", "MulaDriftPct", "MulaSdPct", "WValuation", "ConvictionBounded",
-        "OversoldBreadth")
+#: Every published column the truncation test holds to "never rewritten":
+#: all of Mūla's frame (engines.mula.base.PUBLISHED_COLUMNS) but the two text
+#: and flag columns it compares separately.
+COLS = tuple(c for c in PUBLISHED_COLUMNS if c not in ("WithheldReason", "Provisional"))
 
 
 def _panel(T=1100, n=48, k=3, seed=11):
@@ -55,6 +57,9 @@ def test_truncation_never_rewrites_history():
     full = _fitted(0).ts_data
     part = _fitted(200).ts_data
     n = len(part)
+    assert list(full.columns) == list(PUBLISHED_COLUMNS)
+    assert (full["WithheldReason"].iloc[:n].to_numpy() == part["WithheldReason"].to_numpy()).all()
+    assert (full["Provisional"].iloc[:n].to_numpy() == part["Provisional"].to_numpy()).all()
     for col in COLS:
         a = full[col].to_numpy(dtype=float)[:n]
         b = part[col].to_numpy(dtype=float)
@@ -65,10 +70,10 @@ def test_truncation_never_rewrites_history():
 
 
 def test_latest_reading_is_never_a_coerced_zero():
-    sig = _fitted(0).get_current_signal()
-    assert np.isfinite(sig["fvo"])
-    assert sig["valuation_state"] in ("VERY CHEAP", "CHEAP", "FAIR", "RICH", "VERY RICH")
-    assert sig["regime"] == sig["valuation_state"]
+    eng = _fitted(0)
+    sig = eng.get_current_signal()
+    assert np.isfinite(sig["fvo"]) and sig["asof"] == eng.asof
+    assert valuation_state(sig["fvo"]) in ("VERY CHEAP", "CHEAP", "FAIR", "RICH", "VERY RICH")
 
 
 def _call_ts(cut: int) -> pd.DataFrame:

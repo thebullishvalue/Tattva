@@ -23,8 +23,10 @@ is going anywhere. This module asks the price-side question directly.
    differenced ones). Published:
 
      MulaKappa     κ̂ = -b, per session, log units. Positive ⇒ price reverts.
-     MulaRevProb   P(κ̂ > 0) under the coefficient posterior — the evidence,
-                   not the point estimate, that price responds at all.
+     MRProb        P(κ̂ > 0) under the coefficient posterior — the evidence,
+                   not the point estimate, that price responds at all. The
+                   reversion sizer's reading (z = 2·MRProb − 1), graded like
+                   any sizer and ×1.00 while unskilled.
      MulaHalfLife  ln2 / -ln(1-κ̂): how long price alone would take to close
                    half the gap, if fair value stood still. NaN when κ̂ ≤ 0.
 
@@ -36,7 +38,11 @@ is going anywhere. This module asks the price-side question directly.
 
    — MulaDriftPct, in percent, signed like the move itself (negative when the
    asset is rich and price reverts). MulaSdPct is the h-session predictive SD
-   it should be read against.
+   it should be read against. It is the GAP-IMPLIED move only: the ECM's
+   intercept ``a`` (the drift, h·a over the horizon) is deliberately left
+   out, so it is published and graded as 'the gap-implied h-session move
+   (excludes drift)', evidence about the reversion sizer, never as the
+   expected move.
 
    The previous implementation published ``-b · z_{t-1}`` with the geometric
    sum taken over ``b`` itself (≈ -0.007, so the sum was ≈ 1): the opposite
@@ -52,12 +58,12 @@ is going anywhere. This module asks the price-side question directly.
        VALUATION-led : {1, z_{t-1}}
        MOMENTUM-led  : {1, r_{t-1}}          (r = one-session log return)
        FULL          : {1, z_{t-1}, Δz_{t-1}, r_{t-1}}
-   WValuation + WFull — the weight on every design that lets the gap move
-   price — is the honest answer to "is valuation informative today?": learned
-   forward, never persisted, never refitted on history. Each family is scored
-   by its MIXTURE predictive density (the same ``_mix_ll`` the level
-   regression's two views are scored by), not by the mean of its members'
-   densities.
+   The pooled one-step predictive is what MulaSdPct scales to h sessions.
+   Each family is scored by its MIXTURE predictive density (the same
+   ``_mix_ll`` the level regression's two views are scored by), not by the
+   mean of its members' densities. (The pool weights themselves used to be
+   published as a 'valuation-led weight'; no part of the call read them, and
+   they are no longer published.)
 
 Each family is a discounted-DLM bank over a grid of memories, so coefficients
 are time-varying with data-selected adaptation and every one-step predictive
@@ -110,9 +116,7 @@ _POOL_ALPHA = 0.99
 WARMUP = 126
 
 #: Published columns, in order.
-COLUMNS: tuple[str, ...] = ("MulaKappa", "MulaRevProb", "MulaHalfLife",
-                            "MulaDriftPct", "MulaSdPct",
-                            "WValuation", "WMomentum", "WFull")
+COLUMNS: tuple[str, ...] = ("MRProb", "MulaKappa", "MulaHalfLife", "MulaDriftPct", "MulaSdPct")
 
 
 def _softmax_pool(logw: np.ndarray) -> np.ndarray:
@@ -272,13 +276,10 @@ class MulaLayer:
         sd_h_pct = math.sqrt(max(var1, 1e-18)) * sp * math.sqrt(self.h) * 100.0
 
         self.out["MulaKappa"].append(kappa)
-        self.out["MulaRevProb"].append(rev_prob)
+        self.out["MRProb"].append(rev_prob)
         self.out["MulaHalfLife"].append(half_life)
         self.out["MulaDriftPct"].append(drift_pct)
         self.out["MulaSdPct"].append(sd_h_pct)
-        self.out["WValuation"].append(float(w[0]))
-        self.out["WMomentum"].append(float(w[1]))
-        self.out["WFull"].append(float(w[2]))
 
     def _absorb_scales(self, z_lag: float, r_lag: float, dp_now: float) -> None:
         self._sd_z.update(abs(z_lag))

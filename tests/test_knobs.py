@@ -14,9 +14,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: arithmetic identities, percent, the half and a division guard. Every other
 #: number they use is a registered knob.
 ALLOWED = {0, 1, 2, 3, 100, 0.5, 1e-12}
-#: Unit constants allowed at one named site (none since oscillator_lean left
-#: with the Convergence package, its only consumer).
-UNIT_SITES: dict[tuple[str, str], set] = {}
+#: Unit constants allowed at one named site: the MAD-to-SD factor of a
+#: normal (1/Φ⁻¹(3/4)) in Decision A's candidate claim unit.
+UNIT_SITES: dict[tuple[str, str], set] = {("core/semantics.py", "claim_oscillator"): {1.4826}}
 LINTED = ("core/grade.py", "core/trust.py", "core/semantics.py")
 
 

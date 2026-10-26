@@ -6,7 +6,7 @@ The engine maintains two independent valuation views (see valuation.py):
 a *latent* view on the principal factors of the cross-section, and a *block*
 view on named asset-class aggregates. The block view is what makes the
 published fair value auditable — every coefficient carries an economic label,
-and the leave-one-block-out refits give ablation-based driver importance.
+and the fitted level's exact decomposition is reported by block.
 
 That requires a map from each explanatory column to an asset class. In AMIS
 the map is a curated ticker table (``amis.universe.TICKER_CLASS``). Tattva's
@@ -42,8 +42,8 @@ from core.config import (COMMODITY_TARGETS, GLOBAL_MACRO_MAP, INDEX_TARGETS_MAP,
 from core.instruments import ticker_class_map
 
 # Blocks, in the order they are reported. Ordering is cosmetic (the engine
-# sorts the names it is given) but keeping it economic makes the block-beta
-# and block-importance tables readable.
+# sorts the names it is given) but keeping it economic makes the drivers
+# table readable.
 BLOCKS = (
     "Equity",
     "Rates",

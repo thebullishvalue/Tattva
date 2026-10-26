@@ -146,7 +146,8 @@ def member_can_vote(member: SwayamMember, cfg) -> bool:
 def voting_views(cfg) -> tuple[int, int]:
     """``(N, M)``: of the M views ``cfg``'s bank holds, the N that can reach the ±vote cut.
 
-    The 'N of M views can reach the ±5 vote' copy. ``cfg`` is an
+    The configured bank's count (the run console's line; the Swayam page reads
+    the run's own published ``N_Voting`` / ``Total_Analyzed``). ``cfg`` is an
     ``InstrumentConfig``; the bank is ``default_swayam_members`` on its
     lengths. A run on an instrument with no volume drops its flow-only views
     (:func:`build_swayam_frames`), which can never vote at the shipped blend

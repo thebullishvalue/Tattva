@@ -38,6 +38,12 @@ pick. The distinction throughout is between choosing a number and choosing a
 question. (An online skill-weighter of view banks lived here too; its
 sign-hit loss rewarded the drift side, it added no measurable IC over equal
 weights, and it went with the learners it served.)
+
+What remains is the primitive the valuation's conformal band reads
+(``engines/mula/valuation.py``). The display tiers this module also computed
+for the pages (``adaptive_tiers`` / ``tier_now``: quantile cuts that coloured
+a reading by its own history rather than by any grade) went with the
+readings they coloured.
 """
 
 from __future__ import annotations
@@ -52,12 +58,7 @@ import numpy as np
 # to happen, and duly was.
 from analytics.causal import ExpandingRank
 
-__all__ = [
-    "AdaptiveThreshold",
-    "adaptive_tiers",
-    "tier_now",
-    "expanding_quantile_series",
-]
+__all__ = ["AdaptiveThreshold"]
 
 
 class AdaptiveThreshold:
@@ -111,99 +112,3 @@ class AdaptiveThreshold:
     @property
     def n(self) -> int:
         return self._rank.n
-
-
-def expanding_quantile_series(
-    values: np.ndarray, q: float, min_obs: int = 252,
-    fallback: float | None = None,
-) -> np.ndarray:
-    """Batch causal expanding quantile: out[t] = quantile(values[:t], q).
-
-    Note the exclusive slice — the threshold at *t* is built from values
-    STRICTLY before *t*, so a point is never compared against a distribution it
-    is itself a member of. Rows before ``min_obs`` take ``fallback`` (or NaN).
-
-    This is the batch form of :class:`AdaptiveThreshold` and it is implemented
-    by literally running that class, so the two agree by construction rather
-    than by inspection. A pandas ``.expanding().quantile()`` would be faster
-    but uses linear interpolation between order statistics where
-    ``ExpandingRank`` uses nearest-rank; the two disagree by ~1e-2 on a unit-
-    variance signal, which is enough to move a classification near a cut-point.
-    One definition of "the p90 of the past" is worth more than the speed.
-    """
-    v = np.asarray(values, dtype=np.float64)
-    n = len(v)
-    out = np.full(n, np.nan if fallback is None else float(fallback))
-    if n == 0:
-        return out
-    fb = np.nan if fallback is None else float(fallback)
-    thr = AdaptiveThreshold(min_obs=min_obs)
-    for t in range(n):
-        out[t] = thr.quantile(q, fallback=fb)
-        thr.update(v[t])
-    return out
-
-
-def adaptive_tiers(
-    values: np.ndarray,
-    priors: dict[str, float],
-    quantiles: dict[str, float] | None = None,
-    min_obs: int = 252,
-) -> dict[str, np.ndarray]:
-    """Per-row tier levels on ``|values|``, each from that row's own past.
-
-    ``priors`` maps a tier name to the constant that used to BE that tier; the
-    same keys come back mapped to arrays. ``quantiles`` says which quantile of
-    the absolute signal each tier represents — defaulting to the p90/p75/p50
-    convention the hand-set constants were anchored to, so an instrument with
-    a distribution like the pooled one lands in the same place the constant
-    did, and one with a different distribution does not.
-
-    This is the batch primitive behind every classification the system
-    publishes. Because each row's level is built from strictly earlier rows,
-    re-running on more data cannot move a label that was already published.
-    """
-    q = {"strong": 0.90, "moderate": 0.75, "weak": 0.50}
-    if quantiles:
-        q.update(quantiles)
-    a = np.abs(np.asarray(values, dtype=np.float64))
-    out = {
-        name: expanding_quantile_series(a, q.get(name, 0.75), min_obs,
-                                        fallback=float(prior))
-        for name, prior in priors.items()
-    }
-    # Enforce the tier ordering. Quantiles of one sample are monotone in q by
-    # construction, but a row where one tier fell back to its prior and another
-    # did not can invert — and an inverted pair is not a degraded
-    # classification, it is an incoherent one (a reading simultaneously above
-    # "strong" and below "weak"). Ordered high→low, each tier held at or below
-    # the one above it.
-    ordered = sorted(out, key=lambda k: -q.get(k, 0.75))
-    for hi, lo in zip(ordered, ordered[1:]):
-        out[lo] = np.minimum(out[lo], out[hi])
-    return out
-
-
-def tier_now(
-    values: np.ndarray,
-    prior: float,
-    q: float = 0.90,
-    min_obs: int = 252,
-) -> float:
-    """The tier level as of the LAST row — built from everything before it.
-
-    For display code that colours a single current reading. Falls back to
-    ``prior`` while history is short. Kept separate from
-    :func:`adaptive_tiers` because a card needs one number, not a column, and
-    routing it through the array form would invite someone to index ``[-1]``
-    of a series that included the very value being classified.
-    """
-    a = np.abs(np.asarray(values, dtype=np.float64))
-    a = a[np.isfinite(a)]
-    if len(a) < min_obs:
-        return float(prior)
-    thr = AdaptiveThreshold(min_obs=min_obs)
-    for v in a[:-1]:          # strictly prior to the value being classified
-        thr.update(v)
-    # quantile() already refuses a degenerate (non-positive) estimate.
-    return float(thr.quantile(q, fallback=float(prior)))

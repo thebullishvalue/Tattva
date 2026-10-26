@@ -11,6 +11,13 @@ issued, why, and every number it was composed from). The export is the same
 joined frame at full precision, so "the evidence, exportable" is literally
 true rather than true of one engine.
 
+Every signed column declares its orientation (``SIGN_ORIENTATION``): a
+READING keeps its native sign — positive = stretched up, rich — and is tinted
+by the lean it implies, so a rich gap reads in the short colour; a LEAN is
+bullish-positive and tinted as it reads; EVIDENCE keeps its native sign in the
+neutral ink — the ECM's gap-implied move, as on the Mūla page, because a lean
+that is evidence carries its grade, not a direction's colour.
+
 There is one date filter: the chart window, in the table's own header, as on
 every other page. The second "Date Range" selector that used to sit beside it
 filtered the already-windowed frame again, in calendar days of its own.
@@ -23,6 +30,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+from core.semantics import valuation_state
 from ui.components import (render_section_header, render_table_panel,
                            render_note, provisional_note)
 
@@ -39,6 +47,30 @@ def _by_date(frame: pd.DataFrame | None) -> pd.DataFrame:
 #: Header prefix of the call's own columns (call_ts) in the record.
 CALL_PREFIX = "Call · "
 
+#: Mūla's published columns in the record, with the header each is shown under.
+MULA_COLUMNS: dict[str, str] = {
+    "Price": "Price", "FairValue": "Fair value", "FairValueLo": "Fair value lo (95%)",
+    "FairValueHi": "Fair value hi (95%)", "PctMispricing": "Gap %", "FVO": "Oscillator σ",
+    "GapScale": "Gap scale %", "ModelSpread": "Model spread bps", "GapPhi": "Gap persistence φ",
+    "GapHalfLife": "Gap half-life (d)", "MRProb": "P(price-side κ > 0)",
+    "MulaKappa": "κ̂ (price-side)", "MulaHalfLife": "Price-side half-life (d)",
+    "MulaDriftPct": "Gap-implied move % (excl. drift)",
+    "MulaSdPct": "Gap-implied move SD %", "KFactors": "Latent factors k",
+    "Provisional": "Provisional", "Valid": "Valued",
+}
+
+#: Every signed column of the record and the orientation it is declared in
+#: (U41, U44): ``'reading'`` keeps its native sign, positive = stretched up, and
+#: is tinted by the lean it implies (positive in the short colour); ``'lean'`` is
+#: bullish-positive and tinted as it reads; ``'evidence'`` is bullish-positive
+#: and untinted — EVIDENCE→sizer:reversion, whose grade
+#: (edges['evidence:ecm_drift']) has not earned a direction's colour (design §7).
+#: No other column is sign-coloured.
+SIGN_ORIENTATION: dict[str, str] = {
+    "Gap %": "reading", "Oscillator σ": "reading", "Swayam net breadth": "lean",
+    "Gap-implied move % (excl. drift)": "evidence",
+}
+
 
 def build_record(ts: pd.DataFrame) -> pd.DataFrame:
     """The joined, full-precision record: Mūla + Swayam + the call, per session."""
@@ -47,23 +79,14 @@ def build_record(ts: pd.DataFrame) -> pd.DataFrame:
     m = ts.copy()
     if "Date" in m.columns:
         m.index = pd.to_datetime(m["Date"], errors="coerce").dt.normalize()
-    cols = {
-        "Price": "Price", "FairValue": "Fair value", "FairValueLo": "Fair value lo (95%)",
-        "FairValueHi": "Fair value hi (95%)", "PctMispricing": "Gap %", "FVO": "Oscillator σ",
-        "Regime": "Valuation", "ModelSpread": "Model spread bps", "XSConsistency": "Cross-section",
-        "MRProb": "P(price reverts)", "MulaKappa": "κ̂ (price-side)",
-        "MulaDriftPct": "Expected move %", "MulaSdPct": "Expected move SD %",
-        "OversoldBreadth": "Windows cheap %", "OverboughtBreadth": "Windows rich %",
-        "ConvictionBounded": "Window agreement", "Provisional": "Provisional", "Valid": "Valued",
-    }
     out = pd.DataFrame(index=m.index)
-    for src, name in cols.items():
-        if src in m.columns:
-            out[name] = m[src]
-    if "Gap %" in out.columns:
-        out["Gap %"] = pd.to_numeric(out["Gap %"], errors="coerce") * 100.0
-    if "Model spread bps" in out.columns:
-        out["Model spread bps"] = pd.to_numeric(out["Model spread bps"], errors="coerce") * 1e4
+    for src, name in MULA_COLUMNS.items():
+        out[name] = m[src]
+    # The state word, derived where it is shown (core.semantics), beside the σ.
+    out.insert(out.columns.get_loc("Oscillator σ") + 1, "Valuation",
+               [valuation_state(v) for v in pd.to_numeric(m["FVO"], errors="coerce")])
+    for name, scale in (("Gap %", 100.0), ("Gap scale %", 100.0), ("Model spread bps", 1e4)):
+        out[name] = pd.to_numeric(out[name], errors="coerce") * scale
 
     # Swayam's one published lean (engines.swayam.aggregate_views' Lean), in
     # points of net breadth, and the shares it is made of — never re-derived.
@@ -96,8 +119,10 @@ def render_data_tab(ts_filtered, ts, active_target):
         "The Record",
         f"Every published series for {active_target}, one row per session, in the units the "
         f"pages show them in. Readings keep their native sign — positive = stretched up (gap, "
-        f"oscillator) — except Swayam net breadth, which is its published lean in points "
-        f"(oversold minus overbought) and so reads positive when the views lean bullish.",
+        f"oscillator) — and their tint follows the lean they imply, so a rich gap reads in the "
+        f"short colour. Swayam net breadth (its published lean in points, oversold minus "
+        f"overbought) reads bullish-positive and is tinted as it reads. The gap-implied move "
+        f"(excludes drift) is evidence: bullish-positive, untinted, graded on the Mūla page.",
         icon="database", accent="cyan",
     )
     _pn = provisional_note(st.session_state.get("fvo_ts"))
@@ -110,7 +135,7 @@ def render_data_tab(ts_filtered, ts, active_target):
     view = shown.iloc[::-1].copy()                 # newest first
     for col in view.columns:
         if pd.api.types.is_float_dtype(view[col]):
-            view[col] = view[col].round(4 if col in ("κ̂ (price-side)",) else 2)
+            view[col] = view[col].round(4 if col in ("κ̂ (price-side)", "Gap persistence φ") else 2)
     if search_term:
         mask = view.astype(str).apply(
             lambda c: c.str.contains(search_term, case=False, na=False)).any(axis=1)
@@ -125,7 +150,9 @@ def render_data_tab(ts_filtered, ts, active_target):
         max_rows=_CAP, max_height=560, window=True,
         footer=(f"Showing the newest {_CAP:,} of {len(view):,} — the export has all of them."
                 if len(view) > _CAP else ""),
-        sign_color_cols={"Gap %", "Oscillator σ", "Expected move %", "Swayam net breadth"},
+        col_labels={c: c for c in view.columns},     # the record's headers are already named
+        sign_color_cols={c for c, o in SIGN_ORIENTATION.items() if o == "lean"},
+        contrarian_cols={c for c, o in SIGN_ORIENTATION.items() if o == "reading"},
     )
 
     csv_data = record.reset_index().to_csv(index=False).encode("utf-8")

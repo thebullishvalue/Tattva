@@ -124,6 +124,10 @@ def test_h_and_l_are_the_knobs():
     data = _committed()
     assert data["h"] == FORECAST_HORIZON == InstrumentConfig().forecast_horizon
     assert data["exec_lag"] == knob("EXECUTION_LAG")
+    # The study registers its STUDY_STOCKS the way the app registers a typed
+    # symbol; do the same here so the check does not depend on test order.
+    from studies.pooled_priors import universe
+    universe()
     assert all(instrument(m).asset_class == data["universe"][m]["class"] for m in data["members"])
 
 

@@ -143,20 +143,34 @@ def edge_periods(edge: dict | None) -> tuple[int, int]:
 #  The composer
 # ═══════════════════════════════════════════════════════════════════════
 
-def _claim_grade_text(ic, se, n_win, mu, sd, scope, k) -> str:
-    """'own +0.070 ± 0.062, n_win 140; no pooled prior' — the claim grade in words."""
+def _claim_grade_text(ic, se, n_win, mu, sd, scope, k, *, asset_class: str | None = None,
+                      study_date: str | None = None) -> str:
+    """'own +0.070 ± 0.062, n_win 140; no pooled prior' — the claim grade in words.
+
+    Given the instrument's ``asset_class`` and the study's ``study_date`` (the
+    verdict's words), the prior is named as the pool it is — 'commodity
+    class-LOO prior −0.001 ± 0.028, k 6, study 2026-10-27', or 'global-LOO
+    prior …, study …' for a catalogue-wide pool. call_ts's ``reason`` keeps
+    the short form.
+    """
     ic, se, mu, sd = _num(ic), _num(se), _num(mu), _num(sd)
     n = int(_num(n_win) or 0)
     own = (f"own {ic:+.3f} ± {se:.3f}, n_win {n}" if ic is not None and se is not None
            else f"own grade warming up: {n} of {GRADE_WARMUP_WIN} windows")
-    prior = (f"{scope} prior {mu:+.3f} ± {sd:.3f}, k {int(_num(k) or 0)}"
-             if str(scope) not in _NO_PRIOR and mu is not None and sd is not None
-             else "no pooled prior")
-    return f"{own}; {prior}"
+    if str(scope) in _NO_PRIOR or mu is None or sd is None:
+        return f"{own}; no pooled prior"
+    pool = f"{asset_class} {scope}" if asset_class and str(scope).startswith("class") else str(scope)
+    study = f", study {study_date}" if study_date else ""
+    return f"{own}; {pool} prior {mu:+.3f} ± {sd:.3f}, k {int(_num(k) or 0)}{study}"
 
 
-def _reason(action: str, precondition: str, r: dict, h: int, graded: bool) -> str:
-    """Why this session's action is what it is, in numbers."""
+def _reason(action: str, precondition: str, r: dict, h: int, graded: bool,
+            text: str | None = None) -> str:
+    """Why this session's action is what it is, in numbers.
+
+    ``text`` is the claim grade in words; by default the short form call_ts
+    stores (:func:`_claim_grade_text` without the pool's class and study).
+    """
     if action == "NO CALL":
         if precondition == "published":
             return r["withheld_reason"] or "no valuation published"
@@ -167,8 +181,10 @@ def _reason(action: str, precondition: str, r: dict, h: int, graded: bool) -> st
         return NOT_TRADEABLE
     if action == "NO CLAIM":
         return f"|FVO| {abs(r['fvo']):.2f}σ is inside the ±{CLAIM_SIGMA:g}σ noise"
-    text = _claim_grade_text(r["claim_ic"], r["claim_se"], r["claim_n_win"], r["claim_prior_mu"],
-                             r["claim_prior_sd"], r["claim_prior_scope"], r["claim_prior_k"])
+    if text is None:
+        text = _claim_grade_text(r["claim_ic"], r["claim_se"], r["claim_n_win"],
+                                 r["claim_prior_mu"], r["claim_prior_sd"], r["claim_prior_scope"],
+                                 r["claim_prior_k"])
     t = _num(r["claim_t"])
     if action == "HOLD":
         if not graded:
@@ -317,12 +333,9 @@ def _call_grade(e: dict | None, prospective: dict | None) -> dict:
     e, p = e or {}, prospective or {}
     label, tone = edge_tier(e.get("t"))
     ivh = e.get("issued_vs_held") or {}
-    study = (e.get("attrs") or {}).get("priors_study")
     ic, se, t = _num(e.get("ic")), _num(e.get("se")), _num(e.get("t"))
     graded = bool(e.get("graded", False)) and None not in (ic, se, t)
     return {
-        "pooled": (f"the class's pooled call grade: {study}" if study
-                   else "no pooled class grade: the study has not run"),
         "status": str(e.get("status") or "ungraded"), "graded": graded,
         "ic": ic, "se": se, "t": t,
         "n_win": int(e.get("n_win") or 0), "label": label, "tone": tone,
@@ -365,7 +378,6 @@ def verdict_from_row(call_ts: pd.DataFrame, edges: dict, *, asof, horizon: int,
     fvo, pct = _num(r["fvo"]), _num(r["pct"]) or 0.0
     size, trust, t = float(r["size"]), float(r["trust"]), _num(r["claim_t"])
     tradeable = bool(call_ts.attrs.get("tradeable", True))
-    reason = str(r["reason"])
 
     # ── The chain, in decision order ────────────────────────────────────
     raw = claim_direction(fvo)
@@ -391,9 +403,17 @@ def verdict_from_row(call_ts: pd.DataFrame, edges: dict, *, asof, horizon: int,
 
     e_claim = edges.get("claim") or {}
     pos, nb = edge_periods(e_claim)
+    # The claim's grade, its prior named as the pool it is (the instrument's
+    # class and the study's date, from call_ts's provenance stamp); the
+    # reason is rebuilt from it, so the headline, the limit and the trust row
+    # say one thing. call_ts's own reason keeps the short form.
     grade_text = _claim_grade_text(r["claim_ic"], r["claim_se"], r["claim_n_win"],
                                    r["claim_prior_mu"], r["claim_prior_sd"],
-                                   r["claim_prior_scope"], r["claim_prior_k"])
+                                   r["claim_prior_scope"], r["claim_prior_k"],
+                                   asset_class=call_ts.attrs.get("asset_class"),
+                                   study_date=call_ts.attrs.get("priors_run_date"))
+    reason = _reason(action, str(r["precondition"]), r, h,
+                     str(r["claim_prior_scope"]) != "ungraded", text=grade_text)
     periods = f"; full history {pos} of {nb} periods positive" if nb else ""
     trust_grade = (f"{grade_text}{periods} → t_post {t:.2f} · {edge_tier(t)[0]}" if t is not None
                    else f"{grade_text}{periods} → ungraded")

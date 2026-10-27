@@ -19,7 +19,9 @@ Reading order — the house convention every analysis tab follows:
 Every number is read off the pipeline — the verdict (``call_ts`` at d*),
 ``edges``, ``evidence`` and Mūla's published frame. Nothing is estimated,
 thresholded or re-derived here, and evidence is neutral-toned with its own
-grade beside it: directional colour is reserved for the claim's state.
+grade beside it: directional colour is reserved for the claim's state. Each
+section and KPI names its card (``core.roles.CARDS``), whose chip states its
+role, so no section words its own.
 """
 
 from __future__ import annotations
@@ -50,9 +52,6 @@ from ui.components import (
 )
 from core.config import UI_CHART_HEIGHT_MEDIUM, UI_CHART_HEIGHT_XLARGE
 
-#: The evidence chip every EVIDENCE section carries (design §11).
-_EVIDENCE = "EVIDENCE → {target} · does not move the call."
-
 # ── Tooltip definitions ────────────────────────────────────────────────────
 TOOLTIPS = {
     "fair_value": (
@@ -63,7 +62,7 @@ TOOLTIPS = {
     ),
     "no_claim": (
         f"Inside ±{CLAIM_SIGMA:g}σ of fair value is the normal day-to-day noise of price around "
-        f"it and no claim is made. σ is the gap's own typical size today, so the band in "
+        f"it and no claim is made. σ is the gap's own typical scale today, so the band in "
         f"percent of price moves with it."
     ),
     "gap_half_life": (
@@ -83,7 +82,7 @@ TOOLTIPS = {
     ),
     "z": (
         "The sizer's input: z = 2·MRProb − 1, unsigned because evidence that price responds "
-        "to the gap supports either side of the claim. 0 when there is no claim to size."
+        "to the gap supports either side of the claim. 0 when there is no claim to scale."
     ),
     "effect": (
         "The factor the sizer applies: exp(β·z). β = f(t_post) is 0 until the sizer's "
@@ -93,7 +92,7 @@ TOOLTIPS = {
     "ecm_move": (
         "The price move over the horizon that today's gap implies under the error-correction "
         "layer: b·z·Σφᵏ, with the regression's intercept (the drift) deliberately left out, "
-        "so it is not the expected move. Shown beside its own grade."
+        "so it is not the expected move. Shown with its own grade."
     ),
 }
 
@@ -109,15 +108,6 @@ def _num(d, key=None):
 
 def _state_tone(state: str) -> str:
     return "success" if "CHEAP" in state else "danger" if "RICH" in state else "neutral"
-
-
-def _grade_sub(e: dict | None) -> str:
-    """'± 0.075 · t 1.06 · n/h 136 · unproven' for an edge, or why it has none."""
-    e = e or {}
-    se, t = _num(e, "se"), _num(e, "t")
-    if _num(e, "ic") is None or se is None:
-        return str(e.get("status") or "not yet graded")
-    return f"± {se:.3f} · t {t:.2f} · n/h {int(e.get('n_win') or 0)} · {edge_tier(t)[0]}"
 
 
 def _row_at(frame: pd.DataFrame | None, asof):
@@ -140,7 +130,7 @@ def _render_t_path(call_ts: pd.DataFrame | None, since) -> None:
     if t.notna().sum() == 0:
         render_empty_state(
             "No as-of grade yet",
-            f"The claim's as-of grade appears once {knob('GRADE_WARMUP_WIN')} independent "
+            f"The claim's as-of grade appears once {knob('GRADE_WARMUP_WIN')} non-overlapping "
             f"windows have resolved in this window.",
             eyebrow="GRADE → claim",
         )
@@ -169,25 +159,26 @@ def _render_own_vs_prior(edge: dict | None, row, verdict: dict) -> None:
     w_own = _num(row, "claim_w_own") if row is not None else None
     t = verdict.get("claim_t")
     prior_label = (st.session_state.get("priors_meta") or {}).get("label", "no pooled prior")
+    card = "mula:grade"
     render_kpi_strip([
         {"label": "Own grade · as of d*", "value": f"{ic:+.3f}" if ic is not None else "warming up",
          "subtext": (f"± {se:.3f} · {n_win} windows" if ic is not None and se is not None
-                     else f"{n_win} of {knob('GRADE_WARMUP_WIN')} windows"),
-         "color_class": "neutral"},
+                     else f"{n_win} of {knob('GRADE_WARMUP_WIN')} windows"), "card": card},
         {"label": "Class prior", "value": scope if has_prior else "none",
-         "subtext": f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label, "color_class": "neutral"},
+         "subtext": f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label, "card": card},
         {"label": "Weight on own", "value": f"{w_own:.2f}" if w_own is not None else "—",
-         "subtext": "1.00 with no prior; the rest is the class's", "color_class": "neutral"},
+         "subtext": "1.00 with no prior; the rest is the class's", "card": card},
         {"label": "t_post", "value": f"{t:.2f}" if t is not None else "ungraded",
-         "subtext": edge_tier(t)[0], "color_class": "neutral"},
+         "subtext": edge_tier(t)[0], "card": card},
         {"label": "Trust", "value": f"{verdict['trust']:.2f}",
          "subtext": (f"f(t_post): 0 below {knob('STRENGTH_T0'):g}, full at "
-                     f"{knob('STRENGTH_T1'):g}"), "color_class": "neutral"},
+                     f"{knob('STRENGTH_T1'):g}"), "card": card},
     ], max_cols=5, key="mula-own-prior")
 
 
 def _render_sides(edges: dict) -> None:
-    """The claim by side: hit against the side-matched no-skill rate, and payoff."""
+    """The claim by side — CHEAP claims (the buy side) and RICH ones — against the
+    side-matched no-skill rate, with each side's drift-neutral payoff."""
     def _side(e):
         hit, base, pay = _num(e, "hit"), _num(e, "base"), _num(e, "payoff")
         value = f"{hit:.0f}% vs {base:.0f}%" if hit is not None and base is not None else "—"
@@ -196,11 +187,11 @@ def _render_sides(edges: dict) -> None:
         return value, sub
 
     items = []
-    for key, name in (("claim:buy", "BUY claims hit"), ("claim:sell", "SELL claims hit")):
+    for key, name in (("claim:buy", "CHEAP claims hit"), ("claim:sell", "RICH claims hit")):
         value, sub = _side(edges.get(key) or {})
         items.append({"label": name, "value": value,
-                      "subtext": f"vs the side-matched no-skill rate · {sub}",
-                      "color_class": "neutral"})
+                      "subtext": f"against the side-matched no-skill rate · {sub}",
+                      "card": "mula:sides"})
     render_kpi_strip(items, max_cols=2, key="mula-sides")
 
 
@@ -214,21 +205,22 @@ def _render_gap_split(evidence: dict, mula, horizon: int) -> None:
     share, se_share = _num(gs, "price_share"), _num(gs, "se_share")
     b_fv, se_fv = _num(gs, "b_fv"), _num(gs, "se_b_fv")
     gap_hl, price_hl = _num(mula, "GapHalfLife"), _num(mula, "MulaHalfLife")
+    card = "mula:gap_split"
     render_kpi_strip([
         {"label": "Price's share", "value": f"{share * 100:+.0f}%" if share is not None else "—",
          "subtext": (f"± {se_share * 100:.0f}% · of the gap closed in {horizon}D · "
                      f"{gs.get('n_win', 0)} windows" if se_share is not None else "not measured"),
-         "color_class": "neutral"},
+         "card": card},
         {"label": "Fair value toward price", "value": f"{b_fv:+.2f}" if b_fv is not None else "—",
          "subtext": (f"± {se_fv:.2f} of each unit of gap, over {horizon}D" if se_fv is not None
-                     else f"of each unit of gap, over {horizon}D"), "color_class": "neutral"},
+                     else f"of each unit of gap, over {horizon}D"), "card": card},
         {"label": "Gap half-life", "value": f"{gap_hl:.0f}d" if gap_hl is not None else "—",
-         "subtext": "the gap's own persistence, however it closes", "color_class": "neutral",
+         "subtext": "the gap's own persistence, however it closes", "card": card,
          "tooltip": TOOLTIPS["gap_half_life"]},
         {"label": "Price-side half-life",
          "value": f"{price_hl:.0f}d" if price_hl is not None else "—",
          "subtext": ("price alone, if fair value stood still" if price_hl is not None
-                     else "undefined: price-side κ̂ ≤ 0"), "color_class": "neutral",
+                     else "undefined: price-side κ̂ ≤ 0"), "card": card,
          "tooltip": TOOLTIPS["price_half_life"]},
     ], max_cols=4, key="mula-gap-split")
     if share is not None and se_share is not None:
@@ -239,25 +231,31 @@ def _render_gap_split(evidence: dict, mula, horizon: int) -> None:
             f"grade clears the bar.")
 
 
-def _render_fair_value_kpis(mula) -> None:
-    """The claim's reading at d*: the gap, the level, and the no-claim band in price terms."""
+def _render_fair_value_kpis(mula, edge: dict | None) -> None:
+    """The claim's reading at d*: its state (with the claim's grade beside it), the
+    level, and the no-claim band in price terms.
+
+    The state word is the one directional colour on the page: it is the
+    claim's state. The FVO and the gap keep their native sign.
+    """
     fvo, pct = _num(mula, "FVO"), _num(mula, "PctMispricing")
     fv, gs = _num(mula, "FairValue"), _num(mula, "GapScale")
     lo, hi = _num(mula, "FairValueLo"), _num(mula, "FairValueHi")
     state = valuation_state(fvo)
     render_kpi_strip([
         {"label": "Valuation", "value": state if fvo is not None else "—",
-         "subtext": (f"{fvo:+.2f}σ · {abs(pct) * 100:.1f}% {'below' if pct < 0 else 'above'} fair value"
+         "subtext": (f"FVO {fvo:+.2f}σ · gap {pct * 100:+.1f}% vs fair value"
                      if fvo is not None and pct is not None else "no published valuation"),
-         "color_class": _state_tone(state)},
+         "color_class": _state_tone(state), "card": "mula:valuation", "lean": True,
+         "edge": edge or {}},
         {"label": "Fair Value", "value": f"{fv:,.2f}" if fv is not None else "—",
          "subtext": (f"95% band {lo:,.2f} – {hi:,.2f}" if lo is not None and hi is not None
                      else "level the world implies"),
-         "color_class": "neutral", "tooltip": TOOLTIPS["fair_value"]},
+         "card": "mula:fair_value", "tooltip": TOOLTIPS["fair_value"]},
         {"label": "No-claim band", "value": f"±{CLAIM_SIGMA:g}σ",
          "subtext": (f"±{CLAIM_SIGMA * gs * 100:.1f}% of fair value at today's gap scale"
-                     if gs is not None else "the gap's own typical size"),
-         "color_class": "neutral", "tooltip": TOOLTIPS["no_claim"]},
+                     if gs is not None else "the gap's own typical scale"),
+         "card": "mula:fair_value", "tooltip": TOOLTIPS["no_claim"]},
     ], max_cols=3, key="mula-read")
 
 
@@ -341,15 +339,16 @@ def _render_claim_unit(evidence: dict) -> None:
     def _holds(k):
         return "holds" if c.get(k) else "fails"
 
+    card = "mula:claim_unit"
     render_kpi_strip([
         {"label": "Mean", "value": f"{mean:+.2f}σ" if mean is not None else "—",
-         "subtext": f"contract |mean| < 0.15 · {_holds('mean')}", "color_class": "neutral"},
+         "subtext": f"contract |mean| < 0.15 · {_holds('mean')}", "card": card},
         {"label": "SD", "value": f"{sd:.2f}" if sd is not None else "—",
-         "subtext": f"contract 0.8 – 1.2 · {_holds('sd')}", "color_class": "neutral"},
+         "subtext": f"contract 0.8 – 1.2 · {_holds('sd')}", "card": card},
         {"label": "RICH : CHEAP", "value": f"{rc:.1f}" if rc is not None else "—",
-         "subtext": f"contract 0.67 – 1.5 · {_holds('rich_cheap')}", "color_class": "neutral"},
-        {"label": "SELL share", "value": f"{sell:.0%}" if sell is not None else "—",
-         "subtext": f"of {int(cu.get('n') or 0)} valued sessions' claims", "color_class": "neutral"},
+         "subtext": f"contract 0.67 – 1.5 · {_holds('rich_cheap')}", "card": card},
+        {"label": "RICH share of claims", "value": f"{sell:.0%}" if sell is not None else "—",
+         "subtext": f"of {int(cu.get('n') or 0)} valued sessions' claims", "card": card},
     ], max_cols=4, key="mula-claim-unit")
     render_note(
         f"C12 contract {'holds' if cu.get('passes') else 'fails'} on the valued sessions through "
@@ -362,15 +361,16 @@ def _render_gap_stationarity(evidence: dict) -> None:
     """The one gap-stationarity word, from ADF and KPSS on the published gap."""
     gt = evidence.get("gap_stationarity") or {}
     adf, kp = _num(gt, "adf_pvalue"), _num(gt, "kpss_pvalue")
+    card = "mula:gap_stationarity"
     render_kpi_strip([
         {"label": "Full-history diagnostic", "value": str(gt.get("state") or "—"),
-         "subtext": f"{int(gt.get('n') or 0)} valued sessions through d*", "color_class": "neutral"},
+         "subtext": f"{int(gt.get('n') or 0)} valued sessions through d*", "card": card},
         {"label": "ADF p-value", "value": f"{adf:.3f}" if adf is not None else "—",
          "subtext": (f"null: a unit root; rejected below {knob('STATIONARITY_ALPHA'):g}"),
-         "color_class": "neutral"},
+         "card": card},
         {"label": "KPSS p-value", "value": f"{kp:.3f}" if kp is not None else "—",
          "subtext": (f"null: a constant level; rejected below {knob('STATIONARITY_ALPHA'):g} "
-                     f"(reported within 0.01 – 0.10)"), "color_class": "neutral"},
+                     f"(reported within 0.01 – 0.10)"), "card": card},
     ], max_cols=3, key="mula-gap-tests")
 
 
@@ -381,19 +381,19 @@ def _render_model_fit(model_stats: dict, mula) -> None:
     n_blocks = int(model_stats.get("n_blocks", 0) or 0)
     k = int(_num(mula, "KFactors") or 0)
     sp = _num(mula, "ModelSpread")
+    card = "mula:model_fit"
     render_kpi_strip([
         {"label": "OOS R²", "value": f"{r2:.3f}" if r2 is not None else "—",
-         "subtext": "log-price variance the one-step fitted level tracks", "color_class": "neutral"},
+         "subtext": "log-price variance the one-step fitted level tracks", "card": card},
         {"label": "Cross-section", "value": f"{n_inst} instruments",
-         "subtext": f"in {n_blocks} asset-class blocks · {k} latent factors on d*",
-         "color_class": "neutral"},
+         "subtext": f"in {n_blocks} asset-class blocks · {k} latent factors on d*", "card": card},
         {"label": "Model spread", "value": f"{sp * 1e4:.0f} bps" if sp is not None else "—",
-         "subtext": "SD of the fair-value level itself on d*", "color_class": "neutral"},
+         "subtext": "SD of the fair-value level itself on d*", "card": card},
     ], max_cols=3, key="mula-model-fit")
 
 
 def _render_drivers(engine) -> None:
-    """Which asset-class blocks the fitted level is made of (the engine's own decomposition)."""
+    """Which asset-class blocks the fitted level leans on (read off the engine's coefficients)."""
     impacts = getattr(engine, "latest_feature_impacts", None) or {}
     if not impacts:
         render_empty_state(
@@ -433,11 +433,10 @@ def _render_reversion_sizer(verdict: dict, edge: dict | None, row) -> None:
     chain = next((r for r in verdict.get("chain") or [] if r["key"] == "sizer:reversion"), None)
     render_section_header(
         "Reversion (ECM) — P(price-side κ > 0)",
-        ("SIZER → call. The sizer scales the claim by exp(β·z), z = 2·MRProb − 1, and is ×1.00 "
-         "until its own grade earns a weight; it can never veto or invert the claim, and a "
-         "grade measured against it leaves it neutral." if chain else
-         "SIZER → call. No published valuation yet, so there is no claim to scale."),
-        icon="activity", accent="violet",
+        ("The sizer scales the claim by exp(β·z), z = 2·MRProb − 1; it can never veto or "
+         "invert the claim, and a grade measured against it leaves it neutral." if chain else
+         "No published valuation yet, so there is no claim to scale."),
+        icon="activity", accent="violet", card="mula:reversion",
     )
     if chain is None:
         return
@@ -452,45 +451,42 @@ def _render_reversion_sizer(verdict: dict, edge: dict | None, row) -> None:
     mu, sd, scope = _num(g, "prior_mu"), _num(g, "prior_sd"), str(g.get("prior_scope") or "none")
     has_prior = scope not in ("none", "ungraded") and mu is not None and sd is not None
     prior_label = (st.session_state.get("priors_meta") or {}).get("label", "no pooled prior")
+    sizer, grade = "mula:reversion", "mula:reversion_grade"
     render_kpi_strip([
         {"label": "Reading on d*", "value": f"{mr:.2f}" if mr is not None else "—",
          "subtext": (f"MRProb · κ̂ {kappa:+.4f}/d" if kappa is not None
                      else "the error-correction layer is warming up"),
-         "color_class": "neutral", "tooltip": TOOLTIPS["reading"]},
+         "card": sizer, "tooltip": TOOLTIPS["reading"]},
         {"label": "z = 2·MRProb − 1", "value": f"{z:+.2f}" if z is not None else "—",
          "subtext": ("the reading the sizer scales by" if verdict.get("direction")
-                     else "0: no claim to size"), "color_class": "neutral",
-         "tooltip": TOOLTIPS["z"]},
+                     else "0: no claim to scale"), "card": sizer, "tooltip": TOOLTIPS["z"]},
         {"label": "Own grade · as of d*",
          "value": f"{ic:+.3f}" if ic is not None else "warming up",
          "subtext": (f"± {se:.3f} · {n_win} windows" if ic is not None and se is not None
-                     else f"{n_win} of {knob('GRADE_WARMUP_WIN')} windows"),
-         "color_class": "neutral"},
+                     else f"{n_win} of {knob('GRADE_WARMUP_WIN')} windows"), "card": grade},
         {"label": "Prior", "value": scope if has_prior else "none",
-         "subtext": f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label, "color_class": "neutral"},
+         "subtext": f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label, "card": grade},
         {"label": "t_post", "value": f"{t:.2f}" if t is not None else "ungraded",
-         "subtext": edge_tier(t)[0], "color_class": "neutral"},
+         "subtext": edge_tier(t)[0], "card": grade},
         {"label": "Effect", "value": f"×{factor:.2f}",
          "subtext": (f"β {beta:.2f}; opens at t_post {knob('STRENGTH_T0'):g}, full at "
-                     f"{knob('STRENGTH_T1'):g}"),
-         "color_class": "neutral", "tooltip": TOOLTIPS["effect"]},
+                     f"{knob('STRENGTH_T1'):g}"), "card": sizer, "tooltip": TOOLTIPS["effect"]},
     ], max_cols=6, key="mula-reversion-sizer")
 
 
 def _render_ecm_move(evidence: dict, edge: dict | None, ts_filtered, x_axis, horizon: int) -> None:
-    """The ECM's gap-implied move (drift excluded), neutral, beside its own grade."""
+    """The ECM's gap-implied move (drift excluded): a lean, so it is drawn with its
+    own grade (IC ± SE), neutral-toned, in its native sign."""
     em = evidence.get("ecm_drift") or {}
     label = str(em.get("label") or f"gap-implied {horizon}D move (excludes drift)")
     v, sd = _num(em, "value"), _num(em, "sd")
-    ic = _num(edge, "ic") if edge else None
     render_kpi_strip([
         {"label": label, "value": f"{v:+.2f}%" if v is not None else "—",
          "subtext": (f"± {sd:.2f}% (1 SD, {horizon} sessions) on d*" if sd is not None
                      else "the error-correction layer is warming up"),
-         "color_class": "neutral", "tooltip": TOOLTIPS["ecm_move"]},
-        {"label": "Its grade · IC", "value": f"{ic:+.3f}" if ic is not None else "—",
-         "subtext": _grade_sub(edge), "color_class": "neutral"},
-    ], max_cols=2, key="mula-ecm-move")
+         "card": "mula:ecm_move", "lean": True, "edge": edge or {},
+         "tooltip": TOOLTIPS["ecm_move"]},
+    ], max_cols=1, key="mula-ecm-move")
     if "MulaDriftPct" not in ts_filtered.columns:
         return
     d = pd.to_numeric(ts_filtered["MulaDriftPct"], errors="coerce")
@@ -540,7 +536,8 @@ def render_mula_tab(engine, ts_filtered, x_axis, signal, model_stats, active_tar
                   f"this is the last session that was.")
 
     # ── 1 · the chain rows Overview reads off Mūla ──────────────────────
-    render_section_header("Mūla — The Claim", claim, icon="target", accent="violet")
+    render_section_header("Mūla — The Claim", claim, icon="target", accent="violet",
+                          card="mula:claim")
     render_gate_rows(verdict, ["claim", "precondition", "trust"])
 
     # ── 2 · GRADE → claim ───────────────────────────────────────────────
@@ -549,73 +546,75 @@ def render_mula_tab(engine, ts_filtered, x_axis, signal, model_stats, active_tar
     since = (pd.to_datetime(x_axis).min() if x_axis is not None and len(x_axis) else None)
     render_section_header(
         "Has the Claim Paid on Price?",
-        f"GRADE → claim. The claim's sign against the drift-neutral {horizon}-session return from "
-        f"the next close, on its claim sessions: its posterior t as of every session (what trust "
-        f"read), its own grade beside the class prior at d*, period by period over the full "
-        f"history, and by side.",
-        icon="trending", accent="violet",
+        f"The claim's sign against the drift-neutral {horizon}-session return from the next "
+        f"close, on its claim sessions: its posterior t as of every session (what trust read), "
+        f"its own grade beside the class prior at d*, period by period over the full history, "
+        f"and by side.",
+        icon="trending", accent="violet", card="mula:grade",
     )
     _render_t_path(call_ts, since)
     _render_own_vs_prior(edges.get("claim"), row, verdict)
-    render_edge_panel(edges.get("claim"), "mula", what="the claim's sign on its claim sessions")
+    render_edge_panel(edges.get("claim"), "mula", what="the claim's sign on its claim sessions",
+                      title="Claim grade", card="mula:grade")
     rule = (edges.get("claim") or {}).get("stated_rule")
     if rule:
         render_note(f"Stated rule (C12): {rule}.")
     _render_sides(edges)
 
     # ── 3 · EVIDENCE → claim ────────────────────────────────────────────
-    ev = _EVIDENCE.format(target="claim")
     render_section_header(
         "Who Closes the Gap?",
-        f"{ev} When Mūla's gap was open, how much of its closing over the next {horizon} sessions "
+        f"When Mūla's gap was open, how much of its closing over the next {horizon} sessions "
         f"did price do, and how much did fair value do by moving toward price? Beside it, the "
         f"gap's own half-life and price's.",
-        icon="layers", accent="violet",
+        icon="layers", accent="violet", card="mula:gap_split",
     )
     mula = _row_at(st.session_state.get("fvo_ts"), signal.get("asof"))
     _render_gap_split(evidence, mula, horizon)
 
     render_section_header(
         "Price & Fair Value",
-        f"{ev} Top: price against the fair-value level and its 95% band. Bottom: the oscillator "
-        f"the claim is made on — inside the shaded ±{CLAIM_SIGMA:g}σ band no claim is made; beyond "
-        f"±{DEEP_SIGMA:g}σ (dotted) is a deep mispricing. Below zero (green) = cheap.",
-        icon="trending", accent="violet",
+        f"Top: price against the fair-value level and its 95% band. Bottom: the oscillator the "
+        f"claim is made on — inside the shaded ±{CLAIM_SIGMA:g}σ band no claim is made; beyond "
+        f"±{DEEP_SIGMA:g}σ (dotted) is a deep mispricing. Below zero (green) = cheap: the "
+        f"claim's state is the one reading on the page in a direction's colour.",
+        icon="trending", accent="violet", card="mula:fair_value",
     )
-    _render_fair_value_kpis(mula)
+    _render_fair_value_kpis(mula, edges.get("claim"))
     _render_fair_value_chart(ts_filtered, x_axis, active_target)
 
     render_section_header(
         "The Claim's Unit",
-        f"{ev} Is the oscillator in the unit its ±{CLAIM_SIGMA:g}σ and ±{DEEP_SIGMA:g}σ cuts "
+        f"Is the oscillator in the unit its ±{CLAIM_SIGMA:g}σ and ±{DEEP_SIGMA:g}σ cuts "
         f"assume? Centred, unit SD, RICH and CHEAP claims balanced (charter C12), on the valued "
         f"sessions through d*.",
-        icon="crosshair", accent="violet",
+        icon="crosshair", accent="violet", card="mula:claim_unit",
     )
     _render_claim_unit(evidence)
 
     render_section_header(
         "Gap Stationarity",
-        f"{ev} ADF (null: a unit root) and KPSS (null: a constant level) on the published gap, "
-        f"read into one word. One test of the whole record, not an as-of series, and no "
-        f"precondition of the call.",
-        icon="crosshair", accent="violet",
+        "ADF (null: a unit root) and KPSS (null: a constant level) on the published gap, read "
+        "into one word. One test of the whole record, not an as-of series, and no "
+        "precondition of the claim.",
+        icon="crosshair", accent="violet", card="mula:gap_stationarity",
     )
     _render_gap_stationarity(evidence)
 
     render_section_header(
         "Model Fit",
-        f"{ev} What the valuation is fitted on and how closely its level tracks log price.",
-        icon="cpu", accent="violet",
+        "What the valuation is fitted on and how closely its level tracks log price.",
+        icon="cpu", accent="violet", card="mula:model_fit",
     )
     _render_model_fit(model_stats, mula)
 
     render_section_header(
         "What Drives Fair Value",
-        f"{ev} Each asset-class block's share of the fitted fair-value level: the engine's own "
-        f"exact decomposition of the level into the instruments it is made of, summed by block "
-        f"— not a refit and not a coefficient read-off.",
-        icon="bar-chart", accent="violet",
+        "Each asset-class block's share of the absolute contributions to the fitted fair-value "
+        "level, read off the engine's own coefficients as each attribution session's update "
+        "leaves them, with the regression's intercept left out: which parts of the world the "
+        "level leans on, not an exact accounting of it — and not a refit.",
+        icon="bar-chart", accent="violet", card="mula:drivers",
     )
     _render_drivers(engine)
 
@@ -625,10 +624,9 @@ def render_mula_tab(engine, ts_filtered, x_axis, signal, model_stats, active_tar
                    or f"gap-implied {horizon}D move (excludes drift)")
     render_section_header(
         em_label[:1].upper() + em_label[1:],
-        f"{_EVIDENCE.format(target='sizer:reversion')} The move over the next {horizon} sessions "
-        f"today's gap implies under the error-correction layer, with its drift left out: the "
-        f"reversion sizer's mechanism in price units, neutral-toned, graded on its own on the "
-        f"valued sessions (drift-neutral).",
-        icon="activity", accent="violet",
+        f"The move over the next {horizon} sessions today's gap implies under the "
+        f"error-correction layer, with its drift left out: the reversion sizer's mechanism in "
+        f"price units, neutral-toned, graded on its own on the valued sessions (drift-neutral).",
+        icon="activity", accent="violet", card="mula:ecm_move",
     )
     _render_ecm_move(evidence, edges.get("evidence:ecm_drift"), ts_filtered, x_axis, horizon)

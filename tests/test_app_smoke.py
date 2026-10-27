@@ -7,26 +7,31 @@ removed later is covered without editing this file. A page that raises is
 caught by the app's own guard and drawn as "… could not be drawn", so that
 text is a failure here too. Every later package keeps this green.
 
-The pages are the six role groups — Overview, Mūla, Swayam, Grades, System and
+The pages are the role groups — Overview, Mūla, Swayam, Grades, System and
 Data (Convergence and Precedent are gone). The bundle carries the closed loop
 (call_ts, its grades, the evidence and the verdict at d*) and none of the
-parallel opinions' keys; Overview opens with the call, its grade as issued and
-the chain, and prints no tier word and no size as a percentage; the rail reads
-the same verdict; the Data record exports every call_ts column. The Mūla page
-opens with Overview's own chain rows for the claim, its preconditions, its
-trust and the reversion sizer, labels the ECM's move as the gap-implied move
-(drift excluded), carries none of the retired copy, and the one gap-
-stationarity word appears once across Mūla and System.
+parallel opinions' keys, and its priors label is the committed study's when
+one is loaded, else 'no pooled prior: per-instrument grade only'; Overview
+opens with the call, its grade as issued and the chain, and prints no tier
+word and no size as a percentage; the rail reads the same verdict; the Data
+record exports every call_ts column. The Mūla page opens with Overview's own
+chain rows for the claim, its preconditions, its trust and the reversion
+sizer, labels the ECM's move as the gap-implied move (drift excluded), carries
+none of the retired copy, and the one gap-stationarity word appears once
+across Mūla and System.
 """
 import html
 import re
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 
 from core.call import CALL_COLUMNS, verdict_from_row
+from core.knobs import knob
 from core.semantics import GAP_STATES
-from pipeline.assemble import NO_PRIOR_LABEL
+from core.trust import load_priors
+from pipeline.assemble import NO_PRIOR_LABEL, describe_priors
 
 EDGE_KEYS = {"claim", "claim:buy", "claim:sell", "sizer:swayam", "sizer:reversion",
              "call", "call:prospective", "evidence:swayam_lean", "evidence:ecm_drift"}
@@ -70,7 +75,15 @@ def test_the_bundle_carries_the_closed_loop(gold_app):
                                              horizon=ss["horizon"], exec_lag=ss["exec_lag"],
                                              target="Gold")
     assert ss["call_ts"].attrs["h"] == ss["horizon"] and ss["call_ts"].attrs["fingerprint"] == ss["fingerprint"]
-    assert ss["priors_meta"]["label"] == NO_PRIOR_LABEL
+    # The run's priors are the committed study's file for its h and L, or none.
+    table = load_priors(ss["horizon"], knob("EXECUTION_LAG"))
+    meta = ss["priors_meta"]
+    assert meta["label"] == describe_priors(table)["label"]
+    if table is None:
+        assert meta["label"] == NO_PRIOR_LABEL and meta["status"] == "none"
+    else:
+        assert meta["status"] == "loaded" and meta["label"] != NO_PRIOR_LABEL
+        assert ss["call_ts"].attrs["priors_study"] == table.meta["study"]
 
 
 def test_overview_leads_with_the_call_its_grade_and_the_chain(gold_app):
@@ -83,7 +96,7 @@ def test_overview_leads_with_the_call_its_grade_and_the_chain(gold_app):
     for v in md[:first]:
         assert re.search(r"<style|command-bar|notice-rail", v), v[:120]
     grade = next(i for i, v in enumerate(md) if "Call grade · as issued" in v)
-    chain = next(i for i, v in enumerate(md) if "The chain" in v)
+    chain = next(i for i, v in enumerate(md) if 'class="hero-card hero-chain' in v)
     assert first < grade < chain
     verdict = at.session_state["verdict"]
     assert verdict["word"] in md[first] and verdict["size_formula"] in re.sub(r"<[^>]+>", "", md[chain])
@@ -110,7 +123,7 @@ def test_the_data_record_exports_every_call_column(gold_app, monkeypatch):
     assert record.loc[ss["asof"], tab_data.CALL_PREFIX + "action"] == ss["verdict"]["action"]
     # Swayam's net breadth is its published Lean in points, not a re-derivation.
     lean = tab_data._by_date(ss["swayam_daily"])["Lean"].reindex(record.index) * 100.0
-    assert np.array_equal(record["Swayam net breadth"].to_numpy(dtype=float),
+    assert np.array_equal(record["Swayam net breadth (pts)"].to_numpy(dtype=float),
                           lean.to_numpy(dtype=float), equal_nan=True)
 
 
@@ -138,3 +151,28 @@ def test_the_mula_page_reads_the_verdict_and_carries_no_retired_copy(gold_app):
     both = text["Mūla"] + text["System"]
     assert sum(both.count(label) for label in GAP_STATES) == 1
     assert at.session_state["evidence"]["gap_stationarity"]["state"] in mula
+
+
+def test_new_data_never_restores_a_stale_cached_run(offline_fetch):
+    """The run key hashes every prepared row: a value revised after the session a
+    pooled-prior study hashed the history to changes the key, although the
+    (study-comparable) fingerprint does not."""
+    import app
+    from core.trust import PriorTable
+    from pipeline.run import fetch_panel, prepare, target_bars
+
+    panel = fetch_panel("Gold")
+    bars, _ = target_bars("Gold")
+    own = prepare(panel, "Gold", bars=bars, priors=None)
+    studied = own.data.index[-60]
+    table = PriorTable({}, {"study": "studies/pooled_priors.py", "run_date": "2026-01-01",
+                            "fingerprint_upto": {"Gold": studied.strftime("%Y-%m-%d")}})
+    then = prepare(panel, "Gold", bars=bars, priors=table)
+    assert app._run_key(10, "Gold", then) == app._run_key(10, "Gold", prepare(panel, "Gold", bars=bars,
+                                                                             priors=table))
+    revised = panel.copy()
+    row = revised.index[pd.to_datetime(revised["DATE"]).dt.normalize() == own.data.index[-10]][0]
+    revised.loc[row, "Gold"] = revised.loc[row, "Gold"] * 1.01
+    later = prepare(revised, "Gold", bars=bars, priors=table)
+    assert later.fingerprint == then.fingerprint
+    assert app._run_key(10, "Gold", later) != app._run_key(10, "Gold", then)

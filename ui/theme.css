@@ -978,7 +978,7 @@
    11 · EMPTY STATES & SKELETON LOADING
    Professional, icon-free, one explanation + one suggested action. Used for
    "no data yet", "not yet graded", "no Swayam breadth" everywhere in the
-   app so degraded states read as one system rather than six ad hoc notices.
+   app so degraded states read as one system rather than a set of ad hoc notices.
    ───────────────────────────────────────────────────────────────────────── */
 .empty-state {
     background: var(--surface-1);
@@ -1100,7 +1100,7 @@
     height: 64px; display: flex; flex-direction: column; justify-content: center;
     margin: 0;
     /* 64px of right padding is the collapse control's own width. Without it
-       the tagline runs UNDER the button — "UNIFIED CONVERGENCE" was being
+       the tagline runs UNDER the button — the old tagline was being
        clipped mid-word by it. Sharing a row is not enough; the row has to be
        divided. */
     padding: 0 64px 0 var(--s5);

@@ -117,7 +117,7 @@ LIGHT_TOKENS = """
    Streamlit to `base = "dark"` with `textColor = #E6EAF1`, and that is a
    STATIC config — it cannot follow a runtime theme switch. So on Paper the
    token swap repaints every surface white while Streamlit keeps colouring
-   its own internals near-white: the navigation labels, button faces, input
+   its own widgets near-white: the navigation labels, button faces, input
    text and placeholders all went white-on-white. "Some fonts or elements
    show up, some do not" is precisely a light ground wearing a dark-theme
    text colour.
@@ -193,6 +193,20 @@ input::placeholder, textarea::placeholder { color: var(--ink-quaternary) !import
 [data-testid="stButtonGroup"] button[data-testid$="Active"] { color: var(--ink) !important; }
 [data-testid="stMain"], [data-testid="stSidebar"] { color: var(--ink); }
 .stMarkdown, .stMarkdown p, .stMarkdown li { color: var(--ink-secondary); }
+"""
+
+# ── The page grammar's role chip ────────────────────────────────────────────
+# Every section header and the call's card lead with the chip of the card they
+# are registered to (core.roles.CHIPS, ui.components.render_role_chip). It is
+# a neutral chip without the state dot — it says what a block is FOR, never
+# which way anything leans — and keeps the registry's casing, so
+# 'EVIDENCE→claim · does not move the call' reads as written. Token-only, so
+# it follows either theme.
+ROLE_CSS = """
+.role-chip { text-transform: none; letter-spacing: 0.04em; margin-right: var(--s2);
+             vertical-align: 1px; }
+.role-chip::before { display: none; }
+.hero-eyebrow .role-chip { margin-right: var(--s2); }
 """
 
 # Chart-theming constants below are read by Plotly, which cannot see CSS
@@ -310,7 +324,7 @@ def grid_rgba(alpha: float = 1.0) -> str:
 # ── Shared Plotly layout config ─────────────────────────────────────────────
 # Eliminates massive duplication across all tab files. chart_layout() and
 # style_axes() read the theme-aware _chart_theme(), so every chart in the app
-# flips with the appearance toggle without the six tab files needing to change
+# flips with the appearance toggle without a tab file needing to change
 # a single call site.
 
 # (PLOTLY_FONT and PLOTLY_HOVERLABEL lived here as "dark-theme defaults for
@@ -615,6 +629,7 @@ def inject_css(theme: str = "dark") -> None:
     else:
         css = "/* theme.css not found */"
 
+    css += ROLE_CSS
     if theme == "light":
         css += LIGHT_TOKENS
 
@@ -637,7 +652,7 @@ RUN_PHASES = (
     (1, 0, 19, "Data Acquisition"),
     (2, 20, 41, "Mūla Engine"),
     (3, 42, 75, "Swayam Engine"),
-    (4, 76, 95, "The Call"),
+    (4, 76, 95, "Compose & Grade"),
     (5, 96, 100, "Final Assembly"),
 )
 

@@ -41,8 +41,10 @@ os.environ.setdefault(
 import sys
 import time
 import warnings
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any, Callable, NamedTuple
 
 import html
 import numpy as np
@@ -91,6 +93,7 @@ from ui.components import (
     render_top_bar,
     render_notice_rail,
     render_rail_readout,
+    render_call_history,
     window_cutoff,
 )
 from ui.tabs.tab_mula import render_mula_tab
@@ -102,7 +105,7 @@ from ui.tabs.tab_data import render_data_tab
 # ── Data ─────────────────────────────────────────────────────────────────────
 from data.fetcher import fetch_commodity_dataset
 from data.calendars import trading_days_behind, resolve_exchange, session_today
-from data.prep import PrepError
+from data.prep import PrepError, history_fingerprint
 from data.universe import resolve_stock_symbol
 
 # ── Engines ──────────────────────────────────────────────────────────────────
@@ -172,6 +175,22 @@ _SESSION_RESULT_KEYS = _BUNDLE_KEYS + (
     "_swayam_fetch_cache", "_swayam_analysis_cache",
 )
 
+def _run_key(horizon: int, target: str, prep) -> str:
+    """The run's identity, the key its cached result is stored and restored under.
+
+    Target, h, the prepared history's fingerprint, its span, and a content
+    hash of EVERY prepared row through the newest. The fingerprint alone is
+    not enough: with a pooled-prior study it hashes only the rows up to the
+    session the study hashed (so it can be compared with the study's record),
+    and a value revised after that session — or the newest row ticking —
+    would otherwise restore a stale cached run.
+    """
+    data = prep.data
+    span = f"{prep.start.date()}_{data.index[-1].date()}"
+    content = history_fingerprint(data, list(data.columns), data.index[-1])
+    return f"fvo{horizon}|{target}|{prep.fingerprint}|{span}|{content}"
+
+
 def _clear_results() -> None:
     """Drop every run product from the session (the data frame is kept)."""
     for _k in _SESSION_RESULT_KEYS:
@@ -191,7 +210,7 @@ def _render_header() -> None:
     """
     render_header(
         title=f"{PRODUCT_NAME}",
-        tagline="Cross-Asset Fair Value · Macro-Residual Breadth · One Graded Call",
+        tagline="Cross-Asset Fair Value · Macro-Residual Breadth · One Claim, Graded as Issued",
     )
 
 
@@ -204,22 +223,22 @@ _SYSTEM_PANELS = (
     ("mula", "System 01", "Mūla", "The world's valuation",
      "Prices the target against the whole traded macro cross-section with a dynamic "
      "cointegrating regression on log price, then asks the question a trade depends on: "
-     "does price, not just fair value, close the gap? It makes the one call Tattva issues.",
+     "does price, not just fair value, close the gap? It makes the one claim Tattva acts on.",
      (("Estimator", "Recursive discounted DLM"),
       ("Equilibrium", "MP factors + asset blocks"),
       ("Reversion", "Price-side error correction"))),
     ("swayam", "System 02", "Swayam", "Short-window macro-residual breadth",
      "Reads the instrument's price through a bank of views, every one counted once; the "
      "views that can vote are anchored to the same macro panel, by a short rolling "
-     "regression. Its net breadth confirms or contradicts the claim, and scales the call "
-     "only once its own grade earns a weight.",
+     "regression. Its net breadth confirms or contradicts the claim, and scales it only "
+     "once its own grade earns a weight.",
      (("Signal", "MSF + MMR oscillator"),
       ("Breadth", "Net oversold share of views"),
       ("Weights", "Equal"))),
     ("grades", "System 03", "Grades", "Is the loop working?",
-     "Every part of the call is graded by one grader on the sessions it was issued: the "
-     "claim, each sizer and the call itself, against the drift-neutral forward return. "
-     "Nothing moves the call that has not earned it there.",
+     "One grader scores every part on the sessions it was issued: the claim, each sizer "
+     "and the verdict they compose, against the drift-neutral forward return. Nothing "
+     "acts that has not earned it there.",
      (("Grader", "Non-overlapping rank IC"),
       ("SE", "Circular-shift null"),
       ("Graded", "As issued, causally"))),
@@ -251,8 +270,8 @@ def _render_landing_page() -> None:
     st.markdown(
         """<div class="lede">
   <div class="lede-claim">One engine values the instrument against the world and makes
-    one claim; Tattva sizes it only by what its price-side grade has measured, and grades
-    the call on the sessions it was issued.</div>
+    one claim; Tattva scales it only by what its price-side grade has measured, and grades
+    the verdict on the sessions it was issued.</div>
   <div class="lede-cta">Pick an asset class and a target in the rail, then
     <strong>Run Analysis</strong>.</div>
 </div>""",
@@ -260,16 +279,18 @@ def _render_landing_page() -> None:
     )
 
     # ── Coverage — the app's own KPI grammar, not a bespoke number row ─────
-    render_section_header("Coverage", icon="layers")
+    render_section_header("Coverage", "What a run can be pointed at, and from when.",
+                          icon="layers", card="landing:coverage")
     render_kpi_strip(
         [
-            {"label": "Asset Classes", "value": str(_n_cat),
+            {"label": "Asset Classes", "value": str(_n_cat), "card": "landing:coverage",
              "subtext": "Commodities, FX, crypto, India and US indices, and any listed "
                         "stock by symbol"},
-            {"label": "Catalogue Targets", "value": str(_n_tgt),
+            {"label": "Catalogue Targets", "value": str(_n_tgt), "card": "landing:coverage",
              "subtext": "Every one runnable on free data; each carries its own "
                         "configuration, defaulting to its asset class's"},
             {"label": "Daily History", "value": f"Since {ANALYSIS_EPOCH:%Y}",
+             "card": "landing:coverage",
              "subtext": "One fixed start for every run, and every published value uses "
                         "only data available on its own date, so re-running extends the "
                         "record instead of rewriting it"},
@@ -279,7 +300,8 @@ def _render_landing_page() -> None:
     )
 
     # ── The three systems, as panels ──────────────────────────────────────
-    render_section_header("Systems", icon="cpu")
+    render_section_header("Systems", "The claim's engine, the sizer's engine and the grades "
+                          "that set what each may do.", icon="cpu", card="landing:systems")
     cols = st.columns(3, gap="small")
     for col, (cls, eyebrow, name, kicker, body, specs) in zip(cols, _SYSTEM_PANELS):
         with col:
@@ -297,18 +319,20 @@ def _render_landing_page() -> None:
                 )
 
     # ── What a run returns ────────────────────────────────────────────────
-    render_section_header("What a run returns", icon="target")
+    render_section_header("What a run returns", "One verdict per instrument, and everything "
+                          "it was composed and graded from.", icon="target",
+                          card="landing:returns")
     _out = (
-        ("One call, graded as issued", "Cheap, rich or fair against the cross-section, "
-                                       "sized by the claim's measured grade, with what limits "
-                                       "it named."),
-        ("Every grade, in one table", "The claim, both sizers and the call scored on "
-                                      "non-overlapping windows at the call's horizon: the "
-                                      "honest answer to whether each has paid."),
+        ("One verdict, graded as issued", "Cheap, rich or fair against the cross-section, "
+                                          "scaled by the claim's measured grade, with what "
+                                          "limits it named."),
+        ("Every grade, in one table", "The claim, both sizers and the verdict scored on "
+                                      "non-overlapping windows at one horizon: the honest "
+                                      "answer to whether each has paid."),
         ("Who closes the gap", "How much of the gap's closing price did, and how much fair "
                                "value did by moving toward price, measured rather than "
                                "assumed."),
-        ("The record", "Every series behind the call, joined by date and exportable."),
+        ("The record", "Every series behind the verdict, joined by date and exportable."),
     )
     # ONE markdown block, not four panels. These four cards are static text, so
     # they gain nothing from a Streamlit container and lose something real to
@@ -331,16 +355,15 @@ def _render_landing_page() -> None:
 
 
 def _render_claim_evidence(evidence: dict, edges: dict, horizon: int) -> None:
-    """Overview's EVIDENCE→claim block: who closes the gap, the claim by side, its unit.
+    """Overview's EVIDENCE→claim block: who closes the gap, and the claim by side.
 
     Read off the pipeline's evidence and the per-side claim grades; nothing is
     estimated here, and none of it moves the call. The claim is about PRICE,
     so whether price does the closing is measured and shown rather than
-    assumed.
+    assumed. (The claim's unit is on the Mūla page, once.)
     """
     gs = evidence.get("gap_split") or {}
-    cu = evidence.get("claim_unit") or {}
-    buy, sell = edges.get("claim:buy") or {}, edges.get("claim:sell") or {}
+    cheap, rich = edges.get("claim:buy") or {}, edges.get("claim:sell") or {}
 
     def _f(d, k):
         try:
@@ -352,41 +375,32 @@ def _render_claim_evidence(evidence: dict, edges: dict, horizon: int) -> None:
     share, se_share, b_fv = _f(gs, "price_share"), _f(gs, "se_share"), _f(gs, "b_fv")
     render_section_header(
         "Who Closes the Gap?",
-        "EVIDENCE → claim · does not move the call. When Mūla's gap was open, how much of its "
-        f"closing over the next {horizon} sessions did price do, and how much did fair value do "
-        "by moving toward price?",
-        icon="layers", accent="violet",
+        f"When Mūla's gap was open, how much of its closing over the next {horizon} sessions "
+        f"did price do, and how much did fair value do by moving toward price?",
+        icon="layers", accent="violet", card="overview:gap_split",
     )
-
-    def _side(e):
-        hit, base = _f(e, "hit"), _f(e, "base")
-        return f"{hit:.0f}% vs {base:.0f}%" if hit is not None and base is not None else "—"
-
     render_kpi_strip([
         {"label": "Price's share", "value": f"{share * 100:+.0f}%" if share is not None else "—",
          "subtext": (f"± {se_share * 100:.0f}% · of the gap closed in {horizon}D · "
                      f"{gs.get('n_win', 0)} windows" if se_share is not None else "not measured"),
-         "color_class": "neutral"},
+         "card": "overview:gap_split"},
         {"label": "Fair value toward price", "value": f"{b_fv:+.2f}" if b_fv is not None else "—",
-         "subtext": f"of each unit of gap, over {horizon}D", "color_class": "neutral"},
-        {"label": "BUY claims hit", "value": _side(buy),
-         "subtext": "vs the side-matched no-skill rate", "color_class": "neutral"},
-        {"label": "SELL claims hit", "value": _side(sell),
-         "subtext": "vs the side-matched no-skill rate", "color_class": "neutral"},
-        {"label": "The claim's unit",
-         "value": f"mean {cu['mean']:+.2f}σ" if _f(cu, "mean") is not None else "—",
-         "subtext": (f"SD {cu['sd']:.2f} · RICH:CHEAP {cu['rich_cheap']:.1f} · SELL share "
-                     f"{cu['sell_share']:.0%} · C12 contract "
-                     f"{'holds' if cu.get('passes') else 'fails'}"
-                     if _f(cu, "sd") is not None and _f(cu, "rich_cheap") is not None else "not measured"),
-         "color_class": "neutral"},
-    ], max_cols=5, key="overview-evidence")
+         "subtext": f"of each unit of gap, over {horizon}D", "card": "overview:gap_split"},
+    ], max_cols=2, key="overview-evidence")
     if share is not None and se_share is not None:
         render_note(
             f"While the gap was open, price closed {share:.0%} (± {se_share:.0%}) of it within "
             f"{horizon} sessions; fair value moving toward price did the rest. Tattva therefore "
             f"does not assume price does the closing: it acts only when the claim's price-side "
             f"grade clears the bar.")
+
+    def _side(e):
+        hit, base = _f(e, "hit"), _f(e, "base")
+        return (f"{hit:.0f}% vs {base:.0f}% expected" if hit is not None and base is not None
+                else "not yet graded")
+
+    render_note(f"The claim by side, against the side-matched no-skill rate: CHEAP claims hit "
+                f"{_side(cheap)}; RICH claims {_side(rich)}.")
 
 
 def _asof_status(signal: dict, ticker: str | None, today) -> dict:
@@ -443,7 +457,8 @@ def _call_readout_rows(verdict: dict) -> list[tuple[str, str, str]]:
     Pure, so a test can build them: this text is drawn on every page, outside
     any page's error boundary. The call's IC is formatted only when it is
     defined; a warmed-up call whose issued calls are all the same reads
-    'ungraded'.
+    'ungraded'. Only the issued call wears a direction's colour: the claim's
+    grade is a measurement, accented once it has earned trust.
     """
     act = verdict["action"]
     t, cg = verdict.get("claim_t"), verdict["call_grade"]
@@ -456,10 +471,139 @@ def _call_readout_rows(verdict: dict) -> list[tuple[str, str, str]]:
         ("Call", act, "long" if act == "BUY" else "short" if act == "SELL" else ""),
         ("Size", format_size(verdict["size"]), "accent" if verdict["size"] else ""),
         ("Claim t_post", f"{t:.2f}" if t is not None else "ungraded",
-         "caution" if not verdict["trust"] else "long"),
+         "accent" if verdict["trust"] else ""),
         ("Call grade", call_grade, ""),
         ("As of", f"{verdict['asof']:%d %b %Y}" if verdict.get("asof") is not None else "—", ""),
     ]
+
+
+def _command_meta(verdict: dict, horizon: int, asof_items: list[tuple[str, str]],
+                  window: str | None = None) -> list[tuple[str, str]]:
+    """The command bar's key/value items, built from the verdict.
+
+    The call and its size (never a '%'), the horizon from the next close with
+    how much of it has run since d* (the verdict's own count), then d* — or
+    'Valued as of' and the newest, withheld session (``asof_items``). A page
+    whose charts the window frames names it second.
+    """
+    elapsed = verdict["elapsed"]
+    meta = [("Call", verdict["action"] + (f" · size {format_size(verdict['size'])}"
+                                          if verdict["size"] else "")),
+            ("Horizon", f"{horizon}D from the next close"
+             + (f" · {elapsed} of {horizon} elapsed" if elapsed else "")),
+            *asof_items]
+    if window:
+        meta.insert(1, ("Window", window))
+    return meta
+
+
+# ─── The pages ───────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class PageContext:
+    """Everything a page draws from: one run's bundle, read once, and its window.
+
+    Every page body below takes this and nothing else, so a page cannot reach
+    for a value the others do not see — and a test can draw any page from a
+    synthetic bundle without running the pipeline (tests/test_render.py).
+    """
+
+    target: str
+    asset_class: str
+    cfg: Any
+    horizon: int
+    verdict: dict
+    edges: dict
+    evidence: dict
+    call_ts: pd.DataFrame | None
+    grades_ts: dict
+    priors_meta: dict
+    fvo_ts: pd.DataFrame | None
+    engine: Any
+    signal: dict
+    model_stats: dict
+    ts: pd.DataFrame
+    ts_filtered: pd.DataFrame
+    x_axis: pd.Series
+    selected_tf: str
+
+
+def _render_overview(ctx: PageContext) -> None:
+    """Overview — the call, in decision order.
+
+    1. CALL: the action and the one sentence that explains it;
+    2. GRADE→call: how the call has done on the sessions it was issued, or
+       'not yet graded' beside the class's pooled call grade;
+    3. the chain — the claim, what can void it, what it has earned, what
+       scales it — ending in the size's arithmetic;
+    4. EVIDENCE→claim: who closes the gap, and the claim by side;
+    5. the call's history: every issued session, the trust path, the size
+       terciles.
+
+    The first three are the one verdict; the rest moves nothing.
+    """
+    render_hero_card(ctx.verdict, priors_meta=ctx.priors_meta, asset_class=ctx.asset_class)
+    _render_claim_evidence(ctx.evidence, ctx.edges, ctx.horizon)
+    price = (ctx.fvo_ts["Price"] if ctx.fvo_ts is not None and "Price" in ctx.fvo_ts.columns
+             else None)
+    render_call_history(ctx.call_ts, price, ctx.edges.get("call"), ctx.horizon)
+
+
+def _render_mula(ctx: PageContext) -> None:
+    render_mula_tab(ctx.engine, ctx.ts_filtered, ctx.x_axis, ctx.signal, ctx.model_stats,
+                    ctx.target, verdict=ctx.verdict, edges=ctx.edges, evidence=ctx.evidence,
+                    call_ts=ctx.call_ts, horizon=ctx.horizon)
+
+
+def _render_swayam(ctx: PageContext) -> None:
+    render_swayam_tab(ctx.verdict, ctx.edges, ctx.cfg, selected_tf=ctx.selected_tf,
+                      horizon=ctx.horizon)
+
+
+def _render_grades(ctx: PageContext) -> None:
+    render_grades_tab(ctx.edges, ctx.grades_ts, ctx.call_ts, ctx.verdict, horizon=ctx.horizon,
+                      priors_meta=ctx.priors_meta)
+
+
+def _render_system(ctx: PageContext) -> None:
+    render_diagnostics_tab(ctx.engine, ctx.target)
+
+
+def _render_data(ctx: PageContext) -> None:
+    render_data_tab(ctx.ts_filtered, ctx.ts, ctx.target)
+
+
+class PageSpec(NamedTuple):
+    """One page: its title, icon, navigation section, URL slug, whether the
+    chart window frames it, and its body."""
+
+    title: str
+    icon: str
+    section: str
+    slug: str
+    windowed: bool
+    body: Callable[[PageContext], None]
+
+
+#: The pages, one role group each, in navigation order: the call
+#: (Overview), the claim's engine and the Swayam sizer's engine, then is the
+#: loop working (every grade), what it runs on, and the record.
+PAGES: tuple[PageSpec, ...] = (
+    PageSpec("Overview", ":material/dashboard:", "", "overview", False, _render_overview),
+    PageSpec("Mūla", ":material/monitoring:", "Engines", "mula", True, _render_mula),
+    PageSpec("Swayam", ":material/hub:", "Engines", "swayam", True, _render_swayam),
+    PageSpec("Grades", ":material/fact_check:", "System", "grades", False, _render_grades),
+    PageSpec("System", ":material/monitor_heart:", "System", "system", False, _render_system),
+    PageSpec("Data", ":material/table_chart:", "System", "data", True, _render_data),
+)
+
+
+def render_page(title: str, ctx: PageContext) -> None:
+    """Draw page ``title``'s body (below the command bar) from ``ctx``."""
+    spec = next((p for p in PAGES if p.title == title), None)
+    if spec is None:
+        raise KeyError(f"no page {title!r}; the pages are {[p.title for p in PAGES]}")
+    spec.body(ctx)
 
 
 #: The DURABLE record of the appearance choice — a plain session key, never a
@@ -555,7 +699,7 @@ def _render_footer() -> None:
 
 def main():
     st.set_page_config(
-        page_title="TATTVA | Unified Convergence",
+        page_title="TATTVA | One Claim, Graded",
         page_icon="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzNENkZFOCIgc3Ryb2tlLXdpZHRoPSIyIi8+PHBhdGggZD0iTTggMTRsMy01IDIgMyAzLTQiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzNENkZFOCIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4=",
         layout="wide", initial_sidebar_state="expanded",
     )
@@ -766,8 +910,8 @@ def main():
         # A session that HAD a run and no longer has its data is a different
         # state from a cold start, and it must not be shown as one. It happens
         # when the server drops session_state under memory pressure — routine
-        # on Streamlit Community Cloud, where the results cache holds up to six
-        # full pipeline results. The symptom was an app that "went back to the
+        # on Streamlit Community Cloud, where the results cache holds up to
+        # _RESULTS_CACHE_MAX full pipeline results. The symptom was an app that "went back to the
         # landing page with the rail still looking loaded, and clicking did
         # nothing": the rail read `run_analysis` and drew itself as live, while
         # the page had no frame to render and every control pointed at state
@@ -1053,11 +1197,7 @@ def main():
                      f"{_pub}  ({_icfg.fvo_burn_in} burn-in rows published as Valid=False)")
         console.checkpoint(f"Target history ≥ {MIN_DATA_POINTS}", "OK")
 
-    # The run's identity: target, h, the prepared history's fingerprint (which
-    # covers the cross-section's membership and every settled value) and its
-    # span, whose end carries the newest, still-unsettled row.
-    _date_range = f"{prep.start.date()}_{data.index[-1].date()}"
-    cache_key = f"fvo{FWD_HORIZON}|{active_target}|{prep.fingerprint}|{_date_range}"
+    cache_key = _run_key(FWD_HORIZON, active_target, prep)
     if st.session_state.get("engine_cache") != cache_key:
         # ── Restore from the per-config result cache if this exact config was
         # already computed this session (e.g. the user switched commodities and
@@ -1075,7 +1215,7 @@ def main():
             del st.session_state["engine"]
 
         # ════ RUN HEADER ════
-        console.header("TATTVA — Unified Convergence Analysis", f"v{VERSION}")
+        console.header("TATTVA — One Claim, Graded as Issued", f"v{VERSION}")
         console.main_header("ANALYSIS CONFIGURATION", {
             "Run ID": generate_run_id(),
             "Target": active_target,
@@ -1090,7 +1230,7 @@ def main():
         # so the bar continues from where the fetch left it (~15%) with no gap.
 
         # ── Phase 1: Data Acquisition ─────────────────────────────────────
-        # HORIZON-INDEPENDENT: the target's OHLCV and Swayam's driver pool were
+        # HORIZON-FREE: the target's OHLCV and Swayam's driver pool were
         # read above, before prep, keyed by target and panel fingerprint.
         console.start_phase("DATA ACQUISITION", 1, 5)
         console.section("Target OHLCV")
@@ -1287,8 +1427,8 @@ def main():
         # Mūla's published frame, date-indexed. The prepared spine has one row
         # per session, so the engine's row positions and these dates agree.
         fvo_ts = fvo_frame(engine, prep)
-        progress_bar(progress_container, 80, "Composing the Call",
-                     f"Every session · {FWD_HORIZON}D from the next close")
+        progress_bar(progress_container, 80, "Composing Every Session",
+                     f"{FWD_HORIZON}D from the next close · graded as issued")
         _lag = int(knob("EXECUTION_LAG"))
         try:
             _priors = load_priors(FWD_HORIZON, _lag)
@@ -1316,7 +1456,7 @@ def main():
                                          and np.isfinite(_e.get("se", np.nan))
                                          else _e.get("status") or "not graded"))
         console.end_phase("THE CALL")
-        progress_bar(progress_container, 95, "The Call Composed",
+        progress_bar(progress_container, 95, "Composed and Graded",
                      f"{_v['action']} · composed at {len(_asm.call_ts)} sessions")
 
         # ── Phase 5: Final Assembly ───────────────────────────────────────
@@ -1443,7 +1583,7 @@ def main():
                 "warning", "Partial latest session",
                 (f"The newest session ({data.index[-1]:%d %b %Y}) failed the engine's completeness "
                  f"gate: its markets were open, but too few of them posted in this fetch, so it is "
-                 f"not valued. The call is as of {_ds}; refresh once those markets post."),
+                 f"not valued. The verdict is as of {_ds}; refresh once those markets post."),
             )
 
         # The target lagging the panel: the spine keeps only sessions the TARGET
@@ -1522,20 +1662,11 @@ def main():
         — on Overview, Grades and System it would change nothing. (A macro
         ticker tape used to run above the bar; it moved nothing, and went.)
         """
-        # 'k of h sessions elapsed': how much of the call's horizon has run
-        # since d*, the session it was made on (the verdict's own count).
-        _elapsed = verdict["elapsed"]
-        _meta = [("Call", verdict["action"] + (f" · size {format_size(verdict['size'])}"
-                                               if verdict["size"] else "")),
-                 ("Horizon", f"{FWD_HORIZON}D from the next close"
-                  + (f" · {_elapsed} of {FWD_HORIZON} elapsed" if _elapsed else "")),
-                 *_cb_asof_items]
-        if windowed:
-            _meta.insert(1, ("Window", selected_tf))
         render_top_bar(
             target=active_target, price=_cb_price, change_pct=_cb_chg,
             status_label=_cb_status_label, status_tone=_cb_status_tone,
-            meta_items=_meta,
+            meta_items=_command_meta(verdict, FWD_HORIZON, _cb_asof_items,
+                                     selected_tf if windowed else None),
         )
         render_notice_rail(_notices)
 
@@ -1547,62 +1678,31 @@ def main():
             console.warning(f"{name} page failed: {type(e).__name__}: {e}")
             render_warning_box(title=f"{name} could not be drawn", content=str(e))
 
-    # ─── App shell — one real page per analytical surface (st.navigation).
-    # Every page below is a THIN wrapper over the run above: none recompute
-    # the pipeline, so every page reads the same objects.
-    def _page_overview() -> None:
-        """Overview — the call, its grade and the chain behind it, in decision order.
+    # ─── App shell — one real page per role group (st.navigation, PAGES).
+    # Every page is a THIN wrapper over the run above: none recompute the
+    # pipeline, and every body reads the one PageContext, so every page reads
+    # the same objects.
+    ctx = PageContext(
+        target=active_target, asset_class=_inst.asset_class, cfg=_icfg, horizon=FWD_HORIZON,
+        verdict=verdict, edges=_edges, evidence=st.session_state.get("evidence") or {},
+        call_ts=st.session_state.get("call_ts"), grades_ts=st.session_state.get("grades_ts") or {},
+        priors_meta=st.session_state.get("priors_meta") or {},
+        fvo_ts=st.session_state.get("fvo_ts"), engine=engine, signal=signal,
+        model_stats=model_stats, ts=ts, ts_filtered=ts_filtered, x_axis=x_axis,
+        selected_tf=selected_tf,
+    )
 
-        The hero is the call and the one sentence that explains it; under it,
-        how the call has done on the sessions it was issued (GRADE→call); then
-        the chain — the claim, what can void it, what it has earned, what
-        scales it — and the size's arithmetic. All of it is the one verdict.
-        Below, labelled evidence about the claim, which moves nothing.
-        """
-        _top_bar()
-        render_hero_card(verdict)
-        _render_claim_evidence(st.session_state.get("evidence") or {}, _edges, FWD_HORIZON)
+    def _nav_page(spec: PageSpec):
+        def _page() -> None:
+            _top_bar(windowed=spec.windowed)
+            _safe_render(spec.title, lambda: spec.body(ctx))
+        default = spec is PAGES[0]
+        return st.Page(_page, title=spec.title, icon=spec.icon, default=default,
+                       url_path=None if default else f"_page_{spec.slug}")
 
-    def _page_mula() -> None:
-        _top_bar(windowed=True)
-        _safe_render("Mūla", lambda: render_mula_tab(
-            engine, ts_filtered, x_axis, signal, model_stats, active_target,
-            verdict=verdict, edges=_edges, evidence=st.session_state.get("evidence") or {},
-            call_ts=st.session_state.get("call_ts"), horizon=FWD_HORIZON))
-
-    def _page_swayam() -> None:
-        _top_bar(windowed=True)
-        _safe_render("Swayam", lambda: render_swayam_tab(
-            verdict, _edges, _icfg, selected_tf=selected_tf, horizon=FWD_HORIZON))
-
-    def _page_grades() -> None:
-        _top_bar()
-        _safe_render("Grades", lambda: render_grades_tab(
-            _edges, st.session_state.get("grades_ts") or {}, st.session_state.get("call_ts"),
-            verdict, horizon=FWD_HORIZON, priors_meta=st.session_state.get("priors_meta") or {}))
-
-    def _page_system() -> None:
-        _top_bar()
-        _safe_render("System", lambda: render_diagnostics_tab(engine, active_target))
-
-    def _page_data() -> None:
-        _top_bar(windowed=True)
-        _safe_render("Data", lambda: render_data_tab(ts_filtered, ts, active_target))
-
-    pages = {
-        "": [st.Page(_page_overview, title="Overview", icon=":material/dashboard:", default=True)],
-        # The claim's engine (Mūla) and the Swayam sizer's engine.
-        "Engines": [
-            st.Page(_page_mula, title="Mūla", icon=":material/monitoring:"),
-            st.Page(_page_swayam, title="Swayam", icon=":material/hub:"),
-        ],
-        # Is the loop working (every grade), what it runs on, and the record.
-        "System": [
-            st.Page(_page_grades, title="Grades", icon=":material/fact_check:"),
-            st.Page(_page_system, title="System", icon=":material/monitor_heart:"),
-            st.Page(_page_data, title="Data", icon=":material/table_chart:"),
-        ],
-    }
+    pages: dict[str, list] = {}
+    for _spec in PAGES:
+        pages.setdefault(_spec.section, []).append(_nav_page(_spec))
     st.session_state.pop("_pending_notices", None)     # shown on this render
     st.navigation(pages, position="sidebar").run()
 

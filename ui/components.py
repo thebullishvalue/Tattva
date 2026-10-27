@@ -8,18 +8,28 @@ Every function here emits markup for classes defined in ui/theme.css and
 nothing else: no inline colours, no inline type. If a component needs a new
 look, the rule belongs in the stylesheet, so the light theme keeps working
 as a token swap rather than needing a parallel set of Python branches.
+
+The page grammar is enforced here, not by care: every KPI item and every
+section header names a card registered in ``core.roles.CARDS`` and carries
+that card's fixed role chip; a KPI item that shows a lean carries its own
+grade (``edge``), printed as IC ± SE (t, n/h). An unregistered card, or a lean
+without its grade, raises instead of drawing.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import html as html_mod
+import math
+from collections.abc import Sequence
 from contextlib import contextmanager as _contextmanager
 
 import pandas as pd
 import numpy as np
 import streamlit as st
 from streamlit.components.v1 import html as _components_html
+
+from core.roles import card_role, chip as _chip
 
 
 # ── SVG Icons (inline, no external deps) — with ARIA labels for accessibility
@@ -95,20 +105,39 @@ def get_icon(name: str, size: int = 18, stroke_width: float | None = None) -> st
     )
 
 
+def render_role_chip(card: str) -> str:
+    """The role chip of a registered card, as markup: fixed text from ``core.roles.CHIPS``.
+
+    'EVIDENCE→claim · does not move the call', 'SIZER→call · ×1.00 until its
+    own grade earns a weight', 'GRADE→claim', 'CALL'. Neutral-toned whatever
+    the role: a chip says what a card is for, never which way it leans. An
+    unregistered card raises.
+    """
+    role, _target = card_role(card)
+    return (f'<span class="chip chip-neutral role-chip" data-role="{html_mod.escape(role.kind)}">'
+            f'{html_mod.escape(_chip(card))}</span>')
+
+
 def render_section_header(
     title: str,
     description: str = "",
     icon: str = "chart",
     accent: str = "",
+    *,
+    card: str,
 ) -> None:
-    """Render a styled section header with icon, title, and optional description.
+    """Render a section header: icon, title, the card's role chip and a description.
 
     Args:
         title: Section title (rendered uppercase).
         description: Optional one-line description below title.
         icon: Key from ICONS dict.
         accent: CSS color class — "", "cyan", "emerald", "violet", "rose".
+        card: The section's card in ``core.roles.CARDS`` (required: an
+            unregistered card raises). Its chip leads the description, so a
+            section states its role in the registry's words, not its own.
     """
+    chip_html = render_role_chip(card)
     svg = get_icon(icon, size=16)
     icon_class = f"icon {accent}" if accent else "icon"
     hdr_class = f"section-hdr {accent}" if accent else "section-hdr"
@@ -118,9 +147,9 @@ def render_section_header(
     # could not be placed and fell back to flowing under the title with its
     # own margin. That is the gap that made the subtitle read as a detached
     # paragraph.
-    desc_html = f'<div class="desc">{html_mod.escape(description)}</div>' if description else ""
+    desc_html = f'<div class="desc">{chip_html} {html_mod.escape(description)}</div>'
     st.markdown(
-        f'<div class="{hdr_class}">'
+        f'<div class="{hdr_class}" data-card="{html_mod.escape(card)}">'
         f'<div class="{icon_class}">{svg}</div>'
         f'<div class="text"><h3>{html_mod.escape(title)}</h3></div>'
         f'{desc_html}'
@@ -314,7 +343,7 @@ def render_chart_panel(
 
 
 #: Calendar span of each chart window. Charts cut on calendar time (a 6M
-#: window is six calendar months whatever the instrument's session count);
+#: window is 6 calendar months whatever the instrument's session count);
 #: TIMEFRAME_TRADING_DAYS is the same windows in sessions, for the one path
 #: that has no dates. Keyed identically — asserted — so the two cannot drift.
 _WINDOW_MONTHS = {"3M": 3, "6M": 6, "1Y": 12, "2Y": 24}
@@ -401,6 +430,42 @@ def render_chip(label: str, tone: str = "neutral", *, as_html: bool = False) -> 
     return None
 
 
+def _finite(x) -> float | None:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def edge_text(edge: dict | None) -> str:
+    """A grade as a lean's subtext: 'IC +0.026 ± 0.075 (t 0.35, n/h 136)'.
+
+    ``edge`` is one of the pipeline's grades (an ``edges`` entry). With no IC, SE or t yet it
+    says so, with the windows it has: an ungraded lean is never shown bare.
+    """
+    e = edge or {}
+    ic, se, t = (_finite(e.get(k)) for k in ("ic", "se", "t"))
+    n_win = int(e.get("n_win") or 0)
+    if ic is None or se is None or t is None:
+        return f"IC not yet graded (n/h {n_win})"
+    return f"IC {ic:+.3f} ± {se:.3f} (t {t:.2f}, n/h {n_win})"
+
+
+def class_pool(priors_meta: dict | None, asset_class: str | None, obj: str) -> dict | None:
+    """The pooled-prior study's class grade of ``obj``: ``summary[class][obj]``, or None.
+
+    Read off the bundle's ``priors_meta`` (the study file's provenance and
+    results): ``{mu, se_mu, tau, k, asof}``. None when no study is loaded or
+    the class has no graded member for the object.
+    """
+    pm = priors_meta or {}
+    if pm.get("status") != "loaded" or not asset_class:
+        return None
+    row = ((pm.get("summary") or {}).get(asset_class) or {}).get(obj) or {}
+    return row if _finite(row.get("mu")) is not None else None
+
+
 def render_metric_card(
     label: str,
     value: str,
@@ -408,6 +473,10 @@ def render_metric_card(
     color_class: str = "neutral",
     tooltip: str = "",
     icon: str = "",
+    *,
+    card: str,
+    edge: dict | None = None,
+    lean: bool = False,
 ) -> None:
     """Render a terminal-styled metric card with optional tooltip.
 
@@ -418,7 +487,18 @@ def render_metric_card(
         color_class: Semantic color — "neutral", "success", "danger", "warning", "info", "violet".
         tooltip: Optional hover explanation text.
         icon: Optional ICONS key — small icon inlined before the label.
+        card: The card in ``core.roles.CARDS`` this item shows (required; an
+            unregistered card raises).
+        edge: The grade of what the card reads (an ``edges`` entry), appended to
+            the subtext as IC ± SE (t, n/h).
+        lean: The value is a lean (a direction): it must carry its ``edge``.
     """
+    card_role(card)
+    if lean and not isinstance(edge, dict):
+        raise ValueError(f"KPI {label!r} shows a lean and carries no grade: a lean is drawn "
+                         f"with its own IC ± SE (pass its edge)")
+    if edge is not None:
+        subtext = f"{subtext} · {edge_text(edge)}" if subtext else edge_text(edge)
     tooltip_html = ""
     if tooltip:
         tooltip_html = (
@@ -432,8 +512,10 @@ def render_metric_card(
 
     sub_metric_html = f'<div class="sub-metric">{html_mod.escape(subtext)}</div>' if subtext else ""
     icon_html = f'<span class="card-icon">{get_icon(icon, size=12)}</span> ' if icon else ""
+    lean_attr = ' data-lean="1"' if lean else ""
     st.markdown(
-        f'<div class="metric-card {html_mod.escape(color_class)}">'
+        f'<div class="metric-card {html_mod.escape(color_class)}" '
+        f'data-card="{html_mod.escape(card)}"{lean_attr}>'
         f'<span class="label">{icon_html}{html_mod.escape(label)}</span>'
         f"<h2>{html_mod.escape(value)}</h2>"
         f"{sub_metric_html}"
@@ -447,13 +529,23 @@ def render_kpi_strip(items: list[dict], *, max_cols: int = 5, key: str = "kpi-st
     """Lay out ``render_metric_card`` items in rows of at most ``max_cols``.
 
     Each item is the keyword set ``render_metric_card`` takes: ``label``,
-    ``value``, and optionally ``subtext``/``color_class``/``tooltip``/
-    ``icon``. Used for the Overview page's KPI row — caps row width so cards
-    never squeeze past legibility (wraps to a second row instead of the
-    6-wide layouts elsewhere in the app that get tight on narrow viewports).
+    ``value``, ``card`` (required: a key of ``core.roles.CARDS``), and
+    optionally ``subtext``/``color_class``/``tooltip``/``icon``/``edge``/
+    ``lean``. Every item is checked before any is drawn, so a strip with one
+    unregistered card, or one lean without its grade, raises instead of
+    drawing half a row. Caps row width so cards never squeeze past
+    legibility (wraps to a second row instead).
     """
     if not items:
         return
+    for item in items:
+        if not item.get("card"):
+            raise ValueError(f"KPI {item.get('label')!r} names no card: every KPI is registered "
+                             f"in core.roles.CARDS")
+        card_role(item["card"])
+        if item.get("lean") and not isinstance(item.get("edge"), dict):
+            raise ValueError(f"KPI {item.get('label')!r} shows a lean and carries no grade: a "
+                             f"lean is drawn with its own IC ± SE (pass its edge)")
     with st.container(key=key):
         for i in range(0, len(items), max_cols):
             row = items[i:i + max_cols]
@@ -467,6 +559,9 @@ def render_kpi_strip(items: list[dict], *, max_cols: int = 5, key: str = "kpi-st
                         color_class=item.get("color_class", "neutral"),
                         tooltip=item.get("tooltip", ""),
                         icon=item.get("icon", ""),
+                        card=item["card"],
+                        edge=item.get("edge"),
+                        lean=bool(item.get("lean")),
                     )
 
 
@@ -491,7 +586,7 @@ def render_header(title: str, tagline: str) -> None:
     )
 
 
-def render_nav_brand(title: str = "TATTVA", tagline: str = "तत्त्व · Unified Convergence") -> None:
+def render_nav_brand(title: str = "TATTVA", tagline: str = "तत्त्व · One Claim, Graded") -> None:
     """Render the control rail's brand block.
 
     The mark is split so the second half carries the accent — a product mark
@@ -715,24 +810,29 @@ _TABLE_FONTS = ("https://fonts.googleapis.com/css2?"
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  THE CALL — the hero, its grade and its chain
+#  THE CALL — the hero, its grade, its chain and its history
 # ═══════════════════════════════════════════════════════════════════════
 #
 # Everything here formats ONE object, the verdict (core.call.verdict_from_row
-# on call_ts at d*): nothing is computed, thresholded or re-derived, so the
-# card, the command bar and the rail cannot disagree. The card reads top-down
-# as the decision itself: the action and the sentence that explains it, then
-# what limits it; how the call has done on the sessions it was issued; then
-# the chain that produced it, in decision order, ending in the size's
-# arithmetic. The size is a unitless index and is never printed as a '%'.
+# on call_ts at d*), and the call's own record (call_ts, edges['call']):
+# nothing is computed, thresholded or re-derived, so the card, the command bar
+# and the rail cannot disagree. Overview reads top-down as the decision
+# itself: the action and the sentence that explains it, then what limits it;
+# how the call has done on the sessions it was issued; then the chain that
+# produced it, in decision order, ending in the size's arithmetic. The size is
+# a unitless index and is never printed as a '%'. These are the call-path
+# renderers: with core.call, the command bar and the rail they are the only
+# code that words the call (tests/test_copy.py holds the reserved words to
+# them).
 
-from core.call import edge_periods, format_size  # noqa: E402
+from core.call import ACTIONS, edge_periods, format_size  # noqa: E402
 from core.knobs import knob as _knob  # noqa: E402
+from core.roles import CHAIN  # noqa: E402
 from core.semantics import edge_tier as _t_tier  # noqa: E402
 
 
 def edge_tier(edge: dict | None) -> tuple[str, str]:
-    """The label of a grade (``series_edge``'s dict) — one scale, from ``core.semantics.edge_tier``.
+    """The label of a grade (an ``edges`` entry) — one scale, from ``core.semantics.edge_tier``.
 
     ``(label, tone)`` on the grade's own t: |t| < 1 is never an edge, and a
     grade measured against a lean leaves it neutral.
@@ -740,58 +840,81 @@ def edge_tier(edge: dict | None) -> tuple[str, str]:
     return _t_tier((edge or {}).get("t"))
 
 
-#: Card class per action: only an issued call is coloured as a direction.
-_ACTION_CLASS = {"BUY": "buy", "SELL": "sell"}
+def _action_class(action: str) -> str:
+    """The card class of an action: only an issued call is coloured as a direction."""
+    return action.lower() if action in ACTIONS[3:] else "hold"
 
 
-def _render_call_grade(cg: dict, horizon: int) -> None:
-    """The GRADE→call strip: the call graded on the sessions it was issued."""
-    def pct(v):
-        return f"{v * 100:+.2f}%" if v is not None else "—"
+def _pct(v) -> str:
+    """A drift-neutral payoff (a log return) in percent, or an em dash."""
+    v = _finite(v)
+    return f"{v * 100:+.2f}%" if v is not None else "—"
 
-    ip, hp = cg.get("issued_payoff"), cg.get("held_payoff")
+
+def _render_call_grade(cg: dict, horizon: int, pool: dict | None, pool_label: str) -> None:
+    """The GRADE→call strip: the call graded on the sessions it was issued.
+
+    Graded, its IC ± SE (t, n/h) on the issued sessions; below the warm-up,
+    'not yet graded: k of 30', beside the class's pooled call grade from the
+    pooled-prior study (``pool``, or ``pool_label`` saying why there is none).
+    Then coverage, hit against the side-matched base, the issued sessions'
+    drift-neutral payoff against the held ones', and the prospective record.
+    """
+    ip, hp = cg.get("issued_payoff") or {}, cg.get("held_payoff") or {}
     warm = _knob("GRADE_WARMUP_WIN")
     prospective = cg.get("prospective") or {}
-    pooled = cg.get("pooled") or "no pooled class grade"
+    card = "overview:call_grade"
+    n_win = int(cg.get("n_win") or 0)
     if cg.get("graded") and None not in (cg.get("ic"), cg.get("se"), cg.get("t")):
-        value, sub = f"{cg['ic']:+.3f}", f"± {cg['se']:.3f} · t {cg['t']:.2f} · {cg['label']}"
-    elif cg.get("n_win", 0) < warm:
-        value = "not yet graded"
-        sub = f"{cg.get('n_win', 0)} of {warm} independent issued windows · {pooled}"
-    else:                                            # warmed up, but nothing to rank
-        value, sub = "ungraded", f"{cg.get('status', 'ungraded')} · {pooled}"
-    render_kpi_strip([
-        {"label": "Call grade · as issued", "value": value, "subtext": sub,
-         "color_class": "neutral"},
+        items = [{"label": "Call grade · as issued", "value": f"{cg['ic']:+.3f}",
+                  "subtext": f"± {cg['se']:.3f} (t {cg['t']:.2f}, n/h {n_win}) · {cg['label']}",
+                  "card": card}]
+    else:
+        items = [
+            {"label": "Call grade · as issued",
+             "value": "not yet graded" if n_win < warm else "ungraded",
+             "subtext": (f"{n_win} of {warm} non-overlapping issued windows" if n_win < warm
+                         else str(cg.get("status") or "ungraded")), "card": card},
+            {"label": "Class pooled call grade",
+             "value": f"{pool['mu']:+.3f}" if pool else "none",
+             "subtext": (f"± {pool['se_mu']:.3f} · k {int(pool['k'])} · {pool_label}" if pool
+                         else pool_label), "card": card},
+        ]
+    items += [
         {"label": "Coverage", "value": f"{cg.get('issued_n', 0)} of {cg.get('claim_n', 0)}",
-         "subtext": "claim sessions on which a call was issued", "color_class": "neutral"},
+         "subtext": (f"claim sessions on which a call was issued ({cg['coverage']:.0%})"
+                     if cg.get("coverage") is not None
+                     else "claim sessions on which a call was issued"), "card": card},
         {"label": "Hit vs base",
          "value": (f"{cg['hit']:.0f}% vs {cg['base']:.0f}%"
                    if cg.get("hit") is not None and cg.get("base") is not None else "—"),
-         "subtext": "issued calls, against the side-matched no-skill rate", "color_class": "neutral"},
+         "subtext": "issued calls, against the side-matched no-skill rate", "card": card},
         {"label": "Issued vs held",
-         "value": f"{pct((ip or {}).get('mean'))} / {pct((hp or {}).get('mean'))}",
+         "value": f"{_pct(ip.get('mean'))} / {_pct(hp.get('mean'))}",
          "subtext": (f"drift-neutral {horizon}D claim payoff · n/h "
-                     f"{(ip or {}).get('n_win', 0)} / {(hp or {}).get('n_win', 0)}"),
-         "color_class": "neutral"},
+                     f"{ip.get('n_win', 0)} / {hp.get('n_win', 0)}"), "card": card},
         {"label": "Prospective record", "value": f"{prospective.get('n_win', 0)} windows",
-         "subtext": prospective.get("status", ""), "color_class": "neutral"},
-    ], max_cols=5, key="call-grade")
+         "subtext": prospective.get("status", ""), "card": card},
+    ]
+    render_kpi_strip(items, max_cols=6, key="call-grade")
 
 
-def render_hero_card(verdict: dict) -> None:
+def render_hero_card(verdict: dict, *, priors_meta: dict | None = None,
+                     asset_class: str | None = None) -> None:
     """The call, its grade and its chain — Overview's first three blocks.
 
     1. The CALL: the action word, the size beside it (when a call is issued),
        the headline, what limits it, and any caveat on d*.
-    2. GRADE→call: the call graded on the sessions it was issued.
+    2. GRADE→call: the call graded on the sessions it was issued, or 'not yet
+       graded: k of 30' beside the class's pooled call grade
+       (``priors_meta['summary'][asset_class]['call']``).
     3. The chain: one row per role in decision order — claim, preconditions,
        trust, each sizer, size — each with its reading, its grade and its
        effect, ending in the size's arithmetic.
     """
     esc = html_mod.escape
     act, h = verdict["action"], int(verdict["horizon_days"])
-    cls = _ACTION_CLASS.get(act, "hold")
+    cls = _action_class(act)
     size_txt = f"size {format_size(verdict['size'])}"
     formula = verdict["size_formula"] if verdict["direction"] else "no claim to size"
     asof = verdict.get("asof")
@@ -799,10 +922,10 @@ def render_hero_card(verdict: dict) -> None:
     caveat = (f'<div class="hero-risk">{esc(verdict["caveat"])}</div>'
               if verdict.get("caveat") else "")
     st.markdown(
-        f"""<div class="hero-card {cls}">
+        f"""<div class="hero-card {cls}" data-card="overview:call">
   <div class="hero-top">
     <div class="hero-signal-block">
-      <div class="hero-eyebrow">Tattva &bull; {h}-session call from the next close</div>
+      <div class="hero-eyebrow">{render_role_chip("overview:call")} Tattva &bull; {h}-session call from the next close</div>
       <div class="hero-signal">{esc(verdict["word"])}</div>
     </div>
     <div class="hero-conviction-block">
@@ -819,23 +942,43 @@ def render_hero_card(verdict: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    _render_call_grade(verdict["call_grade"], h)
-    render_gate_rows(verdict)
+    pm = priors_meta or {}
+    pool = class_pool(pm, asset_class, "call")
+    if pool:
+        pool_label = f"{asset_class}, study {pm.get('run_date')}"
+    elif pm.get("status") == "loaded":
+        pool_label = f"the study graded no {asset_class or 'class'} member's call"
+    else:
+        pool_label = f"study not yet run: {pm.get('label') or 'no pooled prior'}"
+    render_section_header(
+        "Call Grade — As Issued",
+        f"The call graded on the sessions it was issued, by the one grader: its rank IC against "
+        f"the drift-neutral {h}-session return from the next close, how often a claim was "
+        f"issued, its hit against the side-matched no-skill rate, and the payoff of the "
+        f"sessions it issued against those it held.",
+        icon="target", accent="accent", card="overview:call_grade",
+    )
+    _render_call_grade(verdict["call_grade"], h, pool, pool_label)
+    render_gate_rows(verdict, CHAIN)
 
 
-def render_gate_rows(verdict: dict, keys: "list[str] | None" = None) -> None:
+def render_gate_rows(verdict: dict, keys: Sequence[str]) -> None:
     """The verdict's chain rows — the ones Overview draws — for ``keys``.
 
     ``keys`` are chain keys (``core.roles.CHAIN``: claim, precondition, trust,
     each ``sizer:<name>``, size), drawn in decision order whatever order they
-    are given in; None draws the whole chain, with the size's arithmetic as
-    its foot. An engine page opens with its own rows through this, so it reads
-    the same numbers, in the same words, as Overview: nothing is re-derived.
+    are given in; a key that is not a chain row raises. With ``size`` among
+    them the rows end in the size's arithmetic. Overview draws the whole chain
+    and an engine page opens with its own rows through this, so it reads the
+    same numbers, in the same words, as Overview: nothing is re-derived.
     """
+    want = set(keys)
+    if want - set(CHAIN):
+        raise KeyError(f"not chain rows: {sorted(want - set(CHAIN))}; the chain is {CHAIN}")
     esc = html_mod.escape
-    cls = _ACTION_CLASS.get(verdict["action"], "hold")
+    cls = _action_class(verdict["action"])
     binding = f"sizer:{verdict['binding']}" if verdict.get("binding") else None
-    chain = [r for r in verdict["chain"] if keys is None or r["key"] in keys]
+    chain = [r for r in verdict["chain"] if r["key"] in want]
     if not chain:
         return
     rows = "".join(
@@ -849,28 +992,145 @@ def render_gate_rows(verdict: dict, keys: "list[str] | None" = None) -> None:
         f'</div>'
         for r in chain
     )
-    eyebrow = ("The chain &bull; in decision order" if keys is None
+    eyebrow = ("The chain &bull; in decision order" if want == set(CHAIN)
                else "The chain &bull; as Overview reads it")
     foot = (f'<div class="hero-foot">{esc(verdict["size_formula"])} &mdash; trust is the claim&rsquo;s '
             f'earned base size; a sizer is &times;1.00 until its own grade earns a weight.</div>'
-            if keys is None else "")
+            if "size" in want else "")
     st.markdown(
-        f'<div class="hero-card {cls}"><div class="hero-eyebrow">{eyebrow}</div>'
+        f'<div class="hero-card hero-chain {cls}" data-chain="{esc(",".join(r["key"] for r in chain))}">'
+        f'<div class="hero-eyebrow">{eyebrow}</div>'
         f'<div class="hero-gates">{rows}</div>{foot}</div>',
         unsafe_allow_html=True,
     )
+
+
+#: The issued-size terciles, smallest first: ``(edges['call']['terciles'] key, name)``.
+_TERCILES: tuple[tuple[str, str], ...] = (("T1", "Smallest third"), ("T2", "Middle third"),
+                                          ("T3", "Largest third"))
+
+
+def render_call_history(call_ts: pd.DataFrame | None, price: pd.Series | None,
+                        edge: dict | None, horizon: int) -> None:
+    """Overview's last block: the call at every session, as it was issued.
+
+    Top: price, each issued call marked on its session (▲ BUY, ▼ SELL), the
+    marker sized by its size. Bottom: the trust the claim had earned at each
+    session. Under it, the issued calls' drift-neutral payoff by causal size
+    tercile with n/h (``edges['call']['terciles']``): does a larger size pay
+    more? Read off call_ts and the call's grade; nothing is computed here.
+    """
+    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
+    from core.config import UI_CHART_HEIGHT_LARGE
+    from ui.theme import chart_layout, style_axes, chart_color, panel_bg
+
+    render_section_header(
+        "Call History",
+        f"Every session's call as it was issued, on the {horizon}-session horizon from the next "
+        f"close: price with each issued call marked and sized by its size, the trust the claim "
+        f"had earned, and the issued calls' payoff by size tercile.",
+        icon="activity", accent="accent", card="overview:history",
+    )
+    if call_ts is None or call_ts.empty or price is None:
+        render_empty_state("No call history", "No session has been composed yet.",
+                           eyebrow="Call history")
+        return
+    idx = call_ts.index
+    px = pd.to_numeric(pd.Series(price), errors="coerce").reindex(idx)
+    w = pd.to_numeric(call_ts["w"], errors="coerce").fillna(0.0)
+    size = pd.to_numeric(call_ts["size"], errors="coerce").fillna(0.0)
+    fig = make_subplots(rows=2, cols=1, row_heights=[0.7, 0.3], shared_xaxes=True,
+                        vertical_spacing=0.06)
+    fig.add_trace(go.Scatter(x=idx, y=px, mode="lines", name="Price",
+                             line=dict(color=chart_color("slate"), width=1.2),
+                             hovertemplate="%{y:,.2f}<extra>Price</extra>"), row=1, col=1)
+    for side, word, symbol, colour in ((1, ACTIONS[3], "triangle-up", "emerald"),
+                                       (-1, ACTIONS[4], "triangle-down", "rose")):
+        m = (np.sign(w) == side).to_numpy()
+        if m.any():
+            fig.add_trace(go.Scatter(
+                x=idx[m], y=px[m], mode="markers", name=word,
+                marker=dict(symbol=symbol, size=(6 + 10 * size[m].clip(0, 1.5)).to_numpy(),
+                            color=chart_color(colour), line=dict(width=0.5, color=panel_bg())),
+                customdata=size[m].to_numpy(),
+                hovertemplate=f"{word} · size %{{customdata:.2f}}<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=idx, y=call_ts["trust"], mode="lines", name="Trust",
+                             line=dict(color=chart_color("violet"), width=1.2),
+                             hovertemplate="trust %{y:.2f}<extra></extra>"), row=2, col=1)
+    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_LARGE))
+    style_axes(fig, y_title="Price", row=1, col=1)
+    style_axes(fig, y_title="Trust", y_range=[-0.05, 1.05], row=2, col=1)
+    issued, claimed = int((w != 0).sum()), int((call_ts["d"] != 0).sum())
+    render_chart_panel(
+        fig, "overview_history", units="price · issued calls · trust", windowed=False,
+        footer=(f"{issued} of {claimed} claim sessions issued; a marker's area follows its size "
+                f"(1.00 is a fully trusted claim with neutral sizers)." if issued else
+                f"No call issued on this history: all {claimed} claim sessions were held at "
+                f"trust 0."))
+    terc = (edge or {}).get("terciles") or {}
+    items = []
+    for k, name in _TERCILES:
+        b = terc.get(k) or {}
+        se = _finite(b.get("se"))
+        items.append({"label": name, "value": _pct(b.get("mean")),
+                      "subtext": (f"issued sizes · ± {se * 100:.2f}% · n/h {int(b.get('n_win') or 0)}"
+                                  if se is not None else
+                                  f"issued sizes · n/h {int(b.get('n_win') or 0)}"),
+                      "card": "overview:terciles"})
+    render_kpi_strip(items, max_cols=3, key="overview-terciles")
+
+
+def render_size_terciles(edge: dict | None, horizon: int) -> None:
+    """GRADE→call on the Grades page: does a larger size pay more?
+
+    The issued calls by their size's causal tercile (each against the issued
+    sizes up to its own session, ``pipeline.assemble``), the claim's mean
+    drift-neutral payoff in each with n/h, beside every issued session and
+    the claim sessions held; then Decision C's status (TIER_RULE).
+    """
+    render_section_header(
+        "Does a Larger Size Pay More?",
+        f"The issued calls split by their size's causal tercile (each against the issued sizes "
+        f"up to its own session), with the claim's mean drift-neutral {horizon}-session payoff "
+        f"in each, and the claim sessions held beside them.",
+        icon="bar-chart", accent="accent", card="grades:terciles",
+    )
+    e = edge or {}
+    terc, ivh = e.get("terciles") or {}, e.get("issued_vs_held") or {}
+    if not int(e.get("issued_n") or 0):
+        render_empty_state(
+            "Nothing issued yet",
+            "No call has been issued on this history, so there is no size to split: every "
+            "claim session was held (its payoff is in the table above).",
+            eyebrow="Grades",
+        )
+        return
+    rows = []
+    for name, b in ((*((n, terc.get(k)) for k, n in _TERCILES),
+                     ("All issued", ivh.get("issued")), ("Claim held (not issued)", ivh.get("held")))):
+        b = b or {}
+        se = _finite(b.get("se"))
+        rows.append({"Sessions": name, "n": int(b.get("n") or 0),
+                     "Windows (n/h)": int(b.get("n_win") or 0), "Mean payoff": _pct(b.get("mean")),
+                     "± SE": f"{se * 100:.2f}%" if se is not None else "—"})
+    render_table_panel(pd.DataFrame(rows), "grades-terciles", units=f"drift-neutral {horizon}D payoff",
+                       windowed=False, label_col="Sessions", max_height=220)
+    render_note(f"Decision C: the size carries no tier word (TIER_RULE "
+                f"'{_knob('TIER_RULE')}') until the pooled study shows this payoff rising with "
+                f"size, with at least {_knob('TIER_MIN_WIN')} windows in every tercile.")
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  EDGE — one grading, used by every engine
 # ═══════════════════════════════════════════════════════════════════════
 #
-# Each engine page leads with the same question asked the same way: when this
-# engine leaned one way, did the instrument move that way over the horizon?
-# The number is the rank IC of the engine's bullish-positive lean against the
-# h-day forward return, sampled every h sessions so no two scored windows
-# overlap (core.grade.series_edge). One function computes it and
-# one component draws it, so "edge" cannot mean four things on four pages.
+# Each engine page grades what it shows the same way: when this lean leaned
+# one way, did the instrument move that way over the horizon? The number is
+# the rank IC of the bullish-positive lean against the drift-neutral h-day
+# return from the next close, sampled every h sessions so no two scored
+# windows overlap (core.grade, in the pipeline). One component
+# draws it, neutral-toned: a grade is a measurement, not a direction.
 
 def edge_summary_text(edge: dict | None, what: str) -> str:
     """One sentence for an edge read — the footer under its chart."""
@@ -880,57 +1140,59 @@ def edge_summary_text(edge: dict | None, what: str) -> str:
     pos, nb = edge_periods(edge)
     return (f"{what[0].upper() + what[1:]}: non-overlapping {edge.get('horizon', '?')}-day IC "
             f"{edge['ic']:+.3f}" + (f" ± {se:.3f}" if se is not None and np.isfinite(se) else "")
-            + f" over {int(edge.get('n', 0) or 0)} calls"
+            + f" over {int(edge.get('n_win', 0) or 0)} windows"
             + (f"; {pos} of {nb} periods positive." if nb else "."))
 
 
-def render_edge_panel(edge: dict | None, key: str, *, what: str, show_chart: bool = True) -> None:
-    """Edge cards (+ per-period bars) for one engine's lean.
+def render_edge_panel(edge: dict | None, key: str, *, what: str, title: str, card: str,
+                      show_chart: bool = True) -> None:
+    """One object's full-history grade: its IC, its durability, its windows, its periods.
 
-    ``what`` names the thing graded ("Mūla's call", "Swayam's net breadth").
+    ``title`` names the grade ('Claim grade', 'Lean grade'), ``what`` the
+    thing graded in the footer, ``card`` the registered card it is drawn
+    under. Neutral-toned throughout — a grade is never a trade colour.
     Renders an explicit empty state rather than nothing when the series is
     too short to grade — "not measured" is information too.
     """
-    from ui.theme import chart_layout, style_axes, chart_color, grid_rgba
+    from ui.theme import chart_layout, style_axes, chart_color, chart_rgba, grid_rgba
     ic = (edge or {}).get("ic")
     if ic is None or not np.isfinite(ic):
         render_empty_state(
             "Not yet graded",
             f"{what[0].upper() + what[1:]} has too little scored history for a "
-            f"non-overlapping walk-forward read.",
-            eyebrow="Edge",
+            f"non-overlapping, out-of-sample read.",
+            eyebrow=title,
         )
         return
-    label, tone = edge_tier(edge)
+    label, _tone = edge_tier(edge)
     se = edge.get("se")
     # Only scored periods are drawn: an unscored one has no IC, and drawing it
-    # as an empty bar in the negative colour read as a bad period.
+    # as an empty bar read as a bad period.
     blocks = [b for b in (edge.get("blocks") or [])
               if b.get("ic") is not None and np.isfinite(b.get("ic"))]
     pos, n_scored = edge_periods(edge)
     render_kpi_strip([
-        {"label": "Walk-Forward IC", "value": f"{ic:+.3f}",
+        {"label": title, "value": f"{ic:+.3f}",
          "subtext": (f"{label} · ± {se:.3f} (1 SE)" if se is not None and np.isfinite(se)
                      else label),
-         "color_class": tone,
-         "tooltip": ("Rank correlation of the lean with the forward return over the "
-                     "horizon, scored on non-overlapping windows. 0 = no skill; the SE "
+         "card": card,
+         "tooltip": ("Rank correlation of the lean with the drift-neutral forward return over "
+                     "the horizon, scored on non-overlapping windows. 0 = no skill; the SE "
                      "says how much of the number is sampling noise.")},
-        {"label": "Positive Periods", "value": f"{pos}/{n_scored}" if n_scored else "—",
+        {"label": "Positive periods", "value": f"{pos}/{n_scored}" if n_scored else "—",
          "subtext": "Durability across regimes — one good period is not an edge.",
-         "color_class": ("success" if n_scored and pos > n_scored * 0.6
-                         else "warning" if n_scored and pos >= n_scored * 0.5 else "danger")},
-        {"label": "Calls Scored", "value": f"{int(edge.get('n', 0) or 0)}",
+         "card": card},
+        {"label": "Windows scored", "value": f"{int(edge.get('n_win', 0) or 0)}",
          "subtext": f"one per {edge.get('horizon', '?')} sessions, none overlapping",
-         "color_class": "neutral"},
+         "card": card},
     ], max_cols=3, key=f"edge-{key}")
     if show_chart and blocks:
         import plotly.graph_objects as go
         fig = go.Figure(go.Bar(
             x=[f"{str(b.get('start'))[:7]} → {str(b.get('end'))[:7]}" for b in blocks],
             y=[b.get("ic") for b in blocks],
-            marker=dict(color=[chart_color("emerald") if (b.get("ic") or 0) > 0
-                               else chart_color("rose") for b in blocks]),
+            marker=dict(color=[chart_color("slate") if (b.get("ic") or 0) > 0
+                               else chart_rgba("slate", 0.45) for b in blocks]),
             hovertemplate="%{x}<br>IC %{y:+.3f}<extra></extra>",
         ))
         fig.add_hline(y=0, line_color=grid_rgba(0.10), line_width=0.6)
@@ -1021,6 +1283,7 @@ def render_data_table(
     contrarian_cols: "set[str] | None" = None,
     label_col: str | None = None,
     col_labels: dict[str, str] | None = None,
+    col_tags: dict[str, str] | None = None,
     max_height: int = 520,
     row_height: int = 27,
 ) -> None:
@@ -1050,15 +1313,20 @@ def render_data_table(
     max_rows : cap to the LAST ``max_rows`` rows (tables are newest-relevant).
     precision / col_precision : default and per-column float precision.
     sign_color_cols : numeric columns whose values are tinted emerald/rose by
-        sign (the "signal" colouring from Pragyam's per-signal columns).
+        sign — a bullish-positive lean that may carry a direction's colour,
+        which is the claim's and the call's alone.
     contrarian_cols : numeric columns of a native reading whose positive side
-        is the bearish lean (stretched up, as Swayam's oscillators): tinted by
-        sign the other way round, rose when positive, so the number keeps its
-        native sign and its tone follows the lean it implies.
+        is the bearish lean (stretched up, as the claim's gap and oscillator):
+        tinted by sign the other way round, rose when positive, so the number
+        keeps its native sign and its tone follows the lean it implies.
+        Evidence is neither: it stays in the neutral ink.
     label_col : the column to style as the bold Space-Grotesk label (default:
         the index if shown, else the first column).
     col_labels : explicit header overrides ``{raw_name: display}``; any column
         not listed is auto-prettified (``MSF_Osc`` → ``MSF Osc``).
+    col_tags : a second header line per column — the role tag of the card the
+        column is registered to (``core.roles.role_tag``), so a record's every
+        column says what it is for.
     """
     if df is None or getattr(df, "empty", True):
         st.markdown('<div class="panel-state">No rows to display.</div>',
@@ -1073,6 +1341,7 @@ def render_data_table(
         show_index = index_label is not None or not isinstance(view.index, pd.RangeIndex)
     idx_header = (index_label or _prettify_header(view.index.name or "")) if show_index else ""
     col_labels = col_labels or {}
+    col_tags = col_tags or {}
 
     def _header(c: str) -> str:
         return col_labels.get(c) or _prettify_header(c)
@@ -1094,7 +1363,9 @@ def render_data_table(
             cells.append(f'<th class="lbl">{html_mod.escape(str(idx_header))}</th>')
         for c in cols:
             cls = "num" if c in numeric_cols and c != label_col else "lbl" if c == label_col else "txt"
-            cells.append(f'<th class="{cls}">{html_mod.escape(_header(c))}</th>')
+            tag = (f'<span class="tag">{html_mod.escape(col_tags[c])}</span>'
+                   if c in col_tags else "")
+            cells.append(f'<th class="{cls}">{html_mod.escape(_header(c))}{tag}</th>')
         return "".join(cells)
 
     def _value_html(c: str, val) -> str:
@@ -1121,7 +1392,9 @@ def render_data_table(
         body_rows.append(f"<tr>{''.join(tds)}</tr>")
 
     n_rows = len(view)
-    _HEADER_H = 30                      # sticky header row, matches the CSS above
+    # The sticky header row, matching the CSS above; a tagged header carries a
+    # second line.
+    _HEADER_H = 44 if col_tags else 30
     content_h = _HEADER_H + n_rows * row_height + 4
     iframe_h = min(content_h, max_height)
 
@@ -1161,6 +1434,8 @@ def render_data_table(
         text-transform:uppercase; letter-spacing:0.12em; padding:0.5rem 0.75rem;
         border-bottom:1px solid {t['border']}; text-align:left; white-space:nowrap; }}
     thead th.num {{ text-align:right; }}
+    thead th .tag {{ display:block; margin-top:2px; font-size:0.5625rem; font-weight:500;
+        letter-spacing:0.06em; color:{t['ink_tertiary']}; opacity:0.8; }}
     /* Row separation is a hairline OR a tint, never both — the two together
        are what made this read as a spreadsheet export. */
     tbody tr {{ border-bottom:1px solid {t['border_subtle']};

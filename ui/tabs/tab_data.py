@@ -11,12 +11,16 @@ issued, why, and every number it was composed from). The export is the same
 joined frame at full precision, so "the evidence, exportable" is literally
 true rather than true of one engine.
 
-Every signed column declares its orientation (``SIGN_ORIENTATION``): a
-READING keeps its native sign — positive = stretched up, rich — and is tinted
-by the lean it implies, so a rich gap reads in the short colour; a LEAN is
-bullish-positive and tinted as it reads; EVIDENCE keeps its native sign in the
-neutral ink — the ECM's gap-implied move, as on the Mūla page, because a lean
-that is evidence carries its grade, not a direction's colour.
+Every column is registered to a card (``COLUMN_CARDS`` and
+:func:`column_card`, cards of ``core.roles.CARDS``), and its header carries
+that card's role tag — what the column is FOR: the claim, a precondition, a
+sizer, a grade, evidence. Every signed column declares its orientation
+(``SIGN_ORIENTATION``): a READING of the claim's state keeps its native sign —
+positive = stretched up, rich — and is tinted by the lean it implies, so a
+rich gap reads in the short colour; the call's own signed weight and
+direction are LEANS, bullish-positive and tinted as they read; EVIDENCE and
+the sizers' readings keep their native sign in the neutral ink, because
+directional colour is the claim's and the call's alone.
 
 There is one date filter: the chart window, in the table's own header, as on
 every other page. The second "Date Range" selector that used to sit beside it
@@ -30,6 +34,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+from core.roles import role_tag
 from core.semantics import valuation_state
 from ui.components import (render_section_header, render_table_panel,
                            render_note, provisional_note)
@@ -59,17 +64,72 @@ MULA_COLUMNS: dict[str, str] = {
     "Provisional": "Provisional", "Valid": "Valued",
 }
 
-#: Every signed column of the record and the orientation it is declared in
-#: (U41, U44): ``'reading'`` keeps its native sign, positive = stretched up, and
-#: is tinted by the lean it implies (positive in the short colour); ``'lean'`` is
-#: bullish-positive and tinted as it reads; ``'evidence'`` is bullish-positive
-#: and untinted — EVIDENCE→sizer:reversion, whose grade
-#: (edges['evidence:ecm_drift']) has not earned a direction's colour (design §7).
-#: No other column is sign-coloured.
-SIGN_ORIENTATION: dict[str, str] = {
-    "Gap %": "reading", "Oscillator σ": "reading", "Swayam net breadth": "lean",
-    "Gap-implied move % (excl. drift)": "evidence",
+#: Swayam's columns in the record: its published lean, in points of net
+#: breadth, and the shares of views it is made of.
+SWAYAM_COLUMNS: dict[str, str] = {
+    "Lean": "Swayam net breadth (pts)", "Oversold_Pct": "Swayam oversold (% of views)",
+    "Overbought_Pct": "Swayam overbought (% of views)",
 }
+
+#: Every signed column of the record and the orientation it is declared in
+#: (U41, U44): ``'reading'`` is the claim's state, keeps its native sign,
+#: positive = stretched up, and is tinted by the lean it implies (positive in
+#: the short colour); ``'lean'`` is the call's own (its signed weight and its
+#: direction), bullish-positive and tinted as it reads; ``'evidence'`` keeps
+#: its native sign untinted — a sizer's reading or EVIDENCE, which has not
+#: earned a direction's colour (design §11). No other column is sign-coloured.
+SIGN_ORIENTATION: dict[str, str] = {
+    "Gap %": "reading", "Oscillator σ": "reading",
+    CALL_PREFIX + "w": "lean", CALL_PREFIX + "d": "lean",
+    "Swayam net breadth (pts)": "evidence", "Gap-implied move % (excl. drift)": "evidence",
+}
+
+#: The card every Mūla and Swayam column of the record is registered to.
+COLUMN_CARDS: dict[str, str] = {
+    "Price": "data:price", "Fair value": "data:fair_value", "Fair value lo (95%)": "data:fair_value",
+    "Fair value hi (95%)": "data:fair_value", "Gap %": "data:claim", "Oscillator σ": "data:claim",
+    "Valuation": "data:claim", "Gap scale %": "data:claim", "Model spread bps": "data:model_fit",
+    "Gap persistence φ": "data:gap", "Gap half-life (d)": "data:gap",
+    "P(price-side κ > 0)": "data:reversion", "κ̂ (price-side)": "data:reversion",
+    "Price-side half-life (d)": "data:gap", "Gap-implied move % (excl. drift)": "data:ecm_move",
+    "Gap-implied move SD %": "data:ecm_move", "Latent factors k": "data:model_fit",
+    "Provisional": "data:published", "Valued": "data:published",
+    "Swayam net breadth (pts)": "data:swayam", "Swayam oversold (% of views)": "data:swayam_shares",
+    "Swayam overbought (% of views)": "data:swayam_shares",
+}
+
+#: The card of each call_ts column (core.call.CALL_COLUMNS) that no prefix rule
+#: in :func:`column_card` covers.
+_CALL_CARDS: dict[str, str] = {
+    "published": "data:published", "valid": "data:published", "provisional": "data:published",
+    "withheld_reason": "data:published", "printed": "data:printed", "behind": "data:printed",
+    "precondition": "data:precondition", "fvo": "data:claim", "pct": "data:claim",
+    "d": "data:claim", "trust": "data:trust", "mr_prob": "data:reversion",
+    "kappa": "data:reversion", "size": "data:size", "w": "data:call", "action": "data:call",
+    "reason": "data:call", "binding": "data:call", "grid_date": "data:claim_grade",
+}
+
+
+def column_card(column: str) -> str:
+    """The registered card of a record column: what the column is FOR.
+
+    Mūla's and Swayam's columns are listed in ``COLUMN_CARDS``; a call_ts
+    column (``CALL_PREFIX`` + name) is the claim's grade (``claim_*``), a
+    sizer's block (``swayam_*``, ``reversion_*``) or listed in
+    ``_CALL_CARDS``. An unregistered column raises: the record shows nothing
+    whose role is undeclared.
+    """
+    if column in COLUMN_CARDS:
+        return COLUMN_CARDS[column]
+    if column.startswith(CALL_PREFIX):
+        c = column[len(CALL_PREFIX):]
+        if c in _CALL_CARDS:
+            return _CALL_CARDS[c]
+        for prefix, card in (("claim_", "data:claim_grade"), ("swayam_", "data:swayam"),
+                             ("reversion_", "data:reversion")):
+            if c.startswith(prefix):
+                return card
+    raise KeyError(f"record column {column!r} is registered to no card")
 
 
 def build_record(ts: pd.DataFrame) -> pd.DataFrame:
@@ -92,9 +152,8 @@ def build_record(ts: pd.DataFrame) -> pd.DataFrame:
     # points of net breadth, and the shares it is made of — never re-derived.
     sw = _by_date(st.session_state.get("swayam_daily"))
     if not sw.empty:
-        out["Swayam net breadth"] = (sw["Lean"] * 100.0).reindex(out.index)
-        out["Swayam oversold %"] = sw["Oversold_Pct"].reindex(out.index)
-        out["Swayam overbought %"] = sw["Overbought_Pct"].reindex(out.index)
+        for src, name in SWAYAM_COLUMNS.items():
+            out[name] = sw[src].reindex(out.index) * (100.0 if src == "Lean" else 1.0)
     # The call at every session, every column of call_ts (core.call.CALL_COLUMNS).
     ct = _by_date(st.session_state.get("call_ts"))
     for c in ct.columns:
@@ -118,12 +177,13 @@ def render_data_tab(ts_filtered, ts, active_target):
     render_section_header(
         "The Record",
         f"Every published series for {active_target}, one row per session, in the units the "
-        f"pages show them in. Readings keep their native sign — positive = stretched up (gap, "
-        f"oscillator) — and their tint follows the lean they imply, so a rich gap reads in the "
-        f"short colour. Swayam net breadth (its published lean in points, oversold minus "
-        f"overbought) reads bullish-positive and is tinted as it reads. The gap-implied move "
-        f"(excludes drift) is evidence: bullish-positive, untinted, graded on the Mūla page.",
-        icon="database", accent="cyan",
+        f"pages show them in, each header tagged with the role its column plays. The claim's "
+        f"readings keep their native sign — positive = stretched up (gap, oscillator) — and "
+        f"their tint follows the lean they imply, so a rich gap reads in the short colour; "
+        f"call_ts's signed weight w and direction d are tinted as they read. Everything else — Swayam's "
+        f"net breadth (its published lean in points), the gap-implied move (excludes drift) — "
+        f"keeps its native sign in the neutral ink.",
+        icon="database", accent="cyan", card="data:record",
     )
     _pn = provisional_note(st.session_state.get("fvo_ts"))
     if _pn:
@@ -151,6 +211,7 @@ def render_data_tab(ts_filtered, ts, active_target):
         footer=(f"Showing the newest {_CAP:,} of {len(view):,} — the export has all of them."
                 if len(view) > _CAP else ""),
         col_labels={c: c for c in view.columns},     # the record's headers are already named
+        col_tags={c: role_tag(column_card(c)) for c in view.columns},
         sign_color_cols={c for c, o in SIGN_ORIENTATION.items() if o == "lean"},
         contrarian_cols={c for c, o in SIGN_ORIENTATION.items() if o == "reading"},
     )
@@ -160,5 +221,5 @@ def render_data_tab(ts_filtered, ts, active_target):
         "Download the record (CSV)", csv_data,
         f"tattva_{active_target}_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv",
     )
-    render_note(f"Full history · {len(record):,} sessions · Mūla, Swayam and the call joined "
+    render_note(f"Full history · {len(record):,} sessions · Mūla, Swayam and call_ts joined "
                 f"on date at full precision.")

@@ -141,12 +141,32 @@ def swayam_drivers(panel: pd.DataFrame, target: str) -> pd.DataFrame:
 #  Prepare, Mūla, Swayam
 # ═══════════════════════════════════════════════════════════════════════
 
+def _studied_table(target: str) -> PriorTable | None:
+    """The committed pooled-prior table for ``target``'s h and L; None when there
+    is none or it was studied at another h or L (the run then refuses it)."""
+    try:
+        return load_priors(get_instrument_config(target).forecast_horizon, knob("EXECUTION_LAG"))
+    except ValueError:
+        return None
+
+
 def prepare(panel: pd.DataFrame, target: str, *, epoch=ANALYSIS_EPOCH, bars=None,
-            date_col: str = "DATE") -> PreparedPanel:
-    """``data.prep.prepare_panel`` on the target's registered cross-section."""
+            date_col: str = "DATE", priors: PriorTable | None | str = "default") -> PreparedPanel:
+    """``data.prep.prepare_panel`` on the target's registered cross-section.
+
+    ``priors`` is the pooled-prior table the run is compared with:
+    ``'default'`` (the committed study file for the target's h and L, or
+    none), None, or a ``PriorTable``. With one that studied ``target``, the
+    history's fingerprint hashes the settled rows up to the session the study
+    hashed it to (``PriorTable.fingerprint_upto``), so it equals the study's
+    record until that history itself changes — hashed to the newest settled
+    session instead, it would differ on every later day.
+    """
+    table = _studied_table(target) if isinstance(priors, str) and priors == "default" else priors
     numeric = panel.select_dtypes(include=[np.number]).columns.tolist()
     return prepare_panel(panel, target, predictor_universe(target, numeric), date_col,
-                         epoch=epoch, min_target_rows=MIN_DATA_POINTS, bars=bars)
+                         epoch=epoch, min_target_rows=MIN_DATA_POINTS, bars=bars,
+                         fingerprint_upto=table.fingerprint_upto(target) if table is not None else None)
 
 
 def fit_mula(prep: PreparedPanel, cfg, progress: Callable[[float, str], None] | None = None) -> MulaEngine:
@@ -241,7 +261,8 @@ def run_target(target: str, *, end=None, priors: PriorTable | None | str = "defa
     ``end`` is the last date fetched (None: today, and the call's recency is
     measured to the target's current session; a date: a replay as of it).
     ``priors`` is ``'default'`` (the committed study file for this h and L,
-    or none), None (per-instrument grades only) or a ``PriorTable``.
+    or none), None (per-instrument grades only) or a ``PriorTable``; the
+    history's fingerprint is hashed to match the same table (``prepare``).
 
     Returns ``engine, fvo_ts, swayam_daily, swayam_view_dfs, swayam_n_eff,
     swayam_native_last, call_ts, grades_ts, edges, evidence, verdict, asof,
@@ -249,14 +270,14 @@ def run_target(target: str, *, end=None, priors: PriorTable | None | str = "defa
     """
     cfg, inst = get_instrument_config(target), instrument(target)
     h, lag = int(cfg.forecast_horizon), int(knob("EXECUTION_LAG"))
+    table = load_priors(h, lag) if isinstance(priors, str) and priors == "default" else priors
     panel = fetch_panel(target, epoch=ANALYSIS_EPOCH, end=end, fetch=fetch)
     bars, _dropped = target_bars(target, epoch=ANALYSIS_EPOCH, end=end, fetch=fetch)
-    prep = prepare(panel, target, epoch=ANALYSIS_EPOCH, bars=bars)
+    prep = prepare(panel, target, epoch=ANALYSIS_EPOCH, bars=bars, priors=table)
     engine = fit_mula(prep, cfg)
     fvo_ts = fvo_frame(engine, prep)
     swayam_daily, sw = build_swayam(target, cfg, bars, prep, asof=engine.asof,
                                     drivers=swayam_drivers(panel, target))
-    table = load_priors(h, lag) if isinstance(priors, str) and priors == "default" else priors
     today = (session_today(resolve_exchange(inst.ticker)) if end is None
              else pd.Timestamp(end).normalize())
     asm = assemble(fvo_ts, swayam_daily, instrument=inst, cfg=cfg, asof=engine.asof, today=today,

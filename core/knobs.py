@@ -18,8 +18,11 @@ lag between a call and the close it can trade at. Each is registered here with
   * ``reason``           — the argument for its value, or the study and date.
 
 ``knob(name)`` is how code reads one. ``register_measured`` is the ONLY writer
-of a measured entry: the pooled-prior study's output is read as data and
-registered through it, so no measured value is ever typed by hand.
+of a measured entry: the pooled-prior study's output
+(``data/priors/pooled_priors_h{h}_L{L}.json``, written by
+``studies/pooled_priors.py``) is read as data at import and registered through
+it, so no measured value is ever typed by hand. With no file the placeholders
+the study owns keep their defaults.
 
 Engine and data constants that are already named and documented where they
 live are registered BY REFERENCE (``ref``) rather than copied, so the registry
@@ -30,6 +33,8 @@ No Streamlit dependency.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -41,6 +46,14 @@ _KINDS: frozenset[str] = frozenset({"structural", "structural-inherited", "measu
 
 #: Repository root: a measured knob's study is a tracked path relative to it.
 _ROOT = Path(__file__).resolve().parent.parent
+
+#: Where the pooled-prior study writes its output: one file per (h, L).
+PRIORS_DIR = _ROOT / "data" / "priors"
+
+
+def priors_file_name(h: int, exec_lag: int) -> str:
+    """The pooled-prior study's output file for horizon ``h`` and lag ``exec_lag``."""
+    return f"pooled_priors_h{int(h)}_L{int(exec_lag)}.json"
 
 
 @dataclass(frozen=True)
@@ -69,9 +82,10 @@ class Knob:
 
 KNOBS: dict[str, Knob] = {}
 
-#: Names a study may write: the placeholders below. Any other name that is
-#: already registered is structural and can never be overwritten by a result.
-_STUDY_SET: set[str] = set()
+#: The placeholders a study may write, as registered (the defaults a run
+#: without the study's output keeps). Any other name that is already
+#: registered is structural and can never be overwritten by a result.
+PLACEHOLDERS: dict[str, Knob] = {}
 
 _SET_BY_STUDY = "set by studies/pooled_priors.py"
 
@@ -102,7 +116,7 @@ def _placeholder(name: str, value: Any, *, consumer: str, horizon_coupling: str)
     """A default the pooled-prior study replaces with a measured value."""
     _register(name, value, "structural", consumer=consumer,
               horizon_coupling=horizon_coupling, reason=_SET_BY_STUDY)
-    _STUDY_SET.add(name)
+    PLACEHOLDERS[name] = KNOBS[name]
 
 
 def register_measured(name: str, value: Any, *, consumer: str, study: str, date: str) -> None:
@@ -114,7 +128,7 @@ def register_measured(name: str, value: Any, *, consumer: str, study: str, date:
     placeholders the study owns; a structural knob is never overwritten.
     """
     old = KNOBS.get(name)
-    if old is not None and old.kind != "measured" and name not in _STUDY_SET:
+    if old is not None and old.kind != "measured" and name not in PLACEHOLDERS:
         raise ValueError(f"knob {name} is {old.kind}; a study cannot overwrite it")
     path = Path(study)
     if not (path if path.is_absolute() else _ROOT / path).is_file():
@@ -123,6 +137,19 @@ def register_measured(name: str, value: Any, *, consumer: str, study: str, date:
                 else "measured at the study's h and L: one priors file per (h, L)")
     KNOBS[name] = Knob(name, value, "measured", consumer, coupling,
                        f"measured by {study} on {date}", study=str(study), date=str(date))
+
+
+def knobs_hash() -> str:
+    """A content hash of every knob the pooled-prior study does not write.
+
+    The study records it: its numbers assume these values (the grade's
+    windows, the strength map, the cuts, …). The study's own outputs — the
+    placeholders and the measured entries — are left out, so the hash is the
+    same whether or not a priors file has been registered.
+    """
+    rows = sorted((n, k.kind, repr(k.value)) for n, k in KNOBS.items()
+                  if n not in PLACEHOLDERS and k.kind != "measured")
+    return hashlib.sha256(repr(rows).encode("utf-8")).hexdigest()[:16]
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -303,5 +330,55 @@ _placeholder("CLAIM_CENTRING", "none",
              horizon_coupling=_STUDY_COUPLING)
 _placeholder("POOLED_PRIOR", None, consumer="trust: the class prior file behind every posterior",
              horizon_coupling=_STUDY_COUPLING)
+
+# ════════════════════════════════════════════════════════════════════════
+# The study's results, read from its committed output
+# ════════════════════════════════════════════════════════════════════════
+
+#: The measured class summaries the study's output generated, one per object
+#: and class (``PRIOR:<object>:<class>``). Their names are built from the file
+#: — nothing is typed by hand — so no code names one; the System page's KNOBS
+#: table, which lists the whole registry, is where they are read.
+STUDY_GENERATED: list[str] = []
+
+#: The decisions the study's output sets, by placeholder: Decision A records
+#: the claim's centring (never applied), B releases the sizers, C the tier words.
+_DECISIONS: dict[str, str] = {"CLAIM_CENTRING": "A", "SIZERS_ENABLED": "B", "TIER_RULE": "C"}
+
+
+def _register_study(path: Path) -> None:
+    """Register the pooled-prior study's results from its output file.
+
+    ``POOLED_PRIOR`` becomes the file's path, ``CLAIM_CENTRING``,
+    ``SIZERS_ENABLED`` and ``TIER_RULE`` the values of decisions A, B and C,
+    and each class summary ``summary[class][object] = {mu, se_mu, tau, k,
+    asof}`` one ``PRIOR:<object>:<class>`` entry — every one measured, named
+    with the study and its run date. No file leaves the placeholders. A file
+    studied at another h or L is not registered (``core.trust.load_priors``
+    refuses it too): its numbers answer a different estimand.
+    """
+    if not path.is_file():
+        return
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if int(data.get("h", -1)) != int(_cfg.FORECAST_HORIZON) or \
+            int(data.get("exec_lag", -1)) != int(knob("EXECUTION_LAG")):
+        return
+    study, date = str(data["study"]), str(data["run_date"])
+    register_measured("POOLED_PRIOR", path.relative_to(_ROOT).as_posix(),
+                      consumer=KNOBS["POOLED_PRIOR"].consumer, study=study, date=date)
+    for name, key in _DECISIONS.items():
+        register_measured(name, data["decisions"][key]["value"], consumer=KNOBS[name].consumer,
+                          study=study, date=date)
+    for cls, by_obj in sorted((data.get("summary") or {}).items()):
+        for obj, row in sorted(by_obj.items()):
+            name = f"PRIOR:{obj}:{cls}"
+            register_measured(name, {f: row[f] for f in ("mu", "se_mu", "tau", "k", "asof")},
+                              consumer=f"trust: the {cls} class's pooled {obj} grade, a summary "
+                                       f"(a member's posterior reads its own leave-one-out prior)",
+                              study=study, date=date)
+            STUDY_GENERATED.append(name)
+
+
+_register_study(PRIORS_DIR / priors_file_name(_cfg.FORECAST_HORIZON, knob("EXECUTION_LAG")))
 
 del _name, _consumer, _coupling, _extra

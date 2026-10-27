@@ -32,14 +32,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from core.knobs import knob
+from core.knobs import PRIORS_DIR, knob, priors_file_name
 
 #: f(t) opens at T0 (a one-sided 5% false-open per look) and is full at T1.
 STRENGTH_T0: float = knob("STRENGTH_T0")
 STRENGTH_T1: float = knob("STRENGTH_T1")
-
-#: Where the study writes its output: one file per (h, L).
-PRIORS_DIR = Path(__file__).resolve().parent.parent / "data" / "priors"
 
 
 def _finite(x) -> float | None:
@@ -110,6 +107,19 @@ class PriorTable:
                      scope=str(e["scope"]), vintage=v, study=str(self.meta.get("study", "")),
                      run_date=str(self.meta.get("run_date", "")))
 
+    def fingerprint_upto(self, instrument: str) -> pd.Timestamp | None:
+        """The session the study hashed ``instrument``'s history up to, or None.
+
+        The study records each member's history fingerprint over its settled
+        rows on or before the study's run date. A run compared with this
+        table hashes its own history up to the same session
+        (``pipeline.run.prepare``), so the two fingerprints differ only when
+        that history did — not on every newer session. None for an
+        instrument outside the study.
+        """
+        upto = (self.meta.get("fingerprint_upto") or {}).get(instrument)
+        return pd.Timestamp(upto) if upto else None
+
 
 def load_priors(h: int, exec_lag: int, path: str | None = None) -> PriorTable | None:
     """The pooled priors for horizon ``h`` and lag ``exec_lag``, or None.
@@ -118,7 +128,7 @@ def load_priors(h: int, exec_lag: int, path: str | None = None) -> PriorTable | 
     different h or L is REFUSED (``ValueError``): its priors grade a different
     estimand, and shrinking toward them would mix two questions.
     """
-    p = Path(path) if path is not None else PRIORS_DIR / f"pooled_priors_h{int(h)}_L{int(exec_lag)}.json"
+    p = Path(path) if path is not None else PRIORS_DIR / priors_file_name(h, exec_lag)
     if not p.is_file():
         return None
     data = json.loads(p.read_text())

@@ -39,8 +39,12 @@ def test_the_named_knobs_are_registered_with_their_values():
     for name in ("SWAYAM_OVERSOLD", "SWAYAM_OVERBOUGHT", "SWAYAM_LENGTHS", "SWAYAM_ROC_FRAC",
                  "SWAYAM_MMR_NUM_VARS", "SWAYAM_REGIME_SENSITIVITY", "SWAYAM_BASE_WEIGHT"):
         assert KNOBS[name].kind == "structural-inherited" and "not re-validated" in KNOBS[name].reason
+    # The study's placeholders: their defaults, or — once its output is
+    # committed — the measured values it registered (tests/test_priors.py).
     for name in ("SIZERS_ENABLED", "TIER_RULE", "CLAIM_CENTRING", "POOLED_PRIOR"):
-        assert KNOBS[name].reason == "set by studies/pooled_priors.py"
+        assert knobs.PLACEHOLDERS[name].reason == "set by studies/pooled_priors.py"
+        assert KNOBS[name] is knobs.PLACEHOLDERS[name] or (
+            KNOBS[name].kind == "measured" and KNOBS[name].study == "studies/pooled_priors.py"), name
     with pytest.raises(KeyError):
         knob("NO_SUCH_KNOB")
 

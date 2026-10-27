@@ -14,9 +14,11 @@ quoted-name scan (C16), made exact on the syntax tree.
 
 The Data record (``ui/tabs/tab_data.py``) exports what it shows. A name whose
 ONLY reader is that export must be listed, with its reason, in
-``EXPORT_ALLOWLIST``, and every listed name must be published and exported. A
-knob consumed only by the pooled-prior study, which is not committed yet, is
-listed in ``STUDY_PENDING``.
+``EXPORT_ALLOWLIST``, and every listed name must be published and exported.
+The class summaries the pooled-prior study's output generates
+(``core.knobs.STUDY_GENERATED``, ``PRIOR:<object>:<class>``) are named from
+the file, never in code, and are read as rows of the System page's KNOBS
+table; every other knob needs a reader by name.
 """
 import ast
 import dataclasses
@@ -28,7 +30,7 @@ import pandas as pd
 import app
 from core.call import CALL_COLUMNS
 from core.config import InstrumentConfig
-from core.knobs import KNOBS
+from core.knobs import KNOBS, STUDY_GENERATED
 from engines.mula.base import PUBLISHED_COLUMNS
 from engines.swayam import aggregate_views
 
@@ -42,10 +44,6 @@ EXPORT = "ui/tabs/tab_data.py"
 EXPORT_ALLOWLIST: dict[str, str] = {
     "GapPhi": "the gap's per-session AR(1) coefficient the ECM projects with; the pages show "
               "it as GapHalfLife, the record keeps the coefficient itself",
-}
-#: Knobs whose consumer is the pooled-prior study (studies/pooled_priors.py, WP6).
-STUDY_PENDING: dict[str, str] = {
-    "POOL_MIN_MEMBERS": "the study's class-LOO vs global-LOO scope rule",
 }
 
 
@@ -238,12 +236,14 @@ def test_every_config_field_has_a_reader():
 
 
 def test_every_knob_has_a_reader():
-    plain = [n for n, k in KNOBS.items() if not k.ref]
+    plain = [n for n, k in KNOBS.items() if not k.ref and n not in STUDY_GENERATED]
     by_ref = [n for n, k in KNOBS.items() if k.ref]
-    _check(plain, ("core/knobs.py",), allow=STUDY_PENDING)
+    _check(plain, ("core/knobs.py",))
     # A by-reference knob is read through its core.config constant (or the
     # InstrumentConfig field it defaults).
-    _check(by_ref, ("core/knobs.py",), kinds=("str", "name", "attr"), allow=STUDY_PENDING)
+    _check(by_ref, ("core/knobs.py",), kinds=("str", "name", "attr"))
+    # A generated class summary is a measured row of the registry, from the study.
+    assert all(KNOBS[n].kind == "measured" and n.startswith("PRIOR:") for n in STUDY_GENERATED)
 
 
 def test_the_allowlists_are_current():
@@ -254,8 +254,6 @@ def test_the_allowlists_are_current():
     # Each allowlisted name really has no reader but the export (else drop it).
     assert set(_unread(EXPORT_ALLOWLIST, ("engines/mula", "core/call.py::compose_series"))) \
         == set(EXPORT_ALLOWLIST)
-    for name in STUDY_PENDING:
-        assert name in KNOBS and not _readers(name, ("core/knobs.py",)), name
 
 
 def test_the_scan_sees_a_reader_and_an_orphan():

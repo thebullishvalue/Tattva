@@ -9,7 +9,271 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
-## [2.8.0] — 2026-10-17 — *One graded call · the council audit*
+## [2.9.0] — 2026-10-27 — *One claim, graded or neutral, closed as issued*
+
+2.8.0 was unified in vocabulary, horizon, causality and presentation, but its
+decision was open-loop: the call was never graded, the gates' influence ran
+inverse to their skill, the published history depended on the run date, Mūla
+re-entered the call about ten times as if it were a separate opinion, a
+parallel Convergence opinion contradicted the call on screen, and about half
+the published surface had no reader. 2.9.0 closes the loop. One claim — Mūla's
+macro mispricing — is sized only by measured, price-side skill (its own grade
+shrunk toward a pooled asset-class prior, and two sizers that are ×1.00 until
+their own grades earn a weight), composed at every past session, and graded as
+issued by the same grader. Everything that could not earn a role was deleted.
+[ARCHITECTURE.md](ARCHITECTURE.md) is the system in one place; `3.0.0` is not
+used because a reverted rebuild carried that number.
+
+### What you will see
+
+On the committed study (`data/priors/pooled_priors_h10_L1.json`, run
+2026-10-27) **no asset class shows a price-side claim edge at 10 sessions**, so
+the honest output is **HOLD**, or **NO CLAIM** inside the ±0.5σ noise, almost
+everywhere. The reason, in numbers (all from the study file, rendered below):
+no member's leave-one-out claim prior reaches t 1.645 on its own — they run
+from −1.61 (Nifty 100) to +0.35 (MSFT (US)) — and the class claim pools sit
+between −0.057 ± 0.039 (India Indices) and +0.050 ± 0.046 (US Indices) apart
+from Currency (FX), +0.075 ± 0.043 on two members, which neither member reads:
+with fewer than three others in the class, each reads the catalogue-wide pool
+(global-LOO). A call opens only where an instrument's own grade carries the
+posterior over 1.645 against its pool. No class has a pooled call grade yet
+(no member's issued calls were graded at the last vintage), and Decision C
+keeps the tier words and any '%' off the size.
+
+What Overview said on the four audited instruments, live on 2026-10-27, with
+the committed priors (the network harness, every page drawn without an
+exception):
+
+- **Gold** — "HOLD: Gold is 0.89σ (5.4%) below the level the macro
+  cross-section implies, but the claim has not been shown to pay on price:
+  t_post -0.35 (own -0.059 ± 0.057, n_win 162; Commodities class-LOO prior
+  -0.001 ± 0.028, k 6, study 2026-10-27); acting needs a t_post above 1.645."
+- **Nifty 50** — "NO CLAIM: Nifty 50 is 0.37σ (2.4%) above the level the macro
+  cross-section implies, inside the ±0.5σ noise." (Claim t_post -1.37: own
+  -0.090 ± 0.056, n_win 152; India Indices class-LOO prior -0.051 ± 0.039, k 7.)
+- **S&P 500** — "NO CLAIM: S&P 500 is 0.25σ (1.8%) above the level the macro
+  cross-section implies, inside the ±0.5σ noise." (Claim t_post -0.86: own
+  +0.051 ± 0.055, n_win 158; global-LOO prior -0.016 ± 0.018, k 36.)
+- **USD/INR** — "NO CLAIM: USD/INR is 0.06σ (0.1%) below the level the macro
+  cross-section implies, inside the ±0.5σ noise." (Claim t_post +0.03: own
+  +0.144 ± 0.056, n_win 140, shrunk toward the global-LOO prior -0.019 ± 0.019,
+  k 36 — the price of pooling a two-member class.)
+
+Each Overview's call grade reads 'not yet graded: k of 30 non-overlapping
+issued windows' beside 'the study graded no call in the <class> class'. A HOLD
+is the measured answer, not a defect.
+
+### Owner decisions
+- **1 · Grade it, don't assume it.** Mūla's macro mispricing stays the one
+  claim. Trust in it comes only from its measured price-side grade (the
+  drift-neutral h-session return from the next close); reversion is a graded
+  sizer, neutral while unskilled; every page reports the measured split of
+  gap closure instead of asserting that the gap closes on price.
+- **2 · Shrink to a pooled prior.** Each instrument's as-of grade is shrunk
+  toward a leave-one-out asset-class prior from one pre-registered offline
+  catalogue study, whose JSON the app reads as data (`core/trust.py`,
+  `studies/pooled_priors.py`).
+
+### Owner sign-offs
+- **EXECUTION_LAG = 1** — the estimand is the h-session return from the close
+  after publication (C1's Y amended). A veto sets it to 0 and re-runs the study.
+- **'Nifty 50 - PE' kept as NO CALL** — a valuation ratio is valued and its
+  claim graded as evidence, never called.
+- **Decision A recorded as 'none'** — the centred claim unit did not meet its
+  adoption rule on the held-out members, and it is never applied without a
+  separate owner-signed change.
+- **Jeera excluded from the study** — its Google-Sheets source was unreachable
+  in the study's environment; as a non-member it reads the Commodities class's
+  all-member prior.
+- **A near-permanent HOLD** is accepted as the honest output.
+
+### Removed — and why
+- **The gate chain** (`build_hero_verdict`, the gate ramps and absent/unvalidated
+  gates, `_TIERS`, the tier words, the '%' conviction, the 0.75 'nothing
+  limiting' rule, the mispricing, cross-section, precedent and edge-as-peer
+  gates): influence inverse to skill, tiers unreachable, a percentage that was
+  not a probability. Replaced by trust × exp(β·z).
+- **Convergence**, package and page (the cross-validator and its dimensions,
+  the agreement ratio, the dimension learner and its weights, the consensus,
+  the composite's drift-diffusion filter, the divergence detector, the risk
+  line, Engine Agreement, the sidebar weights): Mūla-signed on almost every
+  row, it moved nothing and contradicted the call. Its question is answered on
+  the issued object by the Swayam sizer's contradicts / split / confirms table.
+- **Precedent**, subsystem and page (`analytics/analogs.py` and its caches and
+  knobs): a separate model on the claim's own features, answering what the
+  claim's grade answers.
+- **Mūla's cross-section consistency** (the leave-one-block-out DLM and its
+  confidence family), **window stack and DDM** (per-window z, zones and
+  breadth, the conviction family; correlated 0.96–0.99 with FVO in the audit),
+  **regime and OU** (the regime filter, the OU projection, duplicate
+  half-lives) and the **orphans** (unread columns, keys, valuation buffers and
+  the R² vs Trailing Mean card).
+- **Swayam's** regime engine, learned view weights and averaged signal, the
+  duplicate count and signal columns, and the duplicated L22 views.
+- **Furniture:** the ticker tape, the display warm-up priors, `hold_horizons`,
+  `STOCK_TARGETS`, the `InstrumentConfig()` fallbacks; in this release's final
+  sweep, `OnlineFactorModel.last_scores`, the valuation pass's unread `price`
+  column, the fetcher's unread `panel_columns` attr and the unread
+  `call_grade['tone']`.
+
+Each part's way back, if it can earn a role, is in ARCHITECTURE.md's admission
+and re-entry rules; the code is recoverable at commit 2755b4c.
+
+### Changed — the history is rewritten once
+- **One epoch.** Every history starts at `ANALYSIS_EPOCH` = 2017-01-02 (or the
+  target's first print), fixed before any grade was computed on it, so the
+  published history no longer rolls with the run date. The feature-wide tail
+  guard and dropna went with it; young features enter through FVO_MIN_PRINTS.
+- **The target-printed spine.** Sessions the target did not print leave the
+  spine and the outcome, so 'h sessions' always means h; on the fixture the 41
+  CME-open US holidays with no Gold bar in 2020-06-01 … 2026-10-16 are gone
+  (asserted by tests/test_contracts_asof_horizon.py). Swayam reads its bars on
+  the target's own calendar.
+- **The execution lag.** Every grade scores the return from the close after
+  publication (L = 1). The study's arm E shows what that removes, class by
+  class: the Swayam sizer's pooled grade moves from +0.028 to +0.013
+  (Commodities) and from +0.016 to −0.010 (Currency (FX)); the claim's moves by
+  at most 0.016 (Currency (FX), +0.096 to +0.080).
+- **The SE.** One grade has one SE: the circular-shift null over every
+  admissible shift, by FFT, replacing 1/√(n − 3). The study's R4 check measured
+  it against a brute-force null on every member: median ratios 1.020 (claim),
+  0.956 (Swayam sizer) and 0.991 (reversion sizer), inside the pre-registered
+  0.85–1.15 band. Every IC and SE on screen moved once; that is reported, not
+  tuned.
+- **Drift-neutral grades.** Every grade scores sign · (Y − μ), μ the causal
+  mean of resolved returns, and prints its hit beside the side-matched causal
+  base, so a trend is not skill.
+
+### Added
+- **The closed loop** (`pipeline/assemble.py`, `core/call.py`): `call_ts` at
+  every session, `grades_ts` (the as-of grades it read), `edges['call']`
+  graded on the sessions a call was issued and `edges['call:prospective']` on
+  those after the study's run date; the verdict is `call_ts` at d*.
+- **One grader** (`core/grade.py`) and **one trust map** (`core/trust.py`):
+  the GLS posterior of own grade and class prior, f(t) from 1.645 to 2.5.
+- **The registries**: `core/roles.py` (every role, card and chip),
+  `core/knobs.py` (every constant that can move the call, its kind and
+  reason; the study's results registered as measured), `core/instruments.py`
+  (what each target is; the asset classes now print by their rail names).
+- **The pooled-prior study** (`studies/pooled_priors.py`), pre-registered and
+  bound to its output by SHA-256, and its committed output.
+- **Pages:** Grades replaces Convergence; Overview leads with the call, its
+  grade as issued and the chain in decision order; System shows the history's
+  fingerprint against the study's and the KNOBS and ROLES registries; the
+  Grades page prints each prior's vintage.
+- **Docs and tests:** ARCHITECTURE.md; README.md, its edge table generated
+  by `studies/render_docs_table.py`; `tests/test_docs.py` (no refuted claim in
+  the docs, the table byte-identical to the study); `tests/test_charter.py`,
+  which indexes every charter clause C1–C16 to the tests that enforce it and
+  checks that they passed.
+
+### The study's results
+
+Copied from the WP6 run, as `studies/render_docs_table.py` renders the
+committed file:
+
+Study `studies/pooled_priors.py` run 2026-10-27 on code `25880c3` (script SHA-256 `0a4fe565e974…`), h = 10, L = 1: 37 members, 26 held out for the decisions; not run: Jeera.
+
+**Pooled grade by class** at the last vintage (2026-09-30): the class's own graded members pooled, μ ± se_μ, the catalogue-wide τ and the members k.
+
+| Class | Members | Claim | Swayam sizer | Reversion sizer | Call | Vintage |
+|---|---|---|---|---|---|---|
+| Commodities | 7 | −0.012 ± 0.027 · τ 0.000 · k 7 | +0.013 ± 0.016 · τ 0.015 · k 7 | −0.021 ± 0.027 · τ 0.000 · k 7 | not graded | 2026-09-30 |
+| Crypto | 7 | −0.027 ± 0.033 · τ 0.000 · k 7 | −0.023 ± 0.020 · τ 0.015 · k 7 | −0.047 ± 0.027 · τ 0.000 · k 7 | not graded | 2026-09-30 |
+| Currency (FX) | 2 | +0.075 ± 0.043 · τ 0.000 · k 2 | −0.006 ± 0.026 · τ 0.015 · k 2 | −0.068 ± 0.044 · τ 0.000 · k 2 | not graded | 2026-09-30 |
+| India Indices | 8 | −0.057 ± 0.039 · τ 0.000 · k 8 | +0.013 ± 0.023 · τ 0.015 · k 8 | −0.008 ± 0.031 · τ 0.000 · k 8 | not graded | 2026-09-30 |
+| India Stocks | 5 | −0.027 ± 0.036 · τ 0.000 · k 5 | +0.025 ± 0.020 · τ 0.015 · k 5 | −0.001 ± 0.030 · τ 0.000 · k 5 | not graded | 2026-09-30 |
+| US Stocks | 5 | −0.006 ± 0.032 · τ 0.000 · k 5 | +0.013 ± 0.019 · τ 0.015 · k 5 | +0.006 ± 0.028 · τ 0.000 · k 5 | not graded | 2026-09-30 |
+| US Indices | 3 | +0.050 ± 0.046 · τ 0.000 · k 3 | +0.058 ± 0.029 · τ 0.015 · k 3 | −0.127 ± 0.050 · τ 0.000 · k 3 | not graded | 2026-09-30 |
+
+No class has a pooled call grade: nothing graded at the last vintage.
+
+**The claim prior each member reads** at 2026-09-30: its leave-one-out entry, and the t that prior gives on its own, μ / max(√(τ² + var_μ), se_floor). Trust opens at a posterior t of 1.645.
+
+| Class | Scope | Prior μ | t of the prior alone | Highest t |
+|---|---|---|---|---|
+| Commodities | class-LOO | −0.017 … −0.001 | −0.63 … −0.05 | Gold |
+| Crypto | class-LOO | −0.050 … +0.003 | −1.35 … +0.10 | Bitcoin |
+| Currency (FX) | global-LOO | −0.019 … −0.012 | −1.01 … −0.67 | Dollar Index |
+| India Indices | class-LOO | −0.063 … −0.051 | −1.61 … −1.30 | Nifty IT |
+| India Stocks | class-LOO | −0.050 … −0.009 | −1.31 … −0.24 | ITC (NSE) |
+| US Stocks | class-LOO | −0.025 … +0.011 | −0.64 … +0.35 | MSFT (US) |
+| US Indices | global-LOO | −0.017 … −0.014 | −0.93 … −0.77 | Nasdaq 100 |
+
+No member's claim prior reaches t 1.645 on its own: they run from −1.61 (Nifty 100) to +0.35 (MSFT (US)).
+
+The Currency (FX) class's own claim summary, +0.075 ± 0.043 on k 2 (USD/INR, Dollar Index), is 1.75 standard errors from zero, but with fewer than 3 other members no member reads it: each reads the global-LOO pool.
+
+**Who closes the gap** (arm G): over 10 sessions, the share of the open gap that price closed, and the slopes of the 10-session change in log fair value and in log price on the gap — the mean over a class's members, with the SD across them.
+
+| Class | k | Price's share of the closing | Fair value's slope on the gap | Price's slope on the gap |
+|---|---|---|---|---|
+| Commodities | 7 | +5.5% (SD 9.3%) | +0.342 (SD 0.048) | −0.024 (SD 0.033) |
+| Crypto | 7 | −5.6% (SD 10.4%) | +0.445 (SD 0.096) | +0.024 (SD 0.050) |
+| Currency (FX) | 2 | +11.8% (SD 9.7%) | +0.353 (SD 0.035) | −0.048 (SD 0.039) |
+| India Indices | 8 | −10.4% (SD 4.5%) | +0.389 (SD 0.042) | +0.036 (SD 0.013) |
+| India Stocks | 5 | −2.2% (SD 11.0%) | +0.381 (SD 0.032) | +0.007 (SD 0.043) |
+| US Stocks | 5 | +0.9% (SD 8.4%) | +0.339 (SD 0.053) | −0.003 (SD 0.029) |
+| US Indices | 3 | +2.5% (SD 3.3%) | +0.333 (SD 0.018) | −0.009 (SD 0.011) |
+
+Class by class, price did between −10.4% (India Indices) and +11.8% (Currency (FX)) of the closing; fair value moving toward price did the rest.
+
+**Decisions**, on the held-out members only:
+
+| Decision | Value | Measured |
+|---|---|---|
+| A · claim centring (recorded, never applied) | `none` | raw FVO fails the C12 unit contract on 21; the candidate `robust_z_252` passes on 13 of them (adoption needs 2/3); paired ΔIC −0.000 ± 0.010 |
+| B · SIZERS_ENABLED | `True` | ΔIC(d·∏factor − d) +0.000 ± 0.001 on 26 members (released iff ≥ −1 SE); call vs bare claim −0.116 ± 0.091 on 1 member (information only) |
+| C · TIER_RULE | `none` | 1 held-out member issued calls; n/h per tercile 0 / 0 / 0 (needs 20 each) |
+
+Checks: R4, the FFT shift-null SE against a brute-force null (median ratio, band 0.85 – 1.15): claim 1.020, sizer:swayam 0.956, sizer:reversion 0.991 — pass; R6, the bootstrap pool variance against the closed form (median ratio, bar 1.5): claim 1.05, sizer:swayam 0.90, sizer:reversion 1.12 — pass.
+
+### Corrected in 2.9.0 — what 2.8.0 claimed
+- 2.8.0's title, '**one graded call**' — corrected in 2.9.0: no call was
+  graded; the call is now graded as issued (`edges['call']`), and today it
+  reads 'not yet graded'.
+- '**One claim, six independent gates**' — corrected in 2.9.0: the gates read
+  claim-lineage inputs (the precedent gate shared 5 of 8 features with the
+  claim), so they were not independent; they are deleted.
+- '**The edge grades the call**' — corrected in 2.9.0: the Edge gate read
+  Mūla's claim IC, not the call's; the call has its own grade now.
+- '**Reversion means price reverts**' — corrected in 2.9.0: whether price
+  closes the gap is measured (the gap split) and the reversion sizer is graded,
+  neutral while unskilled.
+- 2.8.0's README section '**Where the edge is not**' — corrected in 2.9.0: its
+  table was one day's fetch on a window that rolled with the run date, graded
+  without the execution lag or the drift-neutral target and with the legacy
+  SE, and its 'Mūla's call' column was the claim's IC, not a call's. The
+  README's edge table is now generated from the committed study.
+
+### Deferred
+- **Decision A** (claim centring) — recorded 'none', applied only by an
+  owner-signed change; C12's live contract stays a strict xfail until then.
+- **Tier words and a '%' size** — off until Decision C passes (`TIER_RULE`
+  'none'); a calibrated percentage needs its own test.
+- **The pooled call grade** — no class has one until enough members issue
+  calls on 30 non-overlapping windows.
+- **The prospective record** (arm F) is empty on this first run; it accrues
+  from the sessions after 2026-10-27, graded with this study's priors.
+- **Jeera** joins the study when its sheet is reachable at the next re-run.
+- **The claim's-unit panel** is shown on Mūla only (the design also names
+  System).
+- **Swayam's MMR replica screen** reads a full-sample correlation to drop a
+  near-copy driver (pre-existing); a causal screen is left for a later change.
+- **Disclosures for the owner:** two members (Silver, AAPL (US)) were run for
+  timing before the study's first run, after its rules were fixed; Decision
+  B's ΔIC has a very small SE while the sizers are mostly neutral, so
+  SIZERS_ENABLED can turn on a negligible negative ΔIC.
+
+---
+
+## [2.8.0] — 2026-10-17 — *One graded call · the council audit* (title corrected in 2.9.0: the call was not graded)
+
+*Corrected in 2.9.0:* the claims this release made that the 2.9.0 audit
+refuted — 'one graded call', 'six independent gates', 'the edge grades the
+call', 'reversion means price reverts', and its README's section 'Where the
+edge is not' — are marked below where this entry made them, and corrected in
+the 2.9.0 entry above.
 
 A five-seat review (Mūla methodology, the signal chain, the data layer, UI and
 information design, product coherence) read every module against what the
@@ -24,7 +288,8 @@ the Paper/Slate design system — and makes each part say what it does.
   gate, the agreement ratio and the half-Mūla consensus; mean reversion in two).
   It is now mispricing · reversion · cross-section · convergence · edge ·
   precedent, each asked once, and the tier cut-points' "six gates" rationale is
-  true again.
+  true again. *(Corrected in 2.9.0: the gates were not independent — they read
+  claim-lineage inputs — and are deleted.)*
 - **The word follows the tier.** A cheap reading the gates do not support reads
   **HOLD** with the reason — never "BUY" beside "STAND ASIDE · no actionable edge",
   which the card used to print. LEAN / BUY / STRONG at low / moderate / high.
@@ -33,10 +298,13 @@ the Paper/Slate design system — and makes each part say what it does.
   read Mūla's own walk-forward IC at the horizon. They used to read a
   walk-forward of the unsigned *agreement* composite at 5 days on overlapping
   rows — which returned −0.01 on a synthetic signal with a planted IC of +0.31.
+  *(Corrected in 2.9.0: that IC graded the claim, not the call; the call is
+  graded as issued now.)*
 - **Reversion means price reverts.** On real data price accounts for 2–24% of
   daily gap closure; the rest is fair value moving to price. The reversion gate
   reads P(κ̂ > 0) from the price-side error-correction regression, not the gap's
-  own stationarity.
+  own stationarity. *(Corrected in 2.9.0: the split is measured and shown, and
+  reversion is a graded sizer, neutral while unskilled.)*
 
 ### Fixed — Mūla
 - Error-correction drift: published the opposite sign of the model's own

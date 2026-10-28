@@ -95,6 +95,32 @@ def test_lookup_reads_the_latest_vintage_on_or_before_t(tmp_path):
     assert table.lookup("sizer:swayam", "Gold", "commodity", "2024-01-02") is None
 
 
+def test_a_study_member_never_reads_its_classs_all_member_pool():
+    """Leave-one-out by construction: the class-wide entry pools every member,
+    so a member with no entry of its own for an object reads no prior at all."""
+    entry = {"mu": 0.04, "var_mu": 0.0004, "tau2": 0.0009, "kappa": 0.0001, "se_floor": 0.02,
+             "k": 7, "scope": "class-LOO"}
+    whole = {"2022-03-31": dict(entry, mu=0.09, scope="class-all")}
+    table = PriorTable({
+        "claim": {"Gold": {"2022-03-31": entry}, "__class__:commodity": whole},
+        "sizer:swayam": {"Silver": {"2022-03-31": entry}, "__class__:commodity": whole},
+    }, {"members": ["Gold", "Silver", "Copper"]})
+    t = "2024-01-02"
+    # Gold has a claim entry but none for the Swayam sizer; Copper, a listed member,
+    # has none at all: neither reads the pool that contains it.
+    assert table.lookup("claim", "Gold", "commodity", t).scope == "class-LOO"
+    assert table.lookup("sizer:swayam", "Gold", "commodity", t) is None
+    assert table.lookup("claim", "Copper", "commodity", t) is None
+    assert table.lookup("sizer:swayam", "Copper", "commodity", t) is None
+    # A member is known by its own entries even when the file lists no members.
+    unlisted = PriorTable({"claim": {"Gold": {"2022-03-31": entry}, "__class__:commodity": whole},
+                           "sizer:swayam": {"__class__:commodity": whole}}, {})
+    assert unlisted.lookup("sizer:swayam", "Gold", "commodity", t) is None
+    # A non-member (a typed stock, a target outside the study) reads the class pool.
+    assert table.lookup("sizer:swayam", "Zinc", "commodity", t).scope == "class-all"
+    assert unlisted.lookup("sizer:swayam", "Zinc", "commodity", t).mu == 0.09
+
+
 def test_a_file_for_another_horizon_or_lag_is_refused(tmp_path):
     with pytest.raises(ValueError):
         load_priors(10, 1, path=str(_priors_file(tmp_path, h=20, lag=1)))

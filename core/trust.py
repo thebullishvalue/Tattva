@@ -85,16 +85,27 @@ class PriorTable:
                   for who, vintages in by_who.items()}
             for obj, by_who in (priors or {}).items()
         }
+        #: The study's members: those listed as pooled, and any with an entry
+        #: of its own for any object (only a pooled member has one).
+        self._members = frozenset(self.meta.get("members") or ()) | {
+            who for by_who in self._priors.values() for who in by_who
+            if not who.startswith("__class__:")}
 
     def lookup(self, obj: str, instrument: str, asset_class: str, t) -> Prior | None:
         """The latest vintage on or before ``t`` for this object and instrument.
 
-        A study member gets its own leave-one-out entry; any other instrument
-        gets its class's all-member entry. None when the object, the entry or
-        a vintage on or before ``t`` is missing.
+        A study member (listed in ``meta['members']``, or holding an entry of
+        its own for any object) gets its own leave-one-out entry and nothing
+        else: its class's all-member entry contains the member itself, so a
+        member with no entry for ``obj`` gets None rather than that pool. Any
+        other instrument gets its class's all-member entry. None when the
+        object, the entry or a vintage on or before ``t`` is missing.
         """
         by_who = self._priors.get(obj) or {}
-        entries = by_who.get(instrument) or by_who.get(f"__class__:{asset_class}")
+        if instrument in self._members:
+            entries = by_who.get(instrument)
+        else:
+            entries = by_who.get(f"__class__:{asset_class}")
         if not entries:
             return None
         t = pd.Timestamp(t)

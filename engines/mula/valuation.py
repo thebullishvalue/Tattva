@@ -481,7 +481,6 @@ class MarketValuationEngine:
                 progress_cb((t + 1) / T)
 
         df = pd.DataFrame({k: v for k, v in out.items()}, index=idx)
-        df["price"] = np.exp(P)
         df["n_available"] = avail_hist
         df["n_admitted"] = admit_hist
 

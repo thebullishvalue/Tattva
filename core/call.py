@@ -45,6 +45,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from core.instruments import asset_class_name
 from core.knobs import knob
 from core.roles import CHAIN, ROLES, chain_roles
 from core.semantics import CLAIM_SIGMA, claim_direction, edge_tier, swayam_word
@@ -147,11 +148,11 @@ def _claim_grade_text(ic, se, n_win, mu, sd, scope, k, *, asset_class: str | Non
                       study_date: str | None = None) -> str:
     """'own +0.070 ± 0.062, n_win 140; no pooled prior' — the claim grade in words.
 
-    Given the instrument's ``asset_class`` and the study's ``study_date`` (the
-    verdict's words), the prior is named as the pool it is — 'commodity
-    class-LOO prior −0.001 ± 0.028, k 6, study 2026-10-27', or 'global-LOO
-    prior …, study …' for a catalogue-wide pool. call_ts's ``reason`` keeps
-    the short form.
+    Given the instrument's ``asset_class`` key and the study's ``study_date``
+    (the verdict's words), the prior is named as the pool it is, by the
+    class's page name — 'Commodities class-LOO prior −0.001 ± 0.028, k 6,
+    study 2026-10-27', or 'global-LOO prior …, study …' for a catalogue-wide
+    pool. call_ts's ``reason`` keeps the short form.
     """
     ic, se, mu, sd = _num(ic), _num(se), _num(mu), _num(sd)
     n = int(_num(n_win) or 0)
@@ -159,7 +160,8 @@ def _claim_grade_text(ic, se, n_win, mu, sd, scope, k, *, asset_class: str | Non
            else f"own grade warming up: {n} of {GRADE_WARMUP_WIN} windows")
     if str(scope) in _NO_PRIOR or mu is None or sd is None:
         return f"{own}; no pooled prior"
-    pool = f"{asset_class} {scope}" if asset_class and str(scope).startswith("class") else str(scope)
+    pool = (f"{asset_class_name(asset_class)} {scope}"
+            if asset_class and str(scope).startswith("class") else str(scope))
     study = f", study {study_date}" if study_date else ""
     return f"{own}; {pool} prior {mu:+.3f} ± {sd:.3f}, k {int(_num(k) or 0)}{study}"
 
@@ -331,14 +333,14 @@ def _call_grade(e: dict | None, prospective: dict | None) -> dict:
     that formats them on ``graded`` never meets a None.
     """
     e, p = e or {}, prospective or {}
-    label, tone = edge_tier(e.get("t"))
+    label = edge_tier(e.get("t"))[0]
     ivh = e.get("issued_vs_held") or {}
     ic, se, t = _num(e.get("ic")), _num(e.get("se")), _num(e.get("t"))
     graded = bool(e.get("graded", False)) and None not in (ic, se, t)
     return {
         "status": str(e.get("status") or "ungraded"), "graded": graded,
         "ic": ic, "se": se, "t": t,
-        "n_win": int(e.get("n_win") or 0), "label": label, "tone": tone,
+        "n_win": int(e.get("n_win") or 0), "label": label,
         "coverage": _num(e.get("coverage")), "issued_n": int(e.get("issued_n") or 0),
         "claim_n": int(e.get("claim_n") or 0),
         "hit": _num(e.get("hit")), "base": _num(e.get("base")),

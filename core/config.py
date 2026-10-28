@@ -21,7 +21,7 @@ import pandas as pd
 
 # Single source of truth for the app version — ui/theme.py imports these (do not
 # redefine elsewhere; past drift between config and theme is why this is centralized).
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 PRODUCT_NAME = "Tattva"
 COMPANY = "@thebullishvalue"
 

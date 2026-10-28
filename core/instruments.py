@@ -130,9 +130,17 @@ _PREDICTOR_SET: frozenset[str] = frozenset(PREDICTOR_UNIVERSE)
 
 
 # ─── Building the registry from the catalogue ────────────────────────────────
+#: Each asset class's name as a page prints it: the Asset Class the control
+#: rail lists it under (a sheet series has no category of its own). Data keep
+#: the key (``Instrument.asset_class``, the priors file, call_ts.attrs); only
+#: words read :func:`asset_class_name`.
+ASSET_CLASS_NAMES: dict[AssetClass, str] = {
+    "commodity": "Commodities", "fx": "Currency (FX)", "crypto": "Crypto",
+    "india_index": "India Indices", "us_index": "US Indices",
+    "stock_india": "India Stocks", "stock_us": "US Stocks", "sheet": "Sheet series"}
+#: Catalogue category → class, read off the same names.
 _CATEGORY_CLASS: dict[str, AssetClass] = {
-    "Commodities": "commodity", "Currency (FX)": "fx", "Crypto": "crypto",
-    "India Indices": "india_index", "US Indices": "us_index"}
+    name: cls for cls, name in ASSET_CLASS_NAMES.items() if name in TARGET_CATEGORIES}
 _CLASS_CURRENCY: dict[str, str] = {
     "commodity": "USD", "fx": "USD", "crypto": "USD", "india_index": "INR",
     "us_index": "USD", "stock_us": "USD", "stock_india": "INR", "sheet": "INR"}
@@ -178,6 +186,15 @@ def register_stock_instrument(display_name: str, ticker: str, market: str) -> No
     """
     cls: AssetClass = "stock_india" if market == "india" else "stock_us"
     INSTRUMENTS.setdefault(display_name, _make(display_name, ticker, cls))
+
+
+def asset_class_name(asset_class: str) -> str:
+    """The page name of an asset-class key ('india_index' → 'India Indices');
+    raises KeyError for an unregistered class."""
+    try:
+        return ASSET_CLASS_NAMES[asset_class]
+    except KeyError:
+        raise KeyError(f"unregistered asset class {asset_class!r}") from None
 
 
 def instrument(target: str) -> Instrument:

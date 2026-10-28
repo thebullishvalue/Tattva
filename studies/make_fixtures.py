@@ -70,7 +70,6 @@ def load_panel() -> pd.DataFrame:
     df = pd.read_csv(FIXTURES / PANEL_FILE, parse_dates=["DATE"], float_precision="round_trip")
     by_date = df.set_index("DATE")
     df.attrs = {"source": "fixture", "stale_backfills": {},
-                "panel_columns": sorted(by_date.columns),
                 "panel_fingerprint": _panel_fingerprint(by_date)}
     return df
 

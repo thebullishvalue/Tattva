@@ -2,7 +2,10 @@
 
   * Banned phrases — copy that asserts what the design grades instead
     (reversion, independence, the retired gate count and labels) — are absent
-    from every file under ui/ and from app.py, comments included.
+    from every file under ui/ and from app.py, comments included, and from
+    every rendered page, tables and rail included: copy that reaches a page
+    from outside ui/ (a grade's status, a knob's reason, a role's consumer)
+    is held to the same list.
   * The reserved words (call, BUY, SELL, STRONG, conviction, size) appear in
     the display strings of ui/ and app.py only inside the call-path code: the
     hero and its GRADE→call strip, the chain rows, the call's history and
@@ -27,7 +30,7 @@ import pytest
 
 from core.call import format_size
 from core.knobs import knob
-from test_render import all_renders
+from test_render import all_renders, page_text
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -50,6 +53,18 @@ RESERVED_CS = re.compile(r"(?<![\w-])(BUY|SELL|STRONG)(?![\w-])")
 KEY_LIKE = re.compile(r"[a-z0-9_:.\-]+")
 
 
+def _banned_hits(text: str) -> list[str]:
+    """The banned phrases in ``text``, case-insensitive, whole words where a word."""
+    low, hits = text.lower(), []
+    for phrase in BANNED:
+        pat = re.escape(phrase)
+        if re.fullmatch(r"\w+", phrase):
+            pat = rf"(?<![\w-]){pat}(?![\w-])"
+        hits += [f"{phrase}: …{low[max(0, m.start() - 40):m.end() + 40]}…"
+                 for m in re.finditer(pat, low)]
+    return hits
+
+
 def _sources(exts=(".py",)) -> list[str]:
     out = ["app.py"]
     for base, _dirs, names in os.walk(os.path.join(ROOT, "ui")):
@@ -69,6 +84,15 @@ def test_the_banned_phrases_are_absent_from_ui_and_app():
             for m in re.finditer(pat, text):
                 hits.append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}: {phrase}")
     assert hits == [], hits
+
+
+def test_no_banned_phrase_reaches_a_rendered_page(renders):
+    hits = []
+    for where, r in renders.items():
+        frames = [page_text([re.sub(r"<script.*?</script>", "", f, flags=re.S)]) for f in r.iframes]
+        for part, text in (("page", r.text), ("rail", r.rail), *(("table", f) for f in frames)):
+            hits += [f"{where} [{part}] {h}" for h in _banned_hits(text)]
+    assert hits == [], hits[:10]
 
 
 class _Copy(ast.NodeVisitor):

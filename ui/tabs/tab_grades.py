@@ -38,6 +38,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from core.config import UI_CHART_HEIGHT_LARGE
+from core.instruments import asset_class_name
 from core.knobs import knob
 from core.roles import ROLES
 from core.semantics import edge_tier
@@ -93,10 +94,16 @@ def _f(x, fmt: str = "+.3f") -> str:
 #  1. EVERY GRADE, ONE TABLE
 # ═══════════════════════════════════════════════════════════════════════
 
+def _class(asset_class: str | None) -> str:
+    """An asset class as the page names it (the key stays in the data)."""
+    return asset_class_name(asset_class) if asset_class else "—"
+
+
 def _pool_text(pool: dict | None, asset_class: str | None) -> str:
     if not pool:
         return "none"
-    return f"class-pooled · {asset_class} · k {int(pool['k'])} · {pool['mu']:+.3f} ± {pool['se_mu']:.3f}"
+    return (f"class-pooled · {_class(asset_class)} · k {int(pool['k'])} · "
+            f"{pool['mu']:+.3f} ± {pool['se_mu']:.3f} · vintage {pool.get('asof') or '—'}")
 
 
 def _row(key: str, role_key: str, name: str | None, edges: dict, grades_ts: dict, d_star,
@@ -113,7 +120,9 @@ def _row(key: str, role_key: str, name: str | None, edges: dict, grades_ts: dict
         a = g.loc[d_star]
         mu, sd = _num(a["prior_mu"]), _num(a["prior_sd"])
         scope = str(a["prior_scope"])
-        prior = (f"{scope} · k {int(a['prior_k'])} · {mu:+.3f} ± {sd:.3f}"
+        vintage = pd.Timestamp(a["prior_vintage"]) if pd.notna(a.get("prior_vintage")) else None
+        prior = (f"{scope} · k {int(a['prior_k'])} · {mu:+.3f} ± {sd:.3f} · vintage "
+                 f"{f'{vintage:%Y-%m-%d}' if vintage is not None else '—'}"
                  if scope != "none" and mu is not None and sd is not None
                  else "none")
         tp = _num(a["t_post"])
@@ -250,7 +259,7 @@ def _render_checks(pm: dict) -> None:
                            context="catalogue · R4 · shift-null SE calibration",
                            windowed=False, label_col="Object", max_height=180)
     r5 = checks.get("R5") or {}
-    rows = [{"Object": obj, "Class": cls, "k": int(r.get("k") or 0),
+    rows = [{"Object": obj, "Class": _class(cls), "k": int(r.get("k") or 0),
              "n/h (median)": _f(r.get("n_win_median"), ".0f"),
              "ρ (mean)": _f(r.get("rho_mean"), ".2f"),
              "τ": _f(r.get("tau"), ".3f"), "False-open": _f(r.get("false_open"), ".3f"),
@@ -268,7 +277,7 @@ def _render_arms(pm: dict) -> None:
     """Arm E (what the execution lag removes), arm P (path ranges), arm F (prospective)."""
     arms = pm.get("arms") or {}
     e = (arms.get("E") or {}).get("per_class") or {}
-    rows = [{"Class": cls, "Object": obj, "μ at L = 0": _f((r.get("L0") or {}).get("mu")),
+    rows = [{"Class": _class(cls), "Object": obj, "μ at L = 0": _f((r.get("L0") or {}).get("mu")),
              "μ at L = 1": _f((r.get("L1") or {}).get("mu")),
              "k": int((r.get("L1") or r.get("L0") or {}).get("k") or 0)}
             for cls, by_obj in e.items() for obj, r in by_obj.items()]

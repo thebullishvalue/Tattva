@@ -826,6 +826,7 @@ _TABLE_FONTS = ("https://fonts.googleapis.com/css2?"
 # them).
 
 from core.call import ACTIONS, edge_periods, format_size  # noqa: E402
+from core.instruments import asset_class_name  # noqa: E402
 from core.knobs import knob as _knob  # noqa: E402
 from core.roles import CHAIN  # noqa: E402
 from core.semantics import edge_tier as _t_tier  # noqa: E402
@@ -928,10 +929,10 @@ def render_hero_card(verdict: dict, *, priors_meta: dict | None = None,
       <div class="hero-eyebrow">{render_role_chip("overview:call")} Tattva &bull; {h}-session call from the next close</div>
       <div class="hero-signal">{esc(verdict["word"])}</div>
     </div>
-    <div class="hero-conviction-block">
+    <div class="hero-size-block">
       <span class="hero-chip">{esc(when)}</span>
-      <div class="hero-conviction">{esc(size_txt)}</div>
-      <div class="hero-conviction-sub">{esc(formula)}</div>
+      <div class="hero-size">{esc(size_txt)}</div>
+      <div class="hero-size-sub">{esc(formula)}</div>
     </div>
   </div>
   <div class="hero-headline">{esc(verdict["headline"])}</div>
@@ -944,10 +945,12 @@ def render_hero_card(verdict: dict, *, priors_meta: dict | None = None,
 
     pm = priors_meta or {}
     pool = class_pool(pm, asset_class, "call")
+    name = asset_class_name(asset_class) if asset_class else None
     if pool:
-        pool_label = f"{asset_class}, study {pm.get('run_date')}"
+        pool_label = f"{name}, study {pm.get('run_date')}"
     elif pm.get("status") == "loaded":
-        pool_label = f"the study graded no {asset_class or 'class'} member's call"
+        pool_label = (f"the study graded no call in the {name} class" if name
+                      else "the study graded no call in this class")
     else:
         pool_label = f"study not yet run: {pm.get('label') or 'no pooled prior'}"
     render_section_header(

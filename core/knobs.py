@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from core import config as _cfg
+from core.instruments import asset_class_name
 
 KnobKind = Literal["structural", "structural-inherited", "measured"]
 _KINDS: frozenset[str] = frozenset({"structural", "structural-inherited", "measured"})
@@ -161,8 +162,9 @@ _register(
     consumer="estimand: Y_t = log P(t+L+h) − log P(t+L), in every grade",
     horizon_coupling="horizon-free: the sessions between publishing after the close of t "
                      "and the first close the call can trade at, whatever h",
-    reason="a call computed after the close of t cannot trade at P(t); pending owner C1 "
-           "amendment; 0 on veto (and the study re-run: the priors file records L)")
+    reason="a call computed after the close of t cannot trade at P(t); C1's Y amended to "
+           "L = 1 (owner sign-off, the design's recommendation); 0 on veto, and the study "
+           "re-run: the priors file records L")
 
 # ════════════════════════════════════════════════════════════════════════
 # The grade (core.grade)
@@ -190,13 +192,13 @@ _register(
 _register(
     "GRADE_WARMUP_WIN", 30, "structural", consumer="grade: the as-of grade (expanding_edge)",
     horizon_coupling="in windows of h: n_win = graded rows // h",
-    reason="at 30 independent windows the shift-null SE is within about 10–19% of the "
+    reason="at 30 non-overlapping windows the shift-null SE is within about 10–19% of the "
            "truth even for persistence φ ≥ 0.98 (simulated); before it the grade is NaN")
 _register(
     "GRADE_N_BLOCKS", 6, "structural", consumer="grade: the durability blocks",
     horizon_coupling="horizon-free: a count of consecutive stretches of history",
-    reason="one good period is not an edge; six periods of a decade are about a "
-           "market cycle each (2.8.0's value)")
+    reason="one good period is not an edge; a decade cut into this many periods gives each "
+           "about one market cycle (2.8.0's value)")
 _register(
     "MIN_BLOCK_OBS", 8, "structural", consumer="grade: the durability blocks",
     horizon_coupling="in windows of h: non-overlapping windows inside one block",
@@ -233,7 +235,7 @@ _register(
 _register(
     "TIER_MIN_WIN", 20, "structural", consumer="composer: Decision C (tier words)",
     horizon_coupling="in windows of h: n/h per causal size tercile",
-    reason="a tercile's payoff on fewer than 20 independent windows cannot show monotonicity")
+    reason="a tercile's payoff on fewer than 20 non-overlapping windows cannot show monotonicity")
 
 # ════════════════════════════════════════════════════════════════════════
 # The semantic cuts (core.semantics)
@@ -373,8 +375,9 @@ def _register_study(path: Path) -> None:
         for obj, row in sorted(by_obj.items()):
             name = f"PRIOR:{obj}:{cls}"
             register_measured(name, {f: row[f] for f in ("mu", "se_mu", "tau", "k", "asof")},
-                              consumer=f"trust: the {cls} class's pooled {obj} grade, a summary "
-                                       f"(a member's posterior reads its own leave-one-out prior)",
+                              consumer=f"trust: the {asset_class_name(cls)} class's pooled {obj} "
+                                       f"grade, a summary (a member's posterior reads its own "
+                                       f"leave-one-out prior)",
                               study=study, date=date)
             STUDY_GENERATED.append(name)
 

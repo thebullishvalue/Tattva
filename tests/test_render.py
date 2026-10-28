@@ -39,7 +39,7 @@ import core.knobs as knobs
 import core.trust as trust
 from core.call import NOT_TRADEABLE
 from core.config import get_instrument_config
-from core.instruments import instrument
+from core.instruments import ASSET_CLASS_NAMES, asset_class_name, instrument
 from core.knobs import KNOBS, knob, priors_file_name
 from core.trust import PriorTable
 from pipeline.assemble import NO_PRIOR_LABEL, assemble, describe_priors
@@ -329,11 +329,11 @@ def test_the_synthetic_states_are_the_states_they_name():
 
 
 def test_a_hold_names_the_class_pool_and_the_study_it_was_shrunk_toward():
-    """The verdict names the pool behind a HOLD — the instrument's class for a class
-    pool, and the study's date — in its headline, its limit and the trust row;
-    call_ts's own reason keeps the short form (it is graded data, unchanged)."""
+    """The verdict names the pool behind a HOLD — the instrument's class, by its page
+    name, for a class pool, and the study's date — in its headline, its limit and the
+    trust row; call_ts's own reason keeps the short form (it is graded data, unchanged)."""
     run_date = json.loads(FIXTURE_PRIORS.read_text())["run_date"]
-    for state, pool, k in (("hold_class", "commodity class-LOO prior +0.000", 6),
+    for state, pool, k in (("hold_class", "Commodities class-LOO prior +0.000", 6),
                            ("hold_global", "global-LOO prior +0.000", 36)):
         b = synthetic_bundle(state)
         v = b.verdict
@@ -341,9 +341,9 @@ def test_a_hold_names_the_class_pool_and_the_study_it_was_shrunk_toward():
         for text in (v["headline"], v["limit"], trust):
             assert f"{pool} ± 0.010, k {k}, study {run_date}" in text, (state, text)
         reason = b.session["call_ts"].loc[v["asof"], "reason"]
-        assert "study" not in reason and "commodity" not in reason
+        assert "study" not in reason and "Commodities" not in reason and "commodity" not in reason
         assert reason.endswith(f"{pool.split(' prior')[0].split()[-1]} prior +0.000 ± 0.010, k {k})")
-    assert "commodity" not in synthetic_bundle("hold_global").verdict["headline"]
+    assert "Commodities" not in synthetic_bundle("hold_global").verdict["headline"]
     # With no prior: 'no pooled prior', and the limit is call_ts's reason itself.
     b = synthetic_bundle("hold")
     v = b.verdict
@@ -384,6 +384,22 @@ def test_the_buy_state_draws_its_size_formula_its_binding_sizer_and_the_study():
         assert label in grades, label
     assert "study not yet run" not in grades
     assert "study not yet run" in rendered_states()[("hold", "Grades")].text
+
+
+def test_no_page_prints_an_asset_class_key(gold_app):
+    """A class is printed by its page name (core.instruments.ASSET_CLASS_NAMES), never
+    by its registry key; the fixture app reads the committed study, whose Grades
+    tables list every class."""
+    keys = [k for k in ASSET_CLASS_NAMES if "_" in k]
+    pat = re.compile(r"(?<![\w:])(" + "|".join(keys) + r")(?![\w:])")
+    seen = set()
+    for where, r in all_renders(gold_app).items():
+        frames = [page_text([f]) for f in r.iframes]
+        for text in (r.text, r.rail, *frames):
+            assert not pat.search(text), (where, pat.search(text).group(0))
+            seen |= {n for n in ASSET_CLASS_NAMES.values() if n in text}
+    if _committed_priors():
+        assert {"Commodities", "India Indices", "US Indices"} <= seen, seen
 
 
 def test_a_missing_or_unregistered_card_raises():
@@ -490,8 +506,8 @@ def test_with_the_priors_loaded_every_surface_reads_the_study(priors_states):
     if scope in scopes:
         trust = {r["key"]: r for r in ss["verdict"]["chain"]}["trust"]["grade"]
         assert f"study {meta['run_date']}" in trust, trust
-        assert (f"{ct.attrs['asset_class']} {scope} prior" if scope.startswith("class")
-                else f"{scope} prior") in trust, trust
+        assert (f"{asset_class_name(ct.attrs['asset_class'])} {scope} prior"
+                if scope.startswith("class") else f"{scope} prior") in trust, trust
         assert trust in pages["Overview"].text and trust in pages["Mūla"].text
     grades = pages["Grades"].text
     for label in ("Decision A · claim centring", "Decision B · SIZERS_ENABLED",

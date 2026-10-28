@@ -648,7 +648,7 @@ def fetch_commodity_dataset(
       * ``stale_backfills``  — {friendly name: "YYYY-MM-DD"} predictors rebuilt
                                from a prior snapshot this fetch (a rebuilt column
                                is a DIFFERENT series, not just a staler one)
-      * ``panel_columns`` / ``panel_fingerprint`` — the composition digest
+      * ``panel_fingerprint`` — the composition digest (keys the Swayam fetch cache)
 
     Returns ``(df, None)`` on success or ``(None, error_message)`` on failure.
     """
@@ -718,7 +718,6 @@ def fetch_commodity_dataset(
     # the same fingerprint provably used the same cross-section; a changed
     # fingerprint says the difference came from the data, not the code, before
     # anyone spends an afternoon on the engine.
-    _columns = sorted(df.columns)
     _fingerprint = _panel_fingerprint(df)
 
     df.insert(0, "DATE", pd.to_datetime(df.index))
@@ -728,7 +727,6 @@ def fetch_commodity_dataset(
     df.attrs = {
         "source": _source,
         "stale_backfills": {k: v for k, v in _backfilled.items() if k in df.columns},
-        "panel_columns": _columns,
         "panel_fingerprint": _fingerprint,
     }
     return df, None

@@ -3,9 +3,9 @@
 Run from the repository root:  python -m pytest tests -q
 
 Every test here runs offline. Most run on synthetic data: the properties they
-assert (causality, sign conventions, the ECM's horizon arithmetic, the edge
-scorer's recovery of a planted signal, the conviction chain's rules) are
-properties of the code, not of any market. The rest read the committed
+assert (causality, sign conventions, the ECM's horizon arithmetic, the
+grader's recovery of a planted signal, the composer's and the trust map's
+rules) are properties of the code, not of any market. The rest read the committed
 fixtures under tests/fixtures (built by ``python -m studies.make_fixtures``):
 the 2.8.0 shared panel and the Gold / USD/INR OHLCV, served to the app through
 ``offline_fetch`` in place of every network fetch.
@@ -39,13 +39,52 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "slow: an extra full-panel fit; runs only with --runslow")
 
 
+# ─── The charter index's record (tests/test_charter.py) ─────────────────────
+#: Every test selected this session (after -k, -m, --deselect and --lf have
+#: deselected theirs), and the outcome of each that ran ('passed', 'failed',
+#: 'skipped', 'xfailed' or 'xpassed'), keyed '<file>::<test>[<case>]'. The
+#: charter's index reads them, and runs last.
+COLLECTED: list[str] = []
+#: Every test collected this session, before any deselection.
+EVERY: list[str] = []
+OUTCOMES: dict[str, str] = {}
+
+
+def _key(nodeid: str) -> str:
+    path, _, rest = nodeid.partition("::")
+    return f"{os.path.basename(path)}::{rest}"
+
+
 def pytest_collection_modifyitems(config, items):
+    # The charter's index checks that the tests it indexes passed, so it runs
+    # after them (a stable sort: every other test keeps its order).
+    items.sort(key=lambda item: os.path.basename(str(item.fspath)) == "test_charter.py")
+    EVERY[:] = [_key(item.nodeid) for item in items]
     if config.getoption("--runslow"):
         return
     skip = pytest.mark.skip(reason="slow: run with --runslow")
     for item in items:
         if "slow" in item.keywords:
             item.add_marker(skip)
+
+
+def pytest_collection_finish(session):
+    # Recorded once every plugin has deselected its items, so a test this
+    # session will not run is not 'collected' (the index runs it afresh).
+    COLLECTED[:] = [_key(item.nodeid) for item in session.items]
+
+
+def pytest_runtest_logreport(report):
+    key = _key(report.nodeid)
+    if report.when == "call":
+        if hasattr(report, "wasxfail"):
+            OUTCOMES[key] = "xfailed" if report.skipped else "xpassed"
+        else:
+            OUTCOMES[key] = report.outcome
+    elif report.failed:                              # a setup or teardown error
+        OUTCOMES[key] = "failed"
+    elif report.skipped and key not in OUTCOMES:     # skipped before it ran
+        OUTCOMES[key] = "skipped"
 
 
 def install_offline_fetch(mp) -> None:

@@ -376,7 +376,6 @@ class OnlineFactorModel:
         self.k = 0
         self.levels = np.zeros(K_MAX)          # cumulative factor levels
         self.contrib = np.zeros((K_MAX, n))    # per-instrument attribution
-        self.last_scores = np.zeros(K_MAX)
         self._logw = np.zeros(len(memories))
 
     # -- internals ----------------------------------------------------------
@@ -464,7 +463,6 @@ class OnlineFactorModel:
         m = self.mem[self.active]
 
         k = m.k
-        scores = np.zeros(K_MAX)
         if k > 0:
             V = m.V[:, :k]
             lam = np.maximum(m.lam_eig[:k], 1e-6)
@@ -482,14 +480,12 @@ class OnlineFactorModel:
             proj = (V * mask[:, None]).T @ zz
             denom = np.where(usable, norm * np.sqrt(lam), np.inf)
             s = proj / denom
-            scores[:k] = s
             # exact per-instrument attribution of the factor increment
             inc = (V * mask[:, None]) * zz[:, None] / denom[None, :]
             self.contrib[:k] += inc.T
             self.levels[:k] += s
 
         self.k = k
-        self.last_scores = scores
         self.t += 1
         return {"k": k, "levels": self.levels.copy()}
 

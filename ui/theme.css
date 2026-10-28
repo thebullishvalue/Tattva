@@ -213,7 +213,7 @@
 /* Every numeral in the app is tabular. Without this, a column of prices
    shimmers as digits change width and the eye cannot hold a baseline. */
 .stApp [class*="value"], .stApp td, .stApp th,
-.stApp .mono, .hero-signal, .hero-conviction,
+.stApp .mono, .hero-signal, .hero-size,
 .command-bar .cb-quote, .command-bar .cb-meta .v, .rail-readout .v,
 .metric-card h2, .metric-card .value {
     font-variant-numeric: tabular-nums;
@@ -815,7 +815,7 @@
 .st-key-kpi-strip [data-testid="column"] { min-width: 152px; }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   7 · HERO CARD — the conviction chain
+   7 · HERO CARD — the call and its chain
    Reads top-down as the decision itself: what and how strongly, then the one
    thing limiting it, then the chain that produced both. A reader who stops
    after the second block has everything they need to act.
@@ -853,18 +853,18 @@
 .hero-card.buy  .hero-signal { color: var(--long); }
 .hero-card.sell .hero-signal { color: var(--short); }
 
-.hero-conviction-block { text-align: right; }
+.hero-size-block { text-align: right; }
 .hero-chip {
     display: inline-block; padding: 3px 10px; border-radius: var(--r-pill);
     font-family: var(--mono); font-size: var(--fs-3xs); font-weight: 700;
     letter-spacing: 0.1em; text-transform: uppercase;
     border: 1px solid currentColor;
 }
-.hero-conviction {
+.hero-size {
     font-family: var(--mono); font-size: var(--fs-lg); font-weight: 700;
     letter-spacing: 0.01em; margin-top: var(--s2);
 }
-.hero-conviction-sub {
+.hero-size-sub {
     font-family: var(--mono); font-size: var(--fs-xs);
     color: var(--ink-tertiary); margin-top: 2px;
 }
@@ -873,9 +873,9 @@
     font-family: var(--sans); font-size: var(--fs-md);
     line-height: 1.6; color: var(--ink);
 }
-/* The binding constraint. Given a rule and a tint because it is the single
-   most useful sentence on the card — the specific reason conviction is not
-   higher — and it must not read as another line of body copy. */
+/* What limits the call. Given a rule and a tint because it is the single
+   most useful sentence on the card — the specific reason the size is not
+   larger — and it must not read as another line of body copy. */
 .hero-limit {
     margin-top: var(--s3);
     padding: var(--s3) var(--s4);
@@ -907,7 +907,7 @@
 .hero-gate-bar i { display: block; height: 100%; border-radius: var(--r-pill); }
 .hero-gate-label { color: var(--ink); font-weight: 600; }
 .hero-gate-detail { color: var(--ink-tertiary); line-height: 1.5; }
-/* The gate that caps conviction is the one the reader must see first. */
+/* The binding sizer is the one the reader must see first. */
 .hero-gate.binding .hero-gate-name,
 .hero-gate.binding .hero-gate-label { color: var(--caution); }
 .hero-risk {
@@ -2205,7 +2205,7 @@
 
 @media (max-width: 720px) {
     .hero-top { flex-direction: column; gap: var(--s3); }
-    .hero-conviction-block { text-align: left; }
+    .hero-size-block { text-align: left; }
     .hero-signal { font-size: var(--fs-2xl); }
     .hero-gate { grid-template-columns: 1fr; gap: 2px; }
     .hero-gate-detail { padding-left: 0; }

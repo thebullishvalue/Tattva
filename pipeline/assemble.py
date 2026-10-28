@@ -152,6 +152,7 @@ def _shrunk(ee: pd.DataFrame, obj: str, priors: PriorTable | None, instrument) -
             "prior_sd": math.sqrt(prior.tau2 + prior.var_mu) if prior else np.nan,
             "prior_scope": prior.scope if prior else "none",
             "prior_k": prior.k if prior else 0,
+            "prior_vintage": prior.vintage if prior else pd.NaT,
             "ic_post": post.ic, "se_post": post.se, "t_post": post.t, "w_own": post.w_own,
             "strength": strength(post.t),
         })
@@ -170,8 +171,9 @@ def grade_series(inputs: pd.DataFrame, price: pd.Series, *, h: int, exec_lag: in
     Each is ``core.grade.expanding_edge`` (only outcomes resolved by each grid
     date), combined with the prior valid at that date by
     ``core.trust.posterior``: columns ``ic, se, n_win, grid_date, prior_mu,
-    prior_sd, prior_scope, prior_k, ic_post, se_post, t_post, w_own,
-    strength``. An object whose grade raises is left out (the composer then
+    prior_sd, prior_scope, prior_k, prior_vintage, ic_post, se_post, t_post,
+    w_own, strength`` (``prior_vintage`` the study vintage the prior was read
+    from, NaT with none). An object whose grade raises is left out (the composer then
     reads it as ungraded) and the failure is reported.
     """
     rows = _claim_rows(inputs)
@@ -200,7 +202,7 @@ def _empty_edge(h: int, exec_lag: int) -> dict:
 
 
 def _mean_se(y: pd.Series, h: int) -> dict:
-    """Mean of a drift-neutral payoff, its SE on n/h independent windows."""
+    """Mean of a drift-neutral payoff, its SE on n/h non-overlapping windows."""
     y = y.dropna()
     n = len(y)
     n_win = n // max(1, h)
@@ -282,7 +284,7 @@ def _call_edge(call_ts: pd.DataFrame, price: pd.Series, *, h: int, exec_lag: int
     if graded:
         status = "graded"
     elif e["n_win"] < GRADE_WARMUP_WIN:
-        status = f"not yet graded: {e['n_win']} of {GRADE_WARMUP_WIN} independent issued windows"
+        status = f"not yet graded: {e['n_win']} of {GRADE_WARMUP_WIN} non-overlapping issued windows"
     elif w[issued].nunique() <= 1:
         status = "ungraded: every issued call is the same, nothing to rank"
     else:
@@ -308,7 +310,7 @@ def _prospective(call_ts: pd.DataFrame, price: pd.Series, *, h: int, exec_lag: i
     issued = (w != 0) & (call_ts.index > pd.Timestamp(run_date))
     e = series_edge(w, price, h, mask=issued, drift="causal", exec_lag=exec_lag)
     e.update(since=str(run_date),
-             status=f"{e['n_win']} independent issued windows since {run_date}")
+             status=f"{e['n_win']} non-overlapping issued windows since {run_date}")
     return e
 
 

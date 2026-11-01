@@ -49,8 +49,9 @@ class PreparedPanel:
     ``data`` is indexed by session date (named after the source date column)
     with the target as its first column. ``start`` is the first session;
     ``fingerprint`` hashes the settled rows (all but the newest, which may
-    still tick) — up to ``prepare_panel``'s ``fingerprint_upto`` when one is
-    given; ``report`` is the prep trace for the run console.
+    still tick) — or exactly those up to ``prepare_panel``'s
+    ``fingerprint_upto`` when one is given; ``report`` is the prep trace for
+    the run console.
     """
 
     data: pd.DataFrame
@@ -107,10 +108,12 @@ def prepare_panel(
     ``features`` absent from ``raw`` are left out and reported. The feature
     list does not depend on the run date, so the as-of invariant holds.
 
-    The fingerprint hashes the settled rows, or those dated on or before
-    ``fingerprint_upto`` when it is earlier: the session a pooled-prior study
-    hashed this target's history up to, so the run's fingerprint and the
-    study's record are of the same rows.
+    The fingerprint hashes the settled rows (all but the newest, which may
+    still tick) — or, given ``fingerprint_upto``, exactly the rows dated on or
+    before it: the session a pooled-prior study hashed this target's history
+    to (its last prior vintage, a settled date), so the run's fingerprint and
+    the study's record are of the same rows and differ only when those rows
+    did.
     """
     ticker = instrument(target).ticker
     epoch = pd.Timestamp(epoch)
@@ -158,7 +161,7 @@ def prepare_panel(
     report["start"] = start
     settled_upto = data.index[-2] if len(data) > 1 else data.index[0] - pd.Timedelta(days=1)
     if fingerprint_upto is not None:
-        settled_upto = min(settled_upto, pd.Timestamp(fingerprint_upto))
+        settled_upto = pd.Timestamp(fingerprint_upto)
     fingerprint = history_fingerprint(data, [target, *feats], settled_upto)
     return PreparedPanel(data=data, features=feats, start=start,
                          fingerprint=fingerprint, report=report)

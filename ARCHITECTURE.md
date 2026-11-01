@@ -53,10 +53,10 @@ horizon and causality. Anything else was deleted (see
 |---|---|---|
 | CALL | the call and its size (`core/call.py`) | one object, `verdict_from_row(call_ts at d*)`, read by every page |
 | CLAIM | Mūla's FVO → d | the only sign source |
-| PRECONDITION | P1 published · P2 target printed and fewer than h sessions behind · P3 tradeable · P4 \|FVO\| ≥ CLAIM_SIGMA | voids the claim (NO CALL / NO CLAIM), never sizes it; one definition each |
+| PRECONDITION | P1 published · P2 target printed, and its window from the next close not yet run (fewer than h + L of its sessions closed since d*) · P3 tradeable · P4 \|FVO\| ≥ CLAIM_SIGMA | voids the claim (NO CALL / NO CLAIM), never sizes it; one definition each |
 | SIZER | Swayam confirmation (z = d·Lean on a native Swayam row, else 0) · Reversion, ECM (z = 2·MRProb − 1, MRProb = P(price-side κ̂ > 0): the evidence that price responds to the gap at all, not how much of the closing it does — that is the gap split) | β = 0 while unskilled; an absent or carried reading is ×1.00; a factor is positive and unsigned, so it never vetoes or inverts |
 | GRADE | `core.grade` (series_edge, expanding_edge) and `core.trust` (posterior, strength); trust is the claim's grade mapped once | the only skill numbers shown or consumed |
-| EVIDENCE | the gap-closure split, the claim's unit, the claim by side, gap stationarity, fair value, model fit, drivers, Swayam's standalone lean, the view bank, the ECM's gap-implied move | never moves the call; neutral tone; a lean carries its own grade |
+| EVIDENCE | the gap-closure split, the claim's unit, the claim's full history, the claim by side, gap stationarity, fair value, model fit, drivers, Swayam's standalone lean, the view bank, the ECM's gap-implied move | never moves the call; neutral tone; a lean carries its own grade |
 | INFRASTRUCTURE | fetch from the epoch, `data/prep.py`, `data/calendars.py`, the completeness gate, caches, the registries, the record | one as-of row; causal; holds no trust constant |
 
 No learner ships on the decision path: Mūla's internal model averaging and
@@ -86,6 +86,7 @@ Every registered role (`ROLES`):
 | `evidence:gap_split` | EVIDENCE | `claim` | Who closes the gap? |
 | `evidence:claim_unit` | EVIDENCE | `claim` | The claim's unit |
 | `evidence:gap_stationarity` | EVIDENCE | `claim` | Gap stationarity |
+| `evidence:claim_history` | EVIDENCE | `claim` | The claim's full history |
 | `evidence:claim_side` | EVIDENCE | `claim` | The claim by side |
 | `evidence:fair_value` | EVIDENCE | `claim` | Price and fair value |
 | `evidence:model_fit` | EVIDENCE | `claim` | Model fit |
@@ -127,6 +128,10 @@ COMPOSE+GRADE   pipeline.assemble.assemble(fvo_ts, swayam_daily, instrument, cfg
                   evidence  = pipeline.evidence.build_evidence(fvo_ts, h, L)
                   edges     = grade_all(call_ts, ...)      the call graded on the sessions it was issued
                   verdict   = core.call.verdict_from_row(call_ts, edges, asof=d*)
+                  (today = data.calendars.session_closed_through: behind, P2 and the elapsed
+                   horizon count the target's sessions CLOSED since d*, on its printed spine)
+RENDER          pipeline.assemble.restate(call_ts, edges, grades_ts, today)   a stored run re-read
+                  against the session closed now: d*'s row recomposed, nothing refitted
 PRESENTATION    ui/ renders the bundle and the verdict only: no estimator, no threshold, no inline lean
 OFFLINE         studies/pooled_priors.py → pipeline.run.run_target over the catalogue
                 → data/priors/pooled_priors_h{h}_L{L}.json → core.trust.PriorTable + KNOBS (measured)
@@ -168,6 +173,10 @@ piece of graded evidence:
   grid date; it is undefined below `GRADE_WARMUP_WIN` windows, so appending data
   never moves a past grade.
 
+A role object (the claim, a sizer) has ONE grade on every page: the own as-of
+grade the call read at d* (`edges[k]['asof_grade']`), dated with the grid date
+it was graded through, its prior, the posterior's weight on it and t_post. Its
+full-history grade is shown only as a labelled diagnostic, with no edge word.
 Labels (`core.semantics.edge_tier`), on the posterior t of a role object and on
 the own t of evidence: ≤ −1.645 measured against (neutral, never inverted);
 (−1.645, −1] negative, unproven; |t| < 1 no measured edge; [1, 1.645)
@@ -195,15 +204,22 @@ prior of its asset class, produced by one committed catalogue study.
   instead (global-LOO).
 - **Lookup** (`core.trust.PriorTable.lookup`): the latest vintage on or before
   the session. A study member reads only its own leave-one-out entry — never
-  the class's all-member entry, which contains it; an instrument outside the
-  study reads its class's all-member entry. No file, or no vintage yet, is no
-  prior.
+  the class's all-member entry, which contains it; so does another listing of
+  a member (the same base symbol on another exchange of its class, 'RELIANCE
+  (BSE)' for 'RELIANCE (NSE)'); any other instrument reads its class's
+  all-member entry. No file, or no vintage yet, is no prior.
 - **Posterior** (`core.trust.posterior`), with own grade a, V_a = se²; prior μ,
   V_b = τ² + var_μ, covariance κ:
   w = clip((V_b − κ)/(V_a + V_b − 2κ), 0, 1); m = w·a + (1 − w)·μ;
   se_post = max(√(w²V_a + (1 − w)²V_b + 2w(1 − w)κ), se_floor); t_post = m/se_post.
   No own grade yet: the prior predictive. No prior: the own grade. Neither:
-  ungraded, strength 0.
+  ungraded, strength 0. An object the target cannot have (the Swayam sizer of
+  a target with no OHLCV) is not graded at all: no prior predictive stands in.
+  With the study's τ = 0, V_b is var_μ alone, so the own grade's weight is
+  small (0 to about a third), and it is 0 where κ ≥ V_b — a member whose
+  errors are nearly a copy of its pool's (6 on the committed study for the
+  claim): its t_post is its pool's, whatever its own grade. The trust row and
+  the Grades table print the weight.
 - **Decisions,** on held-out members only (the catalogue minus the four
   audited instruments and anything correlated ≥ 0.8 with them): A — claim
   centring, recorded and never applied without an owner-signed change; B —
@@ -215,7 +231,9 @@ prior of its asset class, produced by one committed catalogue study.
 
 `core/knobs.py` reads the committed file at import and registers its results as
 measured knobs; `core.trust.load_priors` refuses a file studied at another h
-or L.
+or L (the app and `run_target` share `priors_for_run`, and the pages say
+'priors file refused' with its reason), and discloses a file whose recorded
+`knobs_hash` is not the registry's (System and Grades).
 
 ---
 
@@ -226,7 +244,15 @@ kind — structural (fixed by an argument, never tuned), structural-inherited
 (an older value kept without a study behind it), or measured (set by the
 committed study, named with its run date) — its consumer, its horizon
 coupling and its reason. `register_measured` is the only writer of a measured
-value, and the decision-path modules hold no unregistered literal.
+value. An engine constant is registered by reference where it lives (`ref`,
+`module.attribute`; `tests/test_knobs.py` holds each ref to its module's value).
+What is enforced: no decision-path module (the engines, the prep, the pipeline,
+the composer, the grade, trust and the words) defines a numeric module-level
+constant that no knob refers to, apart from the fair-value band's evidence
+constants and two numerical guards, each declared with its reason; and the
+grade, trust and the words write no number but an arithmetic identity or a
+knob. Numbers inside an engine's function bodies are its estimators'
+arithmetic and are not linted.
 
 | Knob | Kind | Value | Moves |
 |---|---|---|---|
@@ -256,13 +282,32 @@ value, and the decision-path modules hold no unregistered literal.
 | `SWAYAM_MMR_NUM_VARS` | structural-inherited | `4` | sizer:swayam input |
 | `SWAYAM_REGIME_SENSITIVITY` | structural-inherited | `8.0` | sizer:swayam input |
 | `SWAYAM_BASE_WEIGHT` | structural-inherited | `0.0` | sizer:swayam input |
+| `SWAYAM_LENGTHS_STOCK` | structural-inherited | `10, 14, 20, 28, 40` | sizer:swayam input (stock_india, stock_us) |
+| `SWAYAM_ROC_FRAC_STOCK_INDIA` | structural-inherited | `0.7` | sizer:swayam input (stock_india) |
+| `SWAYAM_ROC_FRAC_STOCK_US` | structural-inherited | `0.55` | sizer:swayam input (stock_us) |
+| `SWAYAM_MMR_REPLICA_MAX_CORR` | structural | `0.98` | sizer:swayam input: the replica screen (full-sample) |
 | `FVO_BURN_IN` | structural | `252` | claim |
 | `FVO_MIN_PRINTS` | structural | `250` | claim |
 | `FVO_VALUATION_DELTAS` | structural | `0.999, 0.9995, 0.9999, 1.0` | claim |
+| `PANEL_MIN_COVERAGE` | structural | `0.6` | precondition P1: the completeness gate (`engines.mula.valuation`) |
+| `PANEL_MIN_PRINTS` | structural | `30` | precondition P1: the completeness gate |
+| `PUBLISH_WARMUP_PRINTS` | structural | `10` | precondition P1: the publication warm-up |
+| `PUBLISH_WARMUP_WINDOW` | structural | `21` | precondition P1: the publication warm-up |
+| `SESSION_SPARSE_FRACTION` | structural | `0.6` | precondition P1: the withheld reason it names |
+| `K_MAX` | structural | `20` | claim: the factor bank (`engines.mula.factors`) |
+| `MP_EDGE_HYSTERESIS` | structural | `2.0` | claim: the factor bank |
+| `Z_CLIP` | structural | `6.0` | claim: the factor bank |
+| `MEMORY_GRID` | structural | `126.0, 252.0, 504.0` | claim: the factor bank |
+| `ECM_GRID` | structural | `0.9, 0.98, 0.995, 0.999, 1.0` | sizer:reversion input (`engines.mula.ecm`) |
+| `ECM_POOL_ALPHA` | structural | `0.99` | sizer:reversion input |
+| `ECM_WARMUP` | structural | `126` | sizer:reversion input |
+| `ECM_SCALE_HALFLIFE` | structural | `504.0` | sizer:reversion input |
+| `ECM_SCALE_WARMUP` | structural | `20` | sizer:reversion input |
+| `ECM_SCALE_FLOOR` | structural | `0.0001` | sizer:reversion input |
 | `MIN_DATA_POINTS` | structural | `1500` | infrastructure: target history |
 | `ANALYSIS_EPOCH` | structural | `2017-01-02` | infrastructure: every history's first session |
 | `SIZERS_ENABLED` | measured | `True` | composer: Decision B |
-| `TIER_RULE` | measured | `none` | composer: Decision C |
+| `TIER_RULE` | measured | `none` | display: Decision C (no code issues a tier word) |
 | `CLAIM_CENTRING` | measured | `none` | claim: Decision A, recorded only |
 | `POOLED_PRIOR` | measured | `data/priors/pooled_priors_h10_L1.json` | trust: the class priors |
 | `PRIOR:<object>:<class>` | measured | one per object and class | trust: the class summary {μ, se_μ, τ, k, as-of}, generated from the study file, never typed |
@@ -305,7 +350,7 @@ table to that index.
 | C11 | the size is a unitless index; no '%' and no tier word unless Decision C passes; breadth in points | tests/test_copy.py, tests/test_call.py, tests/test_study.py |
 | C12 | the claim's unit: reported as evidence; a strict xfail until Decision A is applied by an owner-signed change | tests/test_charter.py |
 | C13 | one definition per concept, one copy per quantity; no retired or banned copy on a page or in the docs | tests/test_semantics.py, tests/test_app_smoke.py, tests/test_copy.py, tests/test_docs.py |
-| C14 | no learner on the decision path; Swayam's views equal-weighted and causal; drift is not skill | tests/test_app_smoke.py, tests/test_swayam.py, tests/test_grade.py |
+| C14 | no learner on the decision path; Swayam's views equal-weighted and causal, except its MMR replica screen, which drops a near-copy driver on a full-sample correlation (deferred); drift is not skill | tests/test_app_smoke.py, tests/test_swayam.py, tests/test_grade.py |
 | C15 | every card registered to a role; every lean beside its grade; Overview in decision order; the rail on the call path | tests/test_roles.py, tests/test_render.py |
 | C16 | every published column, edge, key, config field and knob has a reader | tests/test_consumers.py |
 
@@ -363,9 +408,13 @@ is a versioned change, never a tweak:
 - the priors file itself.
 
 The history's fingerprint is a content hash of the prepared rows up to the
-session the study hashed each member to; System shows 'history rewritten —
-history differs from the panel the priors were studied on' when the live
-panel's differs from the study's (a failed fetch, an adjusted-price revision).
+session the study hashed each member to — its last prior vintage, a settled
+quarter-end and the last row any prior depends on, recorded as
+`fingerprint_upto` by a provenance stage that refits nothing and that the
+analysis never reads. The app hashes its own history to exactly that session;
+System shows 'history rewritten' when the two differ (a failed fetch, a split
+or other revision of rows the priors depend on), and 'same history' otherwise —
+a revised newest session cannot flag it.
 A Provisional newest row may be revised once and is flagged; nothing else that
 has resolved changes when data are appended.
 
@@ -379,6 +428,7 @@ shrunk toward, named with the study's date. Trust opens only where the claim
 has a measured, price-side edge: an own grade strong enough, or a class pool
 skilled enough, to carry the posterior over the bar. The committed study found
 no asset class whose pool does that at h = 10 (README.md, generated from the
-study), so a BUY or SELL appears only where a member's own grade carries it,
-and the call's own grade, coverage and prospective record are always on screen
-beside it.
+study), so a BUY or SELL appears only where a member's own grade carries the
+posterior over the bar — which, with τ = 0, it can do only with a large own IC,
+and cannot do at all for a member whose own weight is 0 — and the call's own
+grade, coverage and prospective record are always on screen beside it.

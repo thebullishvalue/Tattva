@@ -36,7 +36,7 @@ from core.knobs import knob
 from core.logger_config import console
 from core.semantics import claim_direction, swayam_word
 from core.trust import PriorTable, posterior, strength
-from data.calendars import trading_days_behind
+from data.calendars import printed_sessions_behind
 from pipeline.evidence import build_evidence
 
 EXECUTION_LAG: int = knob("EXECUTION_LAG")
@@ -77,14 +77,16 @@ def _num(x) -> float | None:
 # ═══════════════════════════════════════════════════════════════════════
 
 def gather_inputs(fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame | None, *, instrument,
-                  h: int, today) -> pd.DataFrame:
+                  h: int, today, exec_lag: int | None = None) -> pd.DataFrame:
     """The composer's inputs, one row per Mūla session, every value read BY DATE.
 
     Columns: ``price, fvo, pct`` (gap in %), ``valid, provisional``;
     ``published`` (FVO finite and the session not withheld) and
     ``withheld_reason``; ``printed`` (the target printed: the prepared spine
     keeps only its own sessions, so a row's price is its print); ``behind``
-    (the target's sessions from d* to ``today``, on d*'s row only — a past
+    (the target's sessions after d* that have closed by ``today`` —
+    ``data.calendars.printed_sessions_behind``: its own printed sessions where
+    the spine has them, the calendar's beyond — on d*'s row only; a past
     session was issued on its own close, 0 behind); ``claim``
     (``claim_direction(FVO)``, before any precondition); the Swayam sizer's
     ``swayam_lean`` (the session's published ``Lean``, the one Swayam lean
@@ -93,8 +95,12 @@ def gather_inputs(fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame | None, *, in
     (NaN on a carried or absent one); the reversion sizer's ``mr_prob, kappa``
     and ``z_reversion = 2·MRProb − 1``.
 
-    ``attrs``: ``h``, ``target``, ``asset_class`` and ``asof`` (d*, the
-    newest published session).
+    ``today`` is the newest date whose session has CLOSED
+    (``data.calendars.session_closed_through``), or a replay's end date.
+
+    ``attrs``: ``h``, ``exec_lag`` (L, default EXECUTION_LAG), ``target``,
+    ``asset_class``, ``has_ohlcv`` and ``asof`` (d*, the newest published
+    session).
     """
     f = _by_date(fvo_ts)
     idx = f.index
@@ -107,8 +113,7 @@ def gather_inputs(fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame | None, *, in
     d_star = pd.Timestamp(pub[-1]) if len(pub) else None
     behind = pd.Series(0, index=idx, dtype=np.int64)
     if d_star is not None:
-        behind.loc[d_star] = int(trading_days_behind(instrument.ticker, d_star.date(),
-                                                     pd.Timestamp(today).date()))
+        behind.loc[d_star] = int(printed_sessions_behind(instrument.ticker, idx, d_star, today))
 
     sw = _by_date(swayam_daily).reindex(idx)
     lean = _col(sw, "Lean")
@@ -125,8 +130,9 @@ def gather_inputs(fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame | None, *, in
         "swayam_lean": lean, "swayam_native": native, "z_swayam": (claim * lean).where(native),
         "mr_prob": mr, "kappa": _col(f, "MulaKappa"), "z_reversion": 2.0 * mr - 1.0,
     }, index=idx)
-    out.attrs = {"h": int(h), "target": instrument.name, "asset_class": instrument.asset_class,
-                 "asof": d_star}
+    out.attrs = {"h": int(h), "exec_lag": int(EXECUTION_LAG if exec_lag is None else exec_lag),
+                 "target": instrument.name, "asset_class": instrument.asset_class,
+                 "has_ohlcv": bool(instrument.has_ohlcv), "asof": d_star}
     return out
 
 
@@ -174,12 +180,16 @@ def grade_series(inputs: pd.DataFrame, price: pd.Series, *, h: int, exec_lag: in
     prior_sd, prior_scope, prior_k, prior_vintage, ic_post, se_post, t_post,
     w_own, strength`` (``prior_vintage`` the study vintage the prior was read
     from, NaT with none). An object whose grade raises is left out (the composer then
-    reads it as ungraded) and the failure is reported.
+    reads it as ungraded) and the failure is reported. An object the target
+    cannot have — the Swayam sizer of a target with no OHLCV feed, which never
+    reads anything — is not graded at all: no class prior predictive stands in
+    for a reading that cannot exist (its β is 0 and its factor ×1.00).
     """
     rows = _claim_rows(inputs)
     claim = inputs["claim"].astype(float)
     specs = (("claim", claim, None),
-             *((f"sizer:{s.key}", inputs[s.z_col], claim) for s in SIZERS))
+             *((f"sizer:{s.key}", inputs[s.z_col], claim) for s in SIZERS
+               if s.key != "swayam" or getattr(instrument, "has_ohlcv", True)))
     out: dict[str, pd.DataFrame] = {}
     for obj, lean, sign in specs:
         try:
@@ -211,13 +221,20 @@ def _mean_se(y: pd.Series, h: int) -> dict:
 
 
 def _with_asof(edge: dict, grade: pd.DataFrame | None, d_star, **extra) -> dict:
-    """Attach the as-of, shrunk grade the call read at d* (what trust or β used)."""
+    """Attach the as-of, shrunk grade the call read at d* (what trust or β used).
+
+    ``asof_grade`` is the ONE grade of a role object every page prints: the
+    own as-of grade (``ic``, ``se``, ``n_win``) at the grid date it was graded
+    through (``grid_date``), the prior, the posterior and its strength. The
+    edge's own full-history fields are a diagnostic beside it.
+    """
     if grade is not None and d_star is not None and d_star in grade.index:
         g = grade.loc[d_star]
+        gd = pd.Timestamp(g["grid_date"]) if pd.notna(g.get("grid_date")) else None
         edge["asof_grade"] = {**{k: _num(g[k]) for k in ("ic", "se", "n_win", "prior_mu", "prior_sd",
                                                            "ic_post", "se_post", "t_post", "w_own",
                                                            "strength")},
-                              "prior_scope": str(g["prior_scope"])}
+                              "prior_scope": str(g["prior_scope"]), "grid_date": gd}
     edge.update(extra)
     return edge
 
@@ -388,9 +405,19 @@ def grade_all(call_ts: pd.DataFrame, inputs: pd.DataFrame, price: pd.Series, evi
 #  The whole loop
 # ═══════════════════════════════════════════════════════════════════════
 
-def describe_priors(priors: PriorTable | None) -> dict:
-    """The bundle's ``priors_meta``: the priors file's provenance, or the no-prior label."""
+def describe_priors(priors: PriorTable | None, refused: str | None = None) -> dict:
+    """The bundle's ``priors_meta``: the priors file's provenance, or why there is none.
+
+    ``status`` is ``'loaded'``, ``'refused'`` (a file exists and was refused —
+    ``refused`` is ``core.trust.priors_for_run``'s reason, e.g. studied at
+    another h or L) or ``'none'`` (no file: the study has not run). A loaded
+    file carries ``knobs_match`` (False when it was studied under another
+    knobs registry; ``core.trust.load_priors``).
+    """
     if priors is None:
+        if refused:
+            return {"status": "refused", "label": f"priors file refused: {refused}",
+                    "refusal": refused, "study": None, "run_date": None, "sha": None}
         return {"status": "none", "label": NO_PRIOR_LABEL, "study": None, "run_date": None,
                 "sha": None}
     m = dict(priors.meta)
@@ -415,15 +442,18 @@ def assemble(fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame | None, *, instrum
     """Compose, grade and read the call for one target.
 
     ``asof`` is d* (``MulaEngine.asof``) and must be the newest published
-    session of ``fvo_ts``; ``today`` is the target's current session date
-    (``data.calendars.session_today``). h is ``cfg.forecast_horizon`` and L is
+    session of ``fvo_ts``; ``today`` is the newest date whose session has
+    closed on the target's exchange (``data.calendars.session_closed_through``)
+    or a replay's end date: the call's recency (``behind``), P2 and the elapsed
+    horizon are counted to it. h is ``cfg.forecast_horizon`` and L is
     ``EXECUTION_LAG``, once, for every grade. ``epoch`` and ``fingerprint``
     name the prepared history (``data.prep``); with the priors' provenance and
     the code version they are stamped on ``call_ts.attrs`` and on every edge's
     ``attrs``.
     """
     h, lag = int(cfg.forecast_horizon), int(EXECUTION_LAG)
-    inputs = gather_inputs(fvo_ts, swayam_daily, instrument=instrument, h=h, today=today)
+    inputs = gather_inputs(fvo_ts, swayam_daily, instrument=instrument, h=h, today=today,
+                           exec_lag=lag)
     want = pd.Timestamp(asof) if asof is not None else None
     if inputs.attrs["asof"] != want:
         raise ValueError(f"d* disagrees: the engine's {want} vs the newest published session "
@@ -445,7 +475,72 @@ def assemble(fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame | None, *, instrum
     for e in edges.values():
         e["attrs"] = dict(stamp)
     verdict = verdict_from_row(call_ts, edges, asof=want, horizon=h, exec_lag=lag,
-                               target=instrument.name)
+                               target=instrument.name, closed_through=today)
     return Assembled(call_ts=call_ts, grades_ts=grades_ts, edges=edges, evidence=evidence,
                      verdict=verdict)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  A stored run, read again on a later day
+# ═══════════════════════════════════════════════════════════════════════
+
+#: call_ts columns a one-row recomposition rebuilds the composer's inputs from.
+_INPUT_COPY = ("published", "valid", "provisional", "printed", "withheld_reason", "fvo", "pct",
+               "swayam_lean", "swayam_native", "mr_prob", "kappa")
+
+
+def restate(call_ts: pd.DataFrame, edges: dict, grades_ts: dict[str, pd.DataFrame], *,
+            ticker: str | None, today, price: pd.Series | None) -> tuple[pd.DataFrame, dict, dict]:
+    """A stored run's ``(call_ts, edges, verdict)``, read against ``today``.
+
+    ``behind`` at d* — and with it P2, the elapsed horizon and the action — is
+    measured to a date (``data.calendars.session_closed_through``), so a run
+    kept open across sessions must be read again against the current one, not
+    the one it was computed on. Nothing is refitted: d*'s row is recomposed by
+    the composer itself (``core.call.compose_series``) from that row's own
+    inputs, which call_ts carries, with ``behind`` re-counted
+    (``data.calendars.printed_sessions_behind`` on call_ts's spine); if d* now
+    carries a different claim or call (its coverage counts), ``edges['call']``
+    is re-graded on the restated call_ts. The verdict is rebuilt with ``closed_through=today``, so a
+    PROVISIONAL d* whose session has closed since says so. When nothing moved,
+    the stored ``call_ts`` and ``edges`` are returned as they are.
+    """
+    attrs = dict(call_ts.attrs)
+    d_star = attrs.get("asof")
+    h, lag = int(attrs["h"]), int(attrs.get("exec_lag", EXECUTION_LAG))
+    target = str(attrs.get("target") or "")
+    if d_star is None or pd.Timestamp(d_star) not in call_ts.index:
+        verdict = verdict_from_row(call_ts, edges, asof=d_star, horizon=h, exec_lag=lag,
+                                   target=target, closed_through=today)
+        return call_ts, edges, verdict
+    d_star = pd.Timestamp(d_star)
+    behind = int(printed_sessions_behind(ticker, call_ts.index, d_star, today))
+    if behind != int(call_ts.at[d_star, "behind"]):
+        row = call_ts.loc[[d_star]]
+        inp = pd.DataFrame({c: row[c].to_numpy() for c in _INPUT_COPY}, index=row.index)
+        inp["behind"] = np.array([behind], dtype=np.int64)
+        claim = inp["fvo"].map(claim_direction).astype(np.int64)
+        inp["claim"] = claim
+        native = inp["swayam_native"].astype(bool)
+        inp["z_swayam"] = (claim * inp["swayam_lean"].astype(float)).where(native)
+        inp["z_reversion"] = 2.0 * inp["mr_prob"].astype(float) - 1.0
+        inp.attrs = {"h": h, "exec_lag": lag}
+        g1 = {k: g.reindex(row.index) for k, g in (grades_ts or {}).items()}
+        new = compose_series(inp, g1, tradeable=bool(attrs.get("tradeable", True)),
+                             sizers_enabled=bool(attrs.get("sizers_enabled", True)))
+        old_w, old_d = float(call_ts.at[d_star, "w"]), int(call_ts.at[d_star, "d"])
+        call_ts = call_ts.copy()
+        for c in call_ts.columns:
+            call_ts.at[d_star, c] = new.at[d_star, c]
+        call_ts.attrs = attrs
+        moved = (float(call_ts.at[d_star, "w"]) != old_w or int(call_ts.at[d_star, "d"]) != old_d)
+        # The call's grade counts d*'s row in its coverage (issued and claim sessions).
+        if moved and price is not None and "call" in (edges or {}):
+            edges = dict(edges)
+            e = _call_edge(call_ts, price.reindex(call_ts.index), h=h, exec_lag=lag)
+            e["attrs"] = dict((edges["call"] or {}).get("attrs") or {})
+            edges["call"] = e
+    verdict = verdict_from_row(call_ts, edges, asof=d_star, horizon=h, exec_lag=lag,
+                               target=target, closed_through=today)
+    return call_ts, edges, verdict
 

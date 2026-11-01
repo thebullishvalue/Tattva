@@ -92,3 +92,23 @@ def test_a_registered_stock_gets_an_instrument(monkeypatch):
     assert (inst.asset_class, inst.currency, inst.tradeable, inst.has_ohlcv) == (
         "stock_us", "USD", True, True)
     assert config.get_instrument_config("ZZTEST (US)").forecast_horizon >= 1
+
+
+def test_a_typed_symbol_that_is_a_panel_column_is_not_its_own_predictor(monkeypatch):
+    """TLT typed as a US stock is the panel's 'US Treasury Long (20Y+)': that column is
+    the target itself, so neither Mūla nor Swayam's MMR may read it."""
+    for mod, name in ((config, "ALL_TARGETS"), (config, "STOCK_TARGET_MARKETS"),
+                      (config, "INSTRUMENT_CONFIGS"), (instruments, "INSTRUMENTS")):
+        monkeypatch.setattr(mod, name, dict(getattr(mod, name)))
+    # One exclusions dict, shared by core.config and core.instruments (which imported it).
+    excl = dict(config.TARGET_EXCLUDED_PREDICTORS)
+    monkeypatch.setattr(config, "TARGET_EXCLUDED_PREDICTORS", excl)
+    monkeypatch.setattr(instruments, "TARGET_EXCLUDED_PREDICTORS", excl)
+    config.register_stock_target("TLT (US)", "TLT", "us")
+    col = "US Treasury Long (20Y+)"
+    assert config.GLOBAL_MACRO_MAP[col] == "TLT"
+    assert col not in instruments.predictor_universe("TLT (US)", [col, "Gold"])
+    assert col not in config.swayam_macro_columns("TLT (US)", [col, "Gold"])
+    # A stock that is no panel column keeps the full universe.
+    config.register_stock_target("ZZTEST (US)", "ZZTEST", "us")
+    assert col in instruments.predictor_universe("ZZTEST (US)", [col, "Gold"])

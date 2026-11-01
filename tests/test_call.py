@@ -276,10 +276,28 @@ def test_f_untradeable_is_no_call_and_inside_the_noise_is_no_claim():
 
 
 def test_f_a_target_behind_by_the_horizon_is_no_call():
-    inp = _inputs(2, behind=[0, H])
+    """P2 voids the call once its window from the next close has run: h + L sessions
+    closed since d*. At h behind, L of the window's sessions are still to close."""
+    L = knob("EXECUTION_LAG")
+    inp = _inputs(3, behind=[0, H + L - 1, H + L])
     ct = compose_series(inp, _grades(inp.index, 3.0, 1.0), tradeable=True, sizers_enabled=True)
-    assert list(ct["action"]) == ["BUY", "NO CALL"]
-    assert ct["reason"].iloc[1] == f"{H} sessions behind: the {H}-session horizon has run"
+    assert list(ct["action"]) == ["BUY", "BUY", "NO CALL"]
+    assert ct["reason"].iloc[2] == (f"{H + L} sessions behind: the {H}-session horizon from the "
+                                    f"next close has run")
+
+
+def test_f_the_verdict_counts_the_elapsed_horizon_from_the_execution_session():
+    """'k of h elapsed' counts the window's sessions that have closed: none until the
+    entry close (d* + L) has passed, then one per closed session, h once it has run."""
+    L = knob("EXECUTION_LAG")
+    for behind, elapsed, action in ((0, 0, "BUY"), (L, 0, "BUY"), (L + 1, 1, "BUY"),
+                                    (H + L - 1, H - 1, "BUY"), (H + L, H, "NO CALL")):
+        inp = _inputs(1, behind=[behind])
+        ct = compose_series(inp, _grades(inp.index, 3.0, 1.0), tradeable=True, sizers_enabled=True)
+        v = verdict_from_row(ct, {}, asof=inp.index[-1], horizon=H, exec_lag=L, target="Synthetic")
+        assert (v["behind"], v["elapsed"], v["action"]) == (behind, elapsed, action), behind
+        pre = {r["key"]: r for r in v["chain"]}["precondition"]["detail"]
+        assert f"{elapsed} of {H} of the horizon elapsed" in pre
 
 
 # ─── (g) Binding is the smallest factor below 1, never trust ────────────────
@@ -436,3 +454,49 @@ def test_the_size_is_an_index_never_a_percentage():
     assert format_size(0.3149) == "0.31" and format_size(0) == "0.00"
     assert format_size(float("nan")) == "—" and format_size(None) == "—"
     assert "%" not in format_size(1.7)
+
+
+# ─── Recency: closed sessions, on the target's printed spine ─────────────────
+
+def test_recency_counts_closed_sessions_on_the_targets_printed_spine():
+    """'behind' counts the target's sessions after d* that have CLOSED: its own printed
+    sessions where the spine has them — a CME session with no GC=F bar (MLK day) is not
+    one of Gold's — and the calendar's beyond its newest print; today's session counts
+    once its close has passed."""
+    from data.calendars import printed_sessions_behind, session_closed_through
+
+    d = pd.Timestamp("2026-01-16")
+    spine = pd.bdate_range("2026-01-05", "2026-01-16").append(pd.bdate_range("2026-01-20", "2026-01-30"))
+    assert printed_sessions_behind("GC=F", spine, d, "2026-01-30") == 9      # no 01-19 print
+    assert printed_sessions_behind("GC=F", spine[spine <= d], d, "2026-01-30") == 10  # calendar
+    assert printed_sessions_behind("GC=F", spine, d, d) == 0
+    ny = "America/New_York"
+    assert session_closed_through("XNYS", now=pd.Timestamp("2026-10-28 09:00", tz=ny)) == \
+        pd.Timestamp("2026-10-27")
+    assert session_closed_through("XNYS", now=pd.Timestamp("2026-10-28 17:00", tz=ny)) == \
+        pd.Timestamp("2026-10-28")
+    assert session_closed_through("XNYS", now=pd.Timestamp("2026-10-31 12:00", tz=ny)) == \
+        pd.Timestamp("2026-10-31")                                          # a Saturday: none forming
+    assert session_closed_through("FX", now=pd.Timestamp("2026-10-28 16:59", tz=ny)) == \
+        pd.Timestamp("2026-10-27")
+
+
+def test_the_trust_row_says_when_the_own_grade_carries_no_weight():
+    """With κ ≥ τ² + var_μ the posterior gives the own grade weight 0: the trust row says
+    so, rather than implying the own grade could carry the call; call_ts's reason keeps
+    its short form."""
+    inp = _inputs(1)
+    g = _grade(inp.index, 0.5)
+    g["prior_mu"], g["prior_sd"], g["prior_scope"], g["prior_k"] = -0.016, 0.018, "global-LOO", 36
+    for w, words in ((0.0, "own weight 0%: this instrument's errors are nearly a copy of its pool's"),
+                     (0.12, "own weight 12%")):
+        g["w_own"] = w
+        grades = {"claim": g, **{f"sizer:{s.key}": _grade(inp.index, 0.0) for s in SIZERS}}
+        ct = compose_series(inp, grades, tradeable=True, sizers_enabled=True)
+        v = verdict_from_row(ct, {}, asof=inp.index[-1], horizon=H, exec_lag=knob("EXECUTION_LAG"),
+                             target="Synthetic")
+        trust = {r["key"]: r for r in v["chain"]}["trust"]
+        assert words in trust["grade"], trust["grade"]
+        assert "own weight" not in ct["reason"].iloc[-1]
+        assert v["limit"].startswith("Held: the claim's grade has earned no trust")
+        assert "never trust" in trust["detail"]

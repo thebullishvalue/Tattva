@@ -28,8 +28,8 @@ from core.config import (ALL_TARGETS, ANALYSIS_EPOCH, MIN_DATA_POINTS, STOCK_TAR
                          get_instrument_config, is_stock_target, swayam_macro_columns)
 from core.instruments import SHEET_SERIES, instrument, predictor_universe
 from core.knobs import knob
-from core.trust import PriorTable, load_priors
-from data.calendars import resolve_exchange, session_bars, session_today
+from core.trust import PriorTable, priors_for_run
+from data.calendars import resolve_exchange, session_bars, session_closed_through
 from data.prep import PreparedPanel, prepare_panel
 from engines.mula import MulaEngine
 from engines.swayam import (aggregate_views, build_swayam_frames, default_swayam_members,
@@ -55,7 +55,27 @@ def _source(fetch):
 #  Fetch
 # ═══════════════════════════════════════════════════════════════════════
 
-def join_target(panel: pd.DataFrame, target: str, *, epoch, end, fetch=None) -> pd.DataFrame:
+def target_series(target: str, *, epoch, end, fetch=None, force: bool = False) -> pd.Series | None:
+    """The target's own price series when the macro batch does not carry it, or None.
+
+    A free-form STOCK (``fetch_stock_target_series``) or a Google-Sheet series
+    (``fetch_sheet_series``), from ``epoch`` to ``end``; ``force`` bypasses the
+    fetch cache. None for any other target (the batch carries it) or when the
+    fetch returned nothing. The app fetches it ONCE per run, with the panel —
+    forced on Refresh — and keeps it, so the price a run values cannot move
+    under it on a later rerun while the caches keyed on the panel stand still.
+    """
+    src = _source(fetch)
+    if is_stock_target(target):
+        ticker = ALL_TARGETS.get(target)
+        return src.fetch_stock_target_series(ticker, epoch, end, force=force) if ticker else None
+    if target in SHEET_SERIES:
+        return src.fetch_sheet_series(target, epoch, end, force=force)
+    return None
+
+
+def join_target(panel: pd.DataFrame, target: str, *, epoch, end, fetch=None,
+                series: pd.Series | None = None) -> pd.DataFrame:
     """Join a target's price to a private copy of the panel when the batch has not.
 
     The macro batch fetches the registered universe, and the catalogue targets
@@ -70,24 +90,22 @@ def join_target(panel: pd.DataFrame, target: str, *, epoch, end, fetch=None) -> 
         were predictors of every target while the sheet answered and vanished
         when it did not, so a Sheets outage rewrote everyone's history.
 
-    Fetched from ``epoch``, aligned to the panel's DATE spine and
-    forward-filled; leading NaNs are left for the prep's target dropna. A
-    missing catalogue column is a real fetch failure, left for the caller's
-    guard to report — never papered over by a second fetch.
+    ``series`` is the target's series already fetched (:func:`target_series`,
+    as the app holds it for the run); without it, it is fetched here. Aligned
+    to the panel's DATE spine and forward-filled; leading NaNs are left for
+    the prep's target dropna. A missing catalogue column is a real fetch
+    failure, left for the caller's guard to report — never papered over by a
+    second fetch.
     """
     if target in panel.columns:
         return panel
-    src = _source(fetch)
-    if is_stock_target(target):
-        ticker = ALL_TARGETS.get(target)
-        s = src.fetch_stock_target_series(ticker, epoch, end) if ticker else None
-    elif target in SHEET_SERIES:
-        s = src.fetch_sheet_series(target, epoch, end)
-    else:
+    if not (is_stock_target(target) or target in SHEET_SERIES):
         return panel
+    s = series if series is not None else target_series(target, epoch=epoch, end=end, fetch=fetch)
     if s is None or not len(s):
         return panel
     spine = pd.to_datetime(panel["DATE"], errors="coerce").dt.normalize()
+    s = s.copy()
     s.index = pd.DatetimeIndex(s.index).normalize()
     s = s[~s.index.duplicated(keep="last")]
     panel = panel.copy()
@@ -144,10 +162,7 @@ def swayam_drivers(panel: pd.DataFrame, target: str) -> pd.DataFrame:
 def _studied_table(target: str) -> PriorTable | None:
     """The committed pooled-prior table for ``target``'s h and L; None when there
     is none or it was studied at another h or L (the run then refuses it)."""
-    try:
-        return load_priors(get_instrument_config(target).forecast_horizon, knob("EXECUTION_LAG"))
-    except ValueError:
-        return None
+    return priors_for_run(get_instrument_config(target).forecast_horizon, knob("EXECUTION_LAG"))[0]
 
 
 def prepare(panel: pd.DataFrame, target: str, *, epoch=ANALYSIS_EPOCH, bars=None,
@@ -259,10 +274,13 @@ def run_target(target: str, *, end=None, priors: PriorTable | None | str = "defa
     """The whole run for ``target``, without Streamlit: the bundle app.py stores.
 
     ``end`` is the last date fetched (None: today, and the call's recency is
-    measured to the target's current session; a date: a replay as of it).
-    ``priors`` is ``'default'`` (the committed study file for this h and L,
-    or none), None (per-instrument grades only) or a ``PriorTable``; the
-    history's fingerprint is hashed to match the same table (``prepare``).
+    measured to the newest session that has closed on the target's exchange,
+    ``data.calendars.session_closed_through``; a date: a replay as of its
+    close). ``priors`` is ``'default'`` (the committed study file for this h
+    and L, or none — a file studied at another h or L is refused, as the app
+    refuses it, and ``priors_meta`` says so), None (per-instrument grades
+    only) or a ``PriorTable``; the history's fingerprint is hashed to match
+    the same table (``prepare``).
 
     Returns ``engine, fvo_ts, swayam_daily, swayam_view_dfs, swayam_n_eff,
     swayam_native_last, call_ts, grades_ts, edges, evidence, verdict, asof,
@@ -270,7 +288,11 @@ def run_target(target: str, *, end=None, priors: PriorTable | None | str = "defa
     """
     cfg, inst = get_instrument_config(target), instrument(target)
     h, lag = int(cfg.forecast_horizon), int(knob("EXECUTION_LAG"))
-    table = load_priors(h, lag) if isinstance(priors, str) and priors == "default" else priors
+    refused = None
+    if isinstance(priors, str) and priors == "default":
+        table, refused = priors_for_run(h, lag)
+    else:
+        table = priors
     panel = fetch_panel(target, epoch=ANALYSIS_EPOCH, end=end, fetch=fetch)
     bars, _dropped = target_bars(target, epoch=ANALYSIS_EPOCH, end=end, fetch=fetch)
     prep = prepare(panel, target, epoch=ANALYSIS_EPOCH, bars=bars, priors=table)
@@ -278,7 +300,7 @@ def run_target(target: str, *, end=None, priors: PriorTable | None | str = "defa
     fvo_ts = fvo_frame(engine, prep)
     swayam_daily, sw = build_swayam(target, cfg, bars, prep, asof=engine.asof,
                                     drivers=swayam_drivers(panel, target))
-    today = (session_today(resolve_exchange(inst.ticker)) if end is None
+    today = (session_closed_through(resolve_exchange(inst.ticker)) if end is None
              else pd.Timestamp(end).normalize())
     asm = assemble(fvo_ts, swayam_daily, instrument=inst, cfg=cfg, asof=engine.asof, today=today,
                    priors=table, epoch=engine.epoch, fingerprint=engine.fingerprint)
@@ -289,5 +311,5 @@ def run_target(target: str, *, end=None, priors: PriorTable | None | str = "defa
         "call_ts": asm.call_ts, "grades_ts": asm.grades_ts, "edges": asm.edges,
         "evidence": asm.evidence, "verdict": asm.verdict, "asof": engine.asof, "horizon": h,
         "exec_lag": lag, "epoch": engine.epoch, "fingerprint": engine.fingerprint,
-        "priors_meta": describe_priors(table),
+        "priors_meta": describe_priors(table, refused),
     }

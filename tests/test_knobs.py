@@ -1,5 +1,18 @@
-"""The KNOBS registry (core/knobs.py): every decision constant is declared, and none is a stray literal."""
+"""The KNOBS registry (core/knobs.py): every decision constant is declared, and none is a stray literal.
+
+Two lints hold the registry to the code:
+
+  * the grade, trust and the semantic words write no number but an arithmetic
+    identity or a knob (``LINTED``);
+  * no decision-path module defines a numeric module-level constant that no
+    knob refers to (``DECISION_PATH``) — the engines' publication gate, the
+    factor bank, the error-correction layer and Swayam's screen included —
+    unless it is declared below as evidence-only (it moves nothing a decision
+    reads) or a numerical guard. Numbers written inside an engine's function
+    bodies are not linted: they are the estimators' arithmetic.
+"""
 import ast
+import importlib
 import os
 
 import pytest
@@ -28,7 +41,7 @@ def test_every_knob_declares_kind_consumer_coupling_and_reason():
         assert k.consumer.strip() and k.horizon_coupling.strip() and k.reason.strip(), name
         if k.ref:
             mod, attr = k.ref.rsplit(".", 1)
-            assert mod == "core.config" and getattr(config, attr) == k.value, name
+            assert getattr(importlib.import_module(mod), attr) == k.value, name
 
 
 def test_the_named_knobs_are_registered_with_their_values():
@@ -86,6 +99,66 @@ def _numeric_literals(path):
 
     walk(tree, None)
     return out
+
+
+#: The decision-path modules: everything between the fetched panel and the call.
+DECISION_PATH = ("engines/mula/base.py", "engines/mula/valuation.py", "engines/mula/factors.py",
+                 "engines/mula/ecm.py", "engines/swayam/kernel.py", "engines/swayam/ensemble.py",
+                 "analytics/causal.py", "data/prep.py", "pipeline/run.py", "pipeline/assemble.py",
+                 "core/call.py", "core/grade.py", "core/trust.py", "core/semantics.py")
+#: Module-level numbers a decision-path module may define without a knob, and why.
+UNREGISTERED_OK: dict[str, str] = {
+    "engines/mula/valuation.py:CI_LEVEL": "evidence:fair_value: the 95% band's coverage target",
+    "engines/mula/valuation.py:CI_MIN_OBS": "evidence:fair_value: residuals before the band "
+                                            "goes empirical",
+    "engines/mula/valuation.py:CI_ADAPT_GAMMA": "evidence:fair_value: the band's adaptive step",
+    "engines/mula/valuation.py:CI_ALPHA_MIN": "evidence:fair_value: the band's widest level",
+    "engines/mula/valuation.py:CI_ALPHA_MAX": "evidence:fair_value: the band's narrowest level",
+    "analytics/causal.py:EPS": "numerical guard: a division floor (1e-12)",
+    "analytics/causal.py:VAR_FLOOR": "numerical guard: a variance floor (1e-10)",
+}
+
+
+def _module_numbers(path):
+    """``name`` for each module-level ``NAME = <number or tuple of numbers>`` in ``path``."""
+    def numeric(v):
+        if isinstance(v, ast.UnaryOp) and isinstance(v.op, ast.USub):
+            v = v.operand
+        if isinstance(v, (ast.Tuple, ast.List)):
+            return bool(v.elts) and all(numeric(e) for e in v.elts)
+        return (isinstance(v, ast.Constant) and isinstance(v.value, (int, float))
+                and not isinstance(v.value, bool))
+
+    tree = ast.parse(open(os.path.join(ROOT, path), encoding="utf-8").read())
+    out = []
+    for node in tree.body:
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target] if isinstance(node, ast.AnnAssign) and node.value else [])
+        if targets and numeric(node.value):
+            out += [t.id for t in targets if isinstance(t, ast.Name)]
+    return out
+
+
+def test_no_decision_path_module_defines_an_unregistered_constant():
+    refs = {k.ref for k in KNOBS.values() if k.ref}
+    stray = []
+    for path in DECISION_PATH:
+        module = path[:-3].replace("/", ".")
+        for name in _module_numbers(path):
+            if f"{module}.{name}" not in refs and f"{path}:{name}" not in UNREGISTERED_OK:
+                stray.append(f"{path}:{name}")
+    assert not stray, f"register these in core.knobs (by ref) or declare why not: {stray}"
+    # The declared exceptions still exist (else drop them).
+    for key in UNREGISTERED_OK:
+        path, name = key.split(":")
+        assert name in _module_numbers(path), key
+
+
+def test_the_lint_sees_a_stray_constant(tmp_path, monkeypatch):
+    mod = tmp_path / "stray.py"
+    mod.write_text("X = 0.25\nY: int = 3\nZ = (1, 2.0)\nW = -4\nNAME = 'x'\nF = 2 * 3\n")
+    monkeypatch.setattr(__import__(__name__), "ROOT", str(tmp_path))
+    assert _module_numbers("stray.py") == ["X", "Y", "Z", "W"]
 
 
 def test_no_unregistered_literal_in_the_grade_trust_or_words():

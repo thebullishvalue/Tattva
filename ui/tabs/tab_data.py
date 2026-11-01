@@ -61,7 +61,7 @@ MULA_COLUMNS: dict[str, str] = {
     "MulaKappa": "κ̂ (price-side)", "MulaHalfLife": "Price-side half-life (d)",
     "MulaDriftPct": "Gap-implied move % (excl. drift)",
     "MulaSdPct": "Gap-implied move SD %", "KFactors": "Latent factors k",
-    "Provisional": "Provisional", "Valid": "Valued",
+    "Provisional": "Provisional", "Valid": "Settled (complete cross-section)",
 }
 
 #: Swayam's columns in the record: its published lean, in points of net
@@ -93,7 +93,7 @@ COLUMN_CARDS: dict[str, str] = {
     "P(price-side κ > 0)": "data:reversion", "κ̂ (price-side)": "data:reversion",
     "Price-side half-life (d)": "data:gap", "Gap-implied move % (excl. drift)": "data:ecm_move",
     "Gap-implied move SD %": "data:ecm_move", "Latent factors k": "data:model_fit",
-    "Provisional": "data:published", "Valued": "data:published",
+    "Provisional": "data:published", "Settled (complete cross-section)": "data:sample",
     "Swayam net breadth (pts)": "data:swayam", "Swayam oversold (% of views)": "data:swayam_shares",
     "Swayam overbought (% of views)": "data:swayam_shares",
 }
@@ -101,7 +101,7 @@ COLUMN_CARDS: dict[str, str] = {
 #: The card of each call_ts column (core.call.CALL_COLUMNS) that no prefix rule
 #: in :func:`column_card` covers.
 _CALL_CARDS: dict[str, str] = {
-    "published": "data:published", "valid": "data:published", "provisional": "data:published",
+    "published": "data:published", "valid": "data:sample", "provisional": "data:published",
     "withheld_reason": "data:published", "printed": "data:printed", "behind": "data:printed",
     "precondition": "data:precondition", "fvo": "data:claim", "pct": "data:claim",
     "d": "data:claim", "trust": "data:trust", "mr_prob": "data:reversion",
@@ -130,6 +130,19 @@ def column_card(column: str) -> str:
             if c.startswith(prefix):
                 return card
     raise KeyError(f"record column {column!r} is registered to no card")
+
+
+#: Decimals a record column is shown to: the precision the pages print it at.
+#: A grade (an IC, its SE, a prior) to 3, κ̂ and the gap's persistence to 4,
+#: everything else to 2. The export keeps full precision.
+_PRECISION: dict[str, int] = {
+    "κ̂ (price-side)": 4, "Gap persistence φ": 4, CALL_PREFIX + "kappa": 4,
+    **{CALL_PREFIX + c: 3 for c in ("claim_ic", "claim_se", "claim_prior_mu", "claim_prior_sd")},
+}
+
+
+def _precision(column: str) -> int:
+    return _PRECISION.get(column, 2)
 
 
 def build_record(ts: pd.DataFrame) -> pd.DataFrame:
@@ -193,9 +206,10 @@ def render_data_tab(ts_filtered, ts, active_target):
         search_term = st.text_input("Search", placeholder="Filter by valuation word or value…",
                                     key="data_search")
     view = shown.iloc[::-1].copy()                 # newest first
+    precision = {c: _precision(c) for c in view.columns}
     for col in view.columns:
         if pd.api.types.is_float_dtype(view[col]):
-            view[col] = view[col].round(4 if col in ("κ̂ (price-side)", "Gap persistence φ") else 2)
+            view[col] = view[col].round(precision[col])
     if search_term:
         mask = view.astype(str).apply(
             lambda c: c.str.contains(search_term, case=False, na=False)).any(axis=1)
@@ -211,6 +225,7 @@ def render_data_tab(ts_filtered, ts, active_target):
         footer=(f"Showing the newest {_CAP:,} of {len(view):,} — the export has all of them."
                 if len(view) > _CAP else ""),
         col_labels={c: c for c in view.columns},     # the record's headers are already named
+        col_precision=precision,
         col_tags={c: role_tag(column_card(c)) for c in view.columns},
         sign_color_cols={c for c, o in SIGN_ORIENTATION.items() if o == "lean"},
         contrarian_cols={c for c, o in SIGN_ORIENTATION.items() if o == "reading"},

@@ -95,6 +95,7 @@ from ui.components import (
     render_rail_readout,
     render_call_history,
     window_cutoff,
+    gap_split_text,
 )
 from ui.tabs.tab_mula import render_mula_tab
 from ui.tabs.tab_swayam import render_swayam_tab
@@ -104,7 +105,8 @@ from ui.tabs.tab_data import render_data_tab
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 from data.fetcher import fetch_commodity_dataset
-from data.calendars import trading_days_behind, resolve_exchange, session_today
+from data.calendars import (trading_days_behind, resolve_exchange, session_today,
+                            session_closed_through)
 from data.prep import PrepError, history_fingerprint
 from data.universe import resolve_stock_symbol
 
@@ -118,9 +120,9 @@ from engines.mula.blocks import block_membership
 from engines.swayam import voting_views
 
 # ── The pipeline: the step functions and the closed loop ─────────────────────
-from pipeline.run import (join_target, target_bars, swayam_drivers, prepare, fit_mula,
-                          fvo_frame, build_swayam)
-from pipeline.assemble import assemble, describe_priors
+from pipeline.run import (join_target, target_series, target_bars, swayam_drivers, prepare,
+                          fit_mula, fvo_frame, build_swayam)
+from pipeline.assemble import assemble, describe_priors, restate
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id, Colors
@@ -132,7 +134,7 @@ from core.instruments import instrument
 from core.call import format_size
 from core.semantics import valuation_state
 from core.knobs import knob
-from core.trust import load_priors
+from core.trust import priors_for_run
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -172,7 +174,7 @@ _RESULTS_CACHE_MAX = 6
 #: hour later paired fresh Mūla data with stale Swayam frames).
 _SESSION_RESULT_KEYS = _BUNDLE_KEYS + (
     "engine_cache", "mula_fit_checkpoint", "results_cache",
-    "_swayam_fetch_cache", "_swayam_analysis_cache",
+    "_swayam_fetch_cache", "_swayam_analysis_cache", "_target_series",
 )
 
 def _run_key(horizon: int, target: str, prep) -> str:
@@ -293,7 +295,8 @@ def _render_landing_page() -> None:
              "card": "landing:coverage",
              "subtext": "One fixed start for every run, and every published value uses "
                         "only data available on its own date, so re-running extends the "
-                        "record instead of rewriting it"},
+                        "record instead of rewriting it — except Swayam's driver screen, "
+                        "which reads a full-sample correlation"},
         ],
         max_cols=3,
         key="landing-coverage",
@@ -373,26 +376,32 @@ def _render_claim_evidence(evidence: dict, edges: dict, horizon: int) -> None:
         return v if np.isfinite(v) else None
 
     share, se_share, b_fv = _f(gs, "price_share"), _f(gs, "se_share"), _f(gs, "b_fv")
+    closed, se_closed = _f(gs, "closed"), _f(gs, "se_closed")
     render_section_header(
         "Who Closes the Gap?",
-        f"When Mūla's gap was open, how much of its closing over the next {horizon} sessions "
-        f"did price do, and how much did fair value do by moving toward price?",
+        f"Of a gap open at the start of a window, how much closed over the next {horizon} "
+        f"sessions, and of that closing, how much did price do and how much did fair value do "
+        f"by moving toward price?",
         icon="layers", accent="violet", card="overview:gap_split",
     )
     render_kpi_strip([
-        {"label": "Price's share", "value": f"{share * 100:+.0f}%" if share is not None else "—",
-         "subtext": (f"± {se_share * 100:.0f}% · of the gap closed in {horizon}D · "
+        {"label": f"Gap closed in {horizon}D", "value": f"{closed:.0%}" if closed is not None else "—",
+         "subtext": ((f"± {se_closed:.0%} · " if se_closed is not None else "")
+                     + f"of the open gap, by price and fair value together; the rest stayed open"
+                     if closed is not None else "not measured"),
+         "card": "overview:gap_split"},
+        {"label": "Price's share of the closing",
+         "value": f"{share * 100:+.0f}%" if share is not None else "—",
+         "subtext": (f"± {se_share * 100:.0f}% · of what closed in {horizon}D · "
                      f"{gs.get('n_win', 0)} windows" if se_share is not None else "not measured"),
          "card": "overview:gap_split"},
         {"label": "Fair value toward price", "value": f"{b_fv:+.2f}" if b_fv is not None else "—",
          "subtext": f"of each unit of gap, over {horizon}D", "card": "overview:gap_split"},
-    ], max_cols=2, key="overview-evidence")
-    if share is not None and se_share is not None:
-        render_note(
-            f"While the gap was open, price closed {share:.0%} (± {se_share:.0%}) of it within "
-            f"{horizon} sessions; fair value moving toward price did the rest. Tattva therefore "
-            f"does not assume price does the closing: it acts only when the claim's price-side "
-            f"grade clears the bar.")
+    ], max_cols=3, key="overview-evidence")
+    text = gap_split_text(gs, horizon)
+    if text:
+        render_note(f"{text} Tattva therefore does not assume price does the closing: it acts "
+                    f"only when the claim's price-side grade clears the bar.")
 
     def _side(e):
         hit, base = _f(e, "hit"), _f(e, "base")
@@ -403,22 +412,24 @@ def _render_claim_evidence(evidence: dict, edges: dict, horizon: int) -> None:
                 f"{_side(cheap)}; RICH claims {_side(rich)}.")
 
 
-def _asof_status(signal: dict, ticker: str | None, today) -> dict:
-    """The command bar's as-of reading: d*, how far behind today it is, its chip.
+def _asof_status(signal: dict, verdict: dict) -> dict:
+    """The command bar's as-of reading: d*, how far behind it is, its chip.
 
     ``as_of`` is d* — the session the call is about — never the panel's newest
-    date. ``behind`` counts the target's sessions after d* up to ``today``
-    (``data.calendars.session_today``). The chip is the data-recency read
-    (CURRENT / kD BEHIND / STALE), or PROVISIONAL when d* is a session still
-    forming — which is today's by construction, so it is current as well.
-    ``valued_as_of`` is set when the newest row was withheld and d* is older.
+    date. ``behind`` is the verdict's own count (call_ts at d*, re-read against
+    today by ``pipeline.assemble.restate``): the target's sessions after d*
+    that have closed. One number, so the chip, the notices, P2 and the
+    command bar's elapsed horizon cannot disagree. The chip is the
+    data-recency read (CURRENT / kD BEHIND / STALE), or PROVISIONAL when d* is
+    a session still forming. ``valued_as_of`` is set when the newest row was
+    withheld and d* is older.
     """
     asof = signal.get("asof")
     out = {"as_of": asof, "behind": None, "label": "", "tone": "neutral",
            "provisional": bool(signal.get("provisional")), "valued_as_of": None}
     if asof is None:
         return out
-    behind = trading_days_behind(ticker, pd.Timestamp(asof).date(), pd.Timestamp(today).date())
+    behind = int(verdict.get("behind") or 0)
     out["behind"] = behind
     if out["provisional"]:
         out.update(label="PROVISIONAL", tone="warning")
@@ -935,8 +946,21 @@ def main():
     # A stock or sheet target's price column is joined here — BEFORE
     # numeric_cols are computed below — so the target resolves to itself on its
     # first render instead of falling back to some other column. Local to this run.
-    df = join_target(df, st.session_state.get("active_target", ""),
-                     epoch=ANALYSIS_EPOCH, end=pd.Timestamp.today())
+    #
+    # Its series is fetched ONCE per target and kept with the panel
+    # (``_target_series``), forced on Refresh: re-fetched on every rerun, it
+    # moved d* to a new print an hour later on a plain page click while the
+    # Swayam caches, keyed on the panel, stood still — and Refresh ran the
+    # pipeline twice, first on the cached series, then on the forced bars'.
+    _join_name = st.session_state.get("active_target", "")
+    _tseries = st.session_state.setdefault("_target_series", {})
+    if _join_name and _join_name not in df.columns and _join_name not in _tseries:
+        _got = target_series(_join_name, epoch=ANALYSIS_EPOCH, end=pd.Timestamp.today(),
+                             force=bool(st.session_state.pop("_force_target", False)))
+        if _got is not None and len(_got):          # a failed fetch is retried, never kept
+            _tseries[_join_name] = _got
+    df = join_target(df, _join_name, epoch=ANALYSIS_EPOCH, end=pd.Timestamp.today(),
+                     series=_tseries.get(_join_name))
 
     # ─── Sidebar: Model Configuration ──────────────────────────────────────
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -1001,6 +1025,7 @@ def main():
                                  f"{_rdf.shape[1]} series × {_rdf.shape[0]} rows · recomputing…")
                     st.session_state["data"] = _rdf
                     st.session_state["_force_ohlcv"] = True
+                    st.session_state["_force_target"] = True
                 else:
                     progress_container.empty()
                     _last = pd.to_datetime(df["DATE"], errors="coerce").max() if "DATE" in df.columns else None
@@ -1103,7 +1128,14 @@ def main():
     # pulls. The drivers are the same friendly-named frame Mūla values against
     # (Mūla admits a subset of it: no yields, no near-replicas or twins).
     _fp = (df.attrs or {}).get("panel_fingerprint", "")
-    _swayam_fetch_key = f"swayam_fetch::{active_target}|{_fp}"
+    # A typed stock's or a sheet's price is not in the panel's fingerprint: its
+    # own content is part of the key, so the bars and the drivers cached for
+    # one print of it are never reused for another.
+    _tfp = ""
+    if active_target in (st.session_state.get("_target_series") or {}):
+        _tfp = "|" + history_fingerprint(df.set_index(pd.to_datetime(df[active_date], errors="coerce")),
+                                         [active_target], pd.Timestamp.max)
+    _swayam_fetch_key = f"swayam_fetch::{active_target}|{_fp}{_tfp}"
     _nf_cache = st.session_state.get("_swayam_fetch_cache")
     if _nf_cache is not None and _nf_cache.get("key") == _swayam_fetch_key:
         target_ohlcv = _nf_cache["target_ohlcv"]
@@ -1430,13 +1462,13 @@ def main():
         progress_bar(progress_container, 80, "Composing Every Session",
                      f"{FWD_HORIZON}D from the next close · graded as issued")
         _lag = int(knob("EXECUTION_LAG"))
-        try:
-            _priors = load_priors(FWD_HORIZON, _lag)
-        except ValueError as _pe:             # a file studied at another h or L is refused
-            console.warning(f"Pooled priors refused ({_pe}) — per-instrument grades only")
-            _priors = None
+        # The one loader run_target uses: a file studied at another h or L is
+        # refused, and the pages say so (priors_meta['status'] 'refused').
+        _priors, _refused = priors_for_run(FWD_HORIZON, _lag)
+        if _refused:
+            console.warning(f"Pooled priors refused ({_refused}) — per-instrument grades only")
         _asm = assemble(fvo_ts, swayam_daily, instrument=_inst, cfg=_icfg, asof=engine.asof,
-                        today=session_today(_tgt_exch), priors=_priors,
+                        today=session_closed_through(_tgt_exch), priors=_priors,
                         epoch=engine.epoch, fingerprint=engine.fingerprint)
         _edges = _asm.edges
         # ONE horizon, from the instrument's config, in every object (C1).
@@ -1448,7 +1480,7 @@ def main():
         console.item("Reason", _asm.call_ts["reason"].get(engine.asof, "no valuation published")
                      if engine.asof is not None else "no valuation published")
         console.item("Call grade", _v["call_grade"]["status"])
-        console.item("Priors", describe_priors(_priors)["label"])
+        console.item("Priors", describe_priors(_priors, _refused)["label"])
         for _k in ("claim", "sizer:swayam", "sizer:reversion", "call", "evidence:swayam_lean"):
             _e = _edges.get(_k) or {}
             console.item(f"{_k} grade", (f"IC {_e['ic']:+.3f} ± {_e['se']:.3f} · n_win {_e['n_win']}"
@@ -1479,7 +1511,7 @@ def main():
         st.session_state["exec_lag"] = _lag
         st.session_state["epoch"] = ANALYSIS_EPOCH
         st.session_state["fingerprint"] = prep.fingerprint
-        st.session_state["priors_meta"] = describe_priors(_priors)
+        st.session_state["priors_meta"] = describe_priors(_priors, _refused)
 
         console.end_phase("FINAL ASSEMBLY")
         console.summary("RUN SUMMARY", {
@@ -1514,13 +1546,30 @@ def main():
     ts = engine.ts_data.copy()
     ts["Date"] = data.index.to_numpy()
 
+    # ─── The stored run, read against the session it is shown on ───────────
+    # call_ts, its grade and the verdict were composed against the session
+    # that had closed when the run ran; a run restored from the cache, or a tab
+    # left open across sessions, is read again against the one that has closed
+    # now (pipeline.assemble.restate): d*'s row recomposed by the composer with
+    # `behind` re-counted — P2, the elapsed horizon and a provisional d*'s
+    # caveat follow — and nothing refitted. Unchanged, it is the stored run.
+    if st.session_state.get("call_ts") is not None:
+        _fv0 = st.session_state.get("fvo_ts")
+        (st.session_state["call_ts"], st.session_state["edges"],
+         st.session_state["verdict"]) = restate(
+            st.session_state["call_ts"], st.session_state.get("edges") or {},
+            st.session_state.get("grades_ts") or {}, ticker=_tgt_ticker,
+            today=session_closed_through(_tgt_exch),
+            price=(_fv0["Price"] if _fv0 is not None and "Price" in _fv0.columns else None))
+
     # ─── Data freshness — measured from d* ──────────────────────────────────
-    # ONE reading, shared by these notices and the command bar's status chip:
-    # the target's own sessions from d* (Mūla's as-of session) to today on the
-    # target's exchange (data.calendars.session_today), holiday-aware, so
-    # Friday's valuation read on a Sunday is current, not stale. A withheld
-    # newest row is data, not a valuation — it cannot make the call fresher.
-    _status = _asof_status(signal, _tgt_ticker, session_today(_tgt_exch))
+    # ONE reading, shared by these notices, the command bar's status chip, P2
+    # and the elapsed horizon: the verdict's own count of the target's sessions
+    # after d* (Mūla's as-of session) that have closed on its exchange
+    # (data.calendars.session_closed_through), holiday-aware, so Friday's
+    # valuation read on a Sunday is current, not stale. A withheld newest row
+    # is data, not a valuation — it cannot make the call fresher.
+    _status = _asof_status(signal, st.session_state["verdict"])
     _d_star = _status["as_of"]
     _ds = f"{_d_star:%d %b %Y}" if _d_star is not None else ""
     try:
@@ -1567,7 +1616,14 @@ def main():
         # these notices only read what it decided about the newest row. (The app
         # used to re-derive completeness with a threshold of its own over every
         # column, which agreed with the gate only by coincidence.)
-        if signal.get("provisional"):
+        if st.session_state["verdict"].get("provisional_closed"):
+            _notice(
+                "warning", "Provisional session has closed",
+                (f"{_ds} was valued while its session was still forming; that session has closed "
+                 f"since, and the data in this session predate its close. Use Refresh data in "
+                 f"the rail to settle it."),
+            )
+        elif signal.get("provisional"):
             _pr = signal.get("published_row")
             _nsch = (engine.ts_data["NScheduled"].iloc[_pr]
                      if _pr is not None and "NScheduled" in engine.ts_data.columns else np.nan)

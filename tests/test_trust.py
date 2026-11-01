@@ -127,3 +127,48 @@ def test_a_file_for_another_horizon_or_lag_is_refused(tmp_path):
     with pytest.raises(ValueError):
         load_priors(10, 1, path=str(_priors_file(tmp_path, h=10, lag=0)))
     assert load_priors(10, 1, path=str(tmp_path / "missing.json")) is None
+
+
+def test_another_listing_of_a_member_reads_that_members_leave_one_out_prior():
+    """'RELIANCE (BSE)' is the member 'RELIANCE (NSE)' on another exchange: the class's
+    all-member pool contains that member, so the listing reads the member's own
+    leave-one-out entry, never the pool (which would count its grade twice)."""
+    entry = {"mu": -0.022, "var_mu": 0.0004, "tau2": 0.0, "kappa": 0.0001, "se_floor": 0.02,
+             "k": 4, "scope": "class-LOO"}
+    whole = {"2022-03-31": dict(entry, mu=-0.027, k=5, scope="class-all")}
+    universe = {"RELIANCE (NSE)": {"class": "stock_india"}, "TCS (NSE)": {"class": "stock_india"},
+                "AAPL (US)": {"class": "stock_us"}}
+    table = PriorTable({"claim": {"RELIANCE (NSE)": {"2022-03-31": entry},
+                                  "TCS (NSE)": {"2022-03-31": dict(entry, mu=0.01)},
+                                  "__class__:stock_india": whole, "__class__:stock_us": whole}},
+                       {"members": list(universe), "universe": universe})
+    t = "2024-01-02"
+    assert table.member_for("RELIANCE (BSE)", "stock_india") == "RELIANCE (NSE)"
+    twin = table.lookup("claim", "RELIANCE (BSE)", "stock_india", t)
+    assert twin == table.lookup("claim", "RELIANCE (NSE)", "stock_india", t)
+    assert (twin.scope, twin.mu, twin.k) == ("class-LOO", -0.022, 4)
+    # A listing in another class, or a symbol no member shares, is not a listing of one.
+    assert table.member_for("AAPL (NSE)", "stock_india") is None
+    assert table.lookup("claim", "INFY (BSE)", "stock_india", t).scope == "class-all"
+    # The listing has no studied history of its own to compare.
+    assert table.fingerprint_upto("RELIANCE (BSE)") is None
+
+
+def test_one_loader_refuses_another_estimand_and_discloses_other_knobs(tmp_path):
+    from core.knobs import knobs_hash
+    from core.trust import priors_for_run
+    from pipeline.assemble import describe_priors
+
+    table, why = priors_for_run(10, 1, path=str(_priors_file(tmp_path, h=10, lag=0)))
+    assert table is None and "studied at h=10, L=0" in why
+    meta = describe_priors(table, why)
+    assert meta["status"] == "refused" and meta["label"].startswith("priors file refused: ")
+    # A file that records no knobs hash says nothing; one that records another is disclosed.
+    p = _priors_file(tmp_path)
+    assert load_priors(10, 1, path=str(p)).meta["knobs_match"] is None
+    data = json.loads(p.read_text())
+    for recorded, match in (("0" * 16, False), (knobs_hash(), True)):
+        data["knobs_hash"] = recorded
+        p.write_text(json.dumps(data))
+        m = describe_priors(load_priors(10, 1, path=str(p)))
+        assert (m["status"], m["knobs_match"], m["knobs_hash_now"]) == ("loaded", match, knobs_hash())

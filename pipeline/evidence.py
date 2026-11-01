@@ -94,14 +94,17 @@ def gap_split(fvo_ts: pd.DataFrame, h: int, exec_lag: int, *, block_h: int = 5,
     averaged over the h phase offsets. A gap closed entirely by price gives
     ``b_price = −1, b_fv = 0``; one closed entirely by fair value moving to
     price gives ``b_price = 0, b_fv = +1``. ``price_share`` is price's part of
-    what closed, ``−b_price / (b_fv − b_price)``.
+    what closed, ``−b_price / (b_fv − b_price)``, and ``closed`` how much of the
+    gap closed at all, ``b_fv − b_price`` (the rest stayed open). A negative
+    share means price moved AWAY from fair value while the gap closed: fair
+    value closed more than the whole of it.
 
     The SEs are a moving-block bootstrap of the session rows (blocks of
     ``block_h · h`` sessions, ``n_boot`` draws, fixed ``seed``). This is
     evidence, not a grade: it moves nothing.
 
     Returns ``{b_price, b_fv, price_share, closed, se_b_price, se_b_fv,
-    se_share, n_win, n_obs, h, exec_lag, span}``.
+    se_share, se_closed, n_win, n_obs, h, exec_lag, span}``.
     """
     h, lag = max(1, int(h)), int(exec_lag)
     f = _frame(fvo_ts)
@@ -116,7 +119,7 @@ def gap_split(fvo_ts: pd.DataFrame, h: int, exec_lag: int, *, block_h: int = 5,
     n = len(rows)
     b_price, b_fv = _slopes(g, a, b, h)
 
-    se_p = se_f = se_s = math.nan
+    se_p = se_f = se_s = se_c = math.nan
     block = max(1, int(block_h) * h)
     if n >= 2 * block and np.isfinite(b_price):
         rng = np.random.default_rng(seed)
@@ -126,12 +129,13 @@ def gap_split(fvo_ts: pd.DataFrame, h: int, exec_lag: int, *, block_h: int = 5,
             starts = rng.integers(0, n - block + 1, size=n_blk)
             ix = (starts[:, None] + np.arange(block)).ravel()[:n]
             bp, bf = _slopes(g[ix], a[ix], b[ix], h)
-            draws.append((bp, bf, _share(bp, bf)))
+            draws.append((bp, bf, _share(bp, bf), bf - bp))
         d = np.asarray(draws)
-        se_p, se_f, se_s = (float(np.nanstd(d[:, j], ddof=1)) for j in range(3))
+        se_p, se_f, se_s, se_c = (float(np.nanstd(d[:, j], ddof=1)) for j in range(4))
 
     return {"b_price": b_price, "b_fv": b_fv, "price_share": _share(b_price, b_fv),
             "closed": b_fv - b_price, "se_b_price": se_p, "se_b_fv": se_f, "se_share": se_s,
+            "se_closed": se_c,
             "n_win": n // h, "n_obs": n, "h": h, "exec_lag": lag,
             "span": (rows.index[0], rows.index[-1]) if n else None}
 

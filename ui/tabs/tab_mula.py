@@ -49,7 +49,12 @@ from ui.components import (
     render_gate_rows,
     render_note,
     provisional_note,
+    role_edge,
+    own_grade_label,
+    own_weight_text,
+    gap_split_text,
 )
+from core.call import share_text
 from core.config import UI_CHART_HEIGHT_MEDIUM, UI_CHART_HEIGHT_XLARGE
 
 # ── Tooltip definitions ────────────────────────────────────────────────────
@@ -151,23 +156,27 @@ def _render_t_path(call_ts: pd.DataFrame | None, since) -> None:
 
 
 def _render_own_vs_prior(edge: dict | None, row, verdict: dict) -> None:
-    """What trust read at d*: the own as-of grade, the class prior, and their combination."""
-    g = (edge or {}).get("asof_grade") or {}
-    ic, se, n_win = _num(g, "ic"), _num(g, "se"), int(_num(g, "n_win") or 0)
-    mu, sd, scope = _num(g, "prior_mu"), _num(g, "prior_sd"), str(g.get("prior_scope") or "none")
+    """What trust read at d*: the claim's ONE grade — its own as-of grade, dated with
+    the grid date it was graded through, the class prior, the weight the posterior
+    gave the own grade, and t_post with its label."""
+    g = role_edge(edge)
+    ic, se, n_win = g["ic"], g["se"], g["n_win"]
+    mu, sd, scope = g["prior_mu"], g["prior_sd"], g["prior_scope"]
     has_prior = scope not in ("none", "ungraded") and mu is not None and sd is not None
-    w_own = _num(row, "claim_w_own") if row is not None else None
+    w_own = _num(row, "claim_w_own") if row is not None else g["w_own"]
     t = verdict.get("claim_t")
-    prior_label = (st.session_state.get("priors_meta") or {}).get("label", "no pooled prior")
+    pm = st.session_state.get("priors_meta") or {}
+    prior_label = pm.get("label", "no pooled prior")
     card = "mula:grade"
     render_kpi_strip([
-        {"label": "Own grade · as of d*", "value": f"{ic:+.3f}" if ic is not None else "warming up",
-         "subtext": (f"± {se:.3f} · {n_win} windows" if ic is not None and se is not None
+        {"label": own_grade_label(g), "value": f"{ic:+.3f}" if ic is not None else "warming up",
+         "subtext": (f"± {se:.3f} · {n_win} windows · what trust read at d*"
+                     if ic is not None and se is not None
                      else f"{n_win} of {knob('GRADE_WARMUP_WIN')} windows"), "card": card},
         {"label": "Class prior", "value": scope if has_prior else "none",
          "subtext": f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label, "card": card},
-        {"label": "Weight on own", "value": f"{w_own:.2f}" if w_own is not None else "—",
-         "subtext": "1.00 with no prior; the rest is the class's", "card": card},
+        {"label": "Weight on own", "value": share_text(w_own) if w_own is not None else "—",
+         "subtext": own_weight_text({**g, "w_own": w_own}), "card": card},
         {"label": "t_post", "value": f"{t:.2f}" if t is not None else "ungraded",
          "subtext": edge_tier(t)[0], "card": card},
         {"label": "Trust", "value": f"{verdict['trust']:.2f}",
@@ -204,11 +213,17 @@ def _render_gap_split(evidence: dict, mula, horizon: int) -> None:
     gs = evidence.get("gap_split") or {}
     share, se_share = _num(gs, "price_share"), _num(gs, "se_share")
     b_fv, se_fv = _num(gs, "b_fv"), _num(gs, "se_b_fv")
+    closed, se_closed = _num(gs, "closed"), _num(gs, "se_closed")
     gap_hl, price_hl = _num(mula, "GapHalfLife"), _num(mula, "MulaHalfLife")
     card = "mula:gap_split"
     render_kpi_strip([
-        {"label": "Price's share", "value": f"{share * 100:+.0f}%" if share is not None else "—",
-         "subtext": (f"± {se_share * 100:.0f}% · of the gap closed in {horizon}D · "
+        {"label": f"Gap closed in {horizon}D", "value": f"{closed:.0%}" if closed is not None else "—",
+         "subtext": ((f"± {se_closed:.0%} · " if se_closed is not None else "")
+                     + "of the open gap, by price and fair value together; the rest stayed open"
+                     if closed is not None else "not measured"), "card": card},
+        {"label": "Price's share of the closing",
+         "value": f"{share * 100:+.0f}%" if share is not None else "—",
+         "subtext": (f"± {se_share * 100:.0f}% · of what closed in {horizon}D · "
                      f"{gs.get('n_win', 0)} windows" if se_share is not None else "not measured"),
          "card": card},
         {"label": "Fair value toward price", "value": f"{b_fv:+.2f}" if b_fv is not None else "—",
@@ -222,18 +237,17 @@ def _render_gap_split(evidence: dict, mula, horizon: int) -> None:
          "subtext": ("price alone, if fair value stood still" if price_hl is not None
                      else "undefined: price-side κ̂ ≤ 0"), "card": card,
          "tooltip": TOOLTIPS["price_half_life"]},
-    ], max_cols=4, key="mula-gap-split")
-    if share is not None and se_share is not None:
-        render_note(
-            f"While the gap was open, price closed {share:.0%} (± {se_share:.0%}) of it within "
-            f"{horizon} sessions; fair value moving toward price did the rest. Tattva therefore "
-            f"does not assume price does the closing: it acts only when the claim's price-side "
-            f"grade clears the bar.")
+    ], max_cols=5, key="mula-gap-split")
+    text = gap_split_text(gs, horizon)
+    if text:
+        render_note(f"{text} Tattva therefore does not assume price does the closing: it acts "
+                    f"only when the claim's price-side grade clears the bar.")
 
 
 def _render_fair_value_kpis(mula, edge: dict | None) -> None:
-    """The claim's reading at d*: its state (with the claim's grade beside it), the
-    level, and the no-claim band in price terms.
+    """The claim's reading at d*: its state (with the claim's ONE grade beside it —
+    its as-of own grade and t_post, :func:`ui.components.role_edge`), the level,
+    and the no-claim band in price terms.
 
     The state word is the one directional colour on the page: it is the
     claim's state. The FVO and the gap keep their native sign.
@@ -247,7 +261,7 @@ def _render_fair_value_kpis(mula, edge: dict | None) -> None:
          "subtext": (f"FVO {fvo:+.2f}σ · gap {pct * 100:+.1f}% vs fair value"
                      if fvo is not None and pct is not None else "no published valuation"),
          "color_class": _state_tone(state), "card": "mula:valuation", "lean": True,
-         "edge": edge or {}},
+         "edge": role_edge(edge)},
         {"label": "Fair Value", "value": f"{fv:,.2f}" if fv is not None else "—",
          "subtext": (f"95% band {lo:,.2f} – {hi:,.2f}" if lo is not None and hi is not None
                      else "level the world implies"),
@@ -420,7 +434,9 @@ def _render_drivers(engine) -> None:
     hist = engine.get_feature_impact_history()
     if hist is not None and not hist.empty:
         render_sub_header("Share over time")
-        render_table_panel(hist.tail(10), "mula-drivers-history", units="every 21 sessions",
+        _tgt = str(st.session_state.get("active_target", "") or "").upper()
+        render_table_panel(hist.tail(10), "mula-drivers-history",
+                           context=f"{_tgt} · the 10 latest attribution sessions · every 21 sessions",
                            windowed=False, index_label="Date", max_rows=10, max_height=240)
 
 
@@ -446,9 +462,9 @@ def _render_reversion_sizer(verdict: dict, edge: dict | None, row) -> None:
     mr, kappa = _num(row, "mr_prob"), _num(row, "kappa")
     z, t = _num(row, "reversion_z"), _num(row, "reversion_t")
     beta, factor = _num(row, "reversion_beta") or 0.0, _num(row, "reversion_factor") or 1.0
-    g = (edge or {}).get("asof_grade") or {}
-    ic, se, n_win = _num(g, "ic"), _num(g, "se"), int(_num(g, "n_win") or 0)
-    mu, sd, scope = _num(g, "prior_mu"), _num(g, "prior_sd"), str(g.get("prior_scope") or "none")
+    g = role_edge(edge)
+    ic, se, n_win = g["ic"], g["se"], g["n_win"]
+    mu, sd, scope = g["prior_mu"], g["prior_sd"], g["prior_scope"]
     has_prior = scope not in ("none", "ungraded") and mu is not None and sd is not None
     prior_label = (st.session_state.get("priors_meta") or {}).get("label", "no pooled prior")
     sizer, grade = "mula:reversion", "mula:reversion_grade"
@@ -460,12 +476,15 @@ def _render_reversion_sizer(verdict: dict, edge: dict | None, row) -> None:
         {"label": "z = 2·MRProb − 1", "value": f"{z:+.2f}" if z is not None else "—",
          "subtext": ("the reading the sizer scales by" if verdict.get("direction")
                      else "0: no claim to scale"), "card": sizer, "tooltip": TOOLTIPS["z"]},
-        {"label": "Own grade · as of d*",
+        {"label": own_grade_label(g),
          "value": f"{ic:+.3f}" if ic is not None else "warming up",
-         "subtext": (f"± {se:.3f} · {n_win} windows" if ic is not None and se is not None
+         "subtext": (f"± {se:.3f} · {n_win} windows · what β read at d*"
+                     if ic is not None and se is not None
                      else f"{n_win} of {knob('GRADE_WARMUP_WIN')} windows"), "card": grade},
         {"label": "Prior", "value": scope if has_prior else "none",
-         "subtext": f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label, "card": grade},
+         "subtext": (f"{mu:+.3f} ± {sd:.3f} · own weight {share_text(g['w_own'])}"
+                     if has_prior and g["ic"] is not None
+                     else f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label), "card": grade},
         {"label": "t_post", "value": f"{t:.2f}" if t is not None else "ungraded",
          "subtext": edge_tier(t)[0], "card": grade},
         {"label": "Effect", "value": f"×{factor:.2f}",
@@ -548,25 +567,38 @@ def render_mula_tab(engine, ts_filtered, x_axis, signal, model_stats, active_tar
         "Has the Claim Paid on Price?",
         f"The claim's sign against the drift-neutral {horizon}-session return from the next "
         f"close, on its claim sessions: its posterior t as of every session (what trust read), "
-        f"its own grade beside the class prior at d*, period by period over the full history, "
-        f"and by side.",
+        f"and at d* its one grade — the own as-of grade, dated with the grid date it was graded "
+        f"through, beside the class prior and the weight the posterior gave it — then by side.",
         icon="trending", accent="violet", card="mula:grade",
     )
     _render_t_path(call_ts, since)
     _render_own_vs_prior(edges.get("claim"), row, verdict)
+    _render_sides(edges)
+
+    # The claim's full history: a diagnostic of the same sign over every
+    # resolved window, period by period. It is EVIDENCE about the claim, not
+    # its grade: the grade trust read is the as-of one above, and its one
+    # label is t_post's.
+    render_section_header(
+        "The Claim's Full History",
+        f"A full-history diagnostic: the claim's sign against the drift-neutral {horizon}-session "
+        f"return on every resolved window, and period by period. It sets nothing — trust reads "
+        f"the as-of grade above, through its grid date, shrunk to the class prior.",
+        icon="bar-chart", accent="violet", card="mula:claim_history",
+    )
     render_edge_panel(edges.get("claim"), "mula", what="the claim's sign on its claim sessions",
-                      title="Claim grade", card="mula:grade")
+                      title="Full-history diagnostic", card="mula:claim_history",
+                      diagnostic=True)
     rule = (edges.get("claim") or {}).get("stated_rule")
     if rule:
         render_note(f"Stated rule (C12): {rule}.")
-    _render_sides(edges)
 
     # ── 3 · EVIDENCE → claim ────────────────────────────────────────────
     render_section_header(
         "Who Closes the Gap?",
-        f"When Mūla's gap was open, how much of its closing over the next {horizon} sessions "
-        f"did price do, and how much did fair value do by moving toward price? Beside it, the "
-        f"gap's own half-life and price's.",
+        f"Of a gap open at the start of a window, how much closed over the next {horizon} "
+        f"sessions, and of that closing, how much did price do and how much did fair value do "
+        f"by moving toward price? Beside it, the gap's own half-life and price's.",
         icon="layers", accent="violet", card="mula:gap_split",
     )
     mula = _row_at(st.session_state.get("fvo_ts"), signal.get("asof"))

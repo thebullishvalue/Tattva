@@ -73,20 +73,17 @@ import pandas as pd
 
 from analytics.adaptive import AdaptiveThreshold
 from analytics.causal import EPS, DynamicModelAverage, OnlineAR1
+from core.config import (FVO_BURN_IN as BURN_IN, FVO_MIN_PRINTS as MIN_PRINTS,
+                         FVO_VALUATION_DELTAS as VALUATION_DELTAS)
 from .factors import K_MAX, AdaptiveVolPanel, OnlineFactorModel
 from .blocks import block_membership
 
-#: Observations absorbed before valuation is published.  One year is the
-#: point at which an exponentially weighted correlation matrix over ~200
-#: instruments has accumulated enough weight for the Marchenko-Pastur edge
-#: to be meaningful; publishing earlier would be publishing the prior.
-BURN_IN = 252
-
-#: Prints an instrument must have accumulated *by time t* before it may
-#: enter the cross-section at time t.  A second moment is not estimable from
-#: less, and the gate is applied forward in time so admission never
-#: retroactively changes.
-MIN_PRINTS = 250
+# BURN_IN (observations absorbed before valuation is published), MIN_PRINTS
+# (prints an instrument needs by time t to enter the cross-section at t) and
+# VALUATION_DELTAS (the level regression's discount grid) are the engine's
+# defaults; their one definition, with its argument, is core.config's
+# FVO_BURN_IN, FVO_MIN_PRINTS and FVO_VALUATION_DELTAS (registered in
+# core.knobs), and an instrument's config passes its own.
 
 #: Fraction of the ADMITTED cross-section that must actually have printed on a
 #: date for that date's valuation to be published Valid. A settled session
@@ -144,8 +141,9 @@ CI_ADAPT_GAMMA: float = 0.01
 CI_ALPHA_MIN: float = 0.005      # never wider than a ~99.5% interval
 CI_ALPHA_MAX: float = 0.20       # never tighter than an ~80% interval
 
-#: Discount grid for the valuation regression, spanning implied coefficient
-#: memories of ~4 years, ~8 years, ~40 years and permanent.
+#: (The discount grid for the valuation regression, VALUATION_DELTAS above —
+#: core.config.FVO_VALUATION_DELTAS — spans implied coefficient memories of
+#: ~4 years, ~8 years, ~40 years and permanent.)
 #:
 #: The restriction to the slow end of the family is a modelling commitment,
 #: not a tuned choice, and it is the single most consequential decision in
@@ -160,7 +158,6 @@ CI_ALPHA_MAX: float = 0.20       # never tighter than an ~80% interval
 #: data still selects, and the selection is stable: shifting the grid one
 #: notch slower moves the reported mispricing by well under a percentage
 #: point.
-VALUATION_DELTAS = (0.999, 0.9995, 0.9999, 1.0)
 
 
 def _mix_ll(w: np.ndarray, ll: np.ndarray) -> float:

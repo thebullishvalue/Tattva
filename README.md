@@ -66,8 +66,9 @@ on Y = log P(t+1+h) − log P(t+1), h = 10.
 
 - **d** — Mūla's claim: CHEAP → +1 (BUY side), RICH → −1 (SELL side), and 0 when
   any precondition fails: the valuation was not published, the target did not
-  print or is a full horizon behind, the target is not tradeable (a valuation
-  ratio), or |FVO| is inside the ±0.5σ noise.
+  print or its 10-session window from the next close has already run (11 of its
+  sessions closed since d*), the target is not tradeable (a valuation ratio), or
+  |FVO| is inside the ±0.5σ noise.
 - **trust** — f(t_post of the claim), the claim's earned base size, 0 until the
   claim's price-side grade clears the bar.
 - **each sizer** — exp(β·z) with β = f(t_post of the sizer): exactly ×1.00 while
@@ -119,22 +120,31 @@ only: they run no estimator and draw no threshold of their own.
   Swayam · Reversion · the size's arithmetic); who closes the gap; the call's
   history.
 - **Mūla** — the claim and what it has earned: Overview's own chain rows; the
-  claim's posterior t at every session against 1.645 and 2.5, own grade beside
-  the class prior, period by period and by side; the evidence (who closes the
-  gap, price against fair value with its band, the claim's unit, gap
-  stationarity, model fit, what drives fair value); then the reversion sizer
-  and its gap-implied move.
-- **Swayam** — the confirmation sizer: its reading (native or carried), z, own
-  grade and prior, t_post, β and factor; the claim's drift-neutral payoff when
-  Swayam contradicts, splits or confirms; the breadth over time, the view bank
-  and each view's own oscillators.
+  claim's posterior t at every session against 1.645 and 2.5; its one grade at
+  d* — the own as-of grade, dated with the grid date it was graded through,
+  beside the class prior, the weight the posterior gave it, and t_post with its
+  label — and by side; the claim's full history as a diagnostic, period by
+  period (no edge word: it sets nothing); the evidence (who closes the gap,
+  price against fair value with its band, the claim's unit, gap stationarity,
+  model fit, what drives fair value); then the reversion sizer and its
+  gap-implied move.
+- **Swayam** — the confirmation sizer: its reading (native or carried), z, its
+  one grade (own as-of grade through its grid date, prior and own weight),
+  t_post, β and factor; the claim's drift-neutral payoff when Swayam
+  contradicts, splits or confirms; the breadth over time, the view bank and
+  each view's own oscillators. A target with no OHLCV feed reads 'not
+  applicable'.
 - **Grades** — is the loop working? One table of every grade (object, role,
-  consumer, own IC ± SE, n_win, hit against base, the prior with its scope, k
-  and vintage, t_post, trust or β, label); the trust and β paths; payoff by
-  issued size; and the pooled-prior study's results, read-only.
+  consumer, own IC ± SE, n_win, graded through, hit against base, the prior
+  with its scope, k and vintage, own weight, t_post, trust or β, label — the
+  claim and each sizer show the same as-of grade every other page shows); the
+  trust and β paths; payoff by issued size; and the pooled-prior study's
+  results, read-only.
 - **System** — d*, h and L, the epoch, the history's fingerprint and whether it
-  is the history the priors were studied on; the priors' provenance; data
-  health; the KNOBS and ROLES registries.
+  is the history the priors were studied on (compared through the study's last
+  prior vintage, a settled quarter-end); the priors' provenance and whether the
+  knobs registry is the one they were measured under; data health; the KNOBS
+  and ROLES registries.
 - **Data** — the record: Mūla's frame, Swayam's breadth and every column of the
   call at every session, joined by date with each column's role, exportable.
 
@@ -206,19 +216,19 @@ No member's claim prior reaches t 1.645 on its own: they run from −1.61 (Nifty
 
 The Currency (FX) class's own claim summary, +0.075 ± 0.043 on k 2 (USD/INR, Dollar Index), is 1.75 standard errors from zero, but with fewer than 3 other members no member reads it: each reads the global-LOO pool.
 
-**Who closes the gap** (arm G): over 10 sessions, the share of the open gap that price closed, and the slopes of the 10-session change in log fair value and in log price on the gap — the mean over a class's members, with the SD across them.
+**Who closes the gap** (arm G): of a gap open at the start of a window, how much closed within 10 sessions (fair value's slope on the gap minus price's; the rest stayed open), price's share of that closing, and the slopes of the 10-session change in log fair value and in log price on the gap — the mean over a class's members, with the SD across them.
 
-| Class | k | Price's share of the closing | Fair value's slope on the gap | Price's slope on the gap |
-|---|---|---|---|---|
-| Commodities | 7 | +5.5% (SD 9.3%) | +0.342 (SD 0.048) | −0.024 (SD 0.033) |
-| Crypto | 7 | −5.6% (SD 10.4%) | +0.445 (SD 0.096) | +0.024 (SD 0.050) |
-| Currency (FX) | 2 | +11.8% (SD 9.7%) | +0.353 (SD 0.035) | −0.048 (SD 0.039) |
-| India Indices | 8 | −10.4% (SD 4.5%) | +0.389 (SD 0.042) | +0.036 (SD 0.013) |
-| India Stocks | 5 | −2.2% (SD 11.0%) | +0.381 (SD 0.032) | +0.007 (SD 0.043) |
-| US Stocks | 5 | +0.9% (SD 8.4%) | +0.339 (SD 0.053) | −0.003 (SD 0.029) |
-| US Indices | 3 | +2.5% (SD 3.3%) | +0.333 (SD 0.018) | −0.009 (SD 0.011) |
+| Class | k | Gap closed in 10 sessions | Price's share of the closing | Fair value's slope on the gap | Price's slope on the gap |
+|---|---|---|---|---|---|
+| Commodities | 7 | 37% | +5.5% (SD 9.3%) | +0.342 (SD 0.048) | −0.024 (SD 0.033) |
+| Crypto | 7 | 42% | −5.6% (SD 10.4%) | +0.445 (SD 0.096) | +0.024 (SD 0.050) |
+| Currency (FX) | 2 | 40% | +11.8% (SD 9.7%) | +0.353 (SD 0.035) | −0.048 (SD 0.039) |
+| India Indices | 8 | 35% | −10.4% (SD 4.5%) | +0.389 (SD 0.042) | +0.036 (SD 0.013) |
+| India Stocks | 5 | 37% | −2.2% (SD 11.0%) | +0.381 (SD 0.032) | +0.007 (SD 0.043) |
+| US Stocks | 5 | 34% | +0.9% (SD 8.4%) | +0.339 (SD 0.053) | −0.003 (SD 0.029) |
+| US Indices | 3 | 34% | +2.5% (SD 3.3%) | +0.333 (SD 0.018) | −0.009 (SD 0.011) |
 
-Class by class, price did between −10.4% (India Indices) and +11.8% (Currency (FX)) of the closing; fair value moving toward price did the rest.
+Class by class, 34% to 42% of an open gap closed within 10 sessions and the rest stayed open. Price's share of that closing ran from −10.4% (India Indices) to +11.8% (Currency (FX)); fair value moving toward price did the rest. Where the share is negative (Crypto, India Indices, India Stocks), price moved away from fair value while the gap closed: fair value closed more than all of it.
 
 **Decisions**, on the held-out members only:
 
@@ -236,25 +246,33 @@ Checks: R4, the FFT shift-null SE against a brute-force null (median ratio, band
 ## Who closes the gap
 
 Mūla's claim is a price-side claim: CHEAP means price should rise toward fair
-value. Whether that happens is measured, not assumed. While the gap was open,
-regress the 10-session change in log price and in log fair value on the gap:
-price's share of what closed is −(price's slope)/(fair value's slope − price's
-slope). The edge table's arm-G rows give it per class; class by class, price
-did a small share of the closing, of either sign, and fair value moving toward
-price did the rest. Overview and Mūla show the same split for the instrument
-on screen, with its bootstrap SE. Tattva therefore acts only when the claim's
-price-side grade clears the bar.
+value. Whether that happens is measured, not assumed. Regress the 10-session
+change in log price and in log fair value on the gap open at the start of each
+window: the share of the gap that closed is fair value's slope minus price's,
+and the rest stayed open; price's share of what closed is −(price's
+slope)/(fair value's slope − price's slope). The edge table's arm-G rows give
+both per class: about a third to two-fifths of an open gap closes in 10
+sessions, price does a small share of that closing — negative where price moved
+away from fair value, so that fair value closed more than all of it — and fair
+value moving toward price does the rest. Overview and Mūla show the same split
+for the instrument on screen, with its bootstrap SEs. Tattva therefore acts
+only when the claim's price-side grade clears the bar.
 
 ---
 
 ## What it will usually say: HOLD, and why
 
 The edge table gives the reason in numbers. No member's leave-one-out claim
-prior reaches t 1.645 on its own, so the posterior can open only where an
-instrument's own grade is strong enough to carry it there against its pool —
-and the pools are near zero or negative. The one class summary that clears
-1.645 on its face (Currency (FX), two members) is not read by either member:
-with fewer than three others in the class, each reads the catalogue-wide pool.
+prior reaches t 1.645 on its own, and the pools are near zero or negative. With
+the study's τ = 0, the posterior's weight on an instrument's own grade is small
+— 0 to about a third — and for the 6 members whose errors are nearly a copy
+of their pool's (S&P 500, Nasdaq 100, Dow Jones, Nifty Next 50, Nifty 100,
+Nifty 500) it is 0: their trust is their pool's alone, and no own grade can
+open it. Elsewhere an own claim IC of roughly 0.2 to 0.7 would be needed to
+carry the posterior over 1.645. The trust row and the Grades table print the
+own weight. The one class summary that clears 1.645 on its face (Currency (FX),
+two members) is not read by either member: with fewer than three others in the
+class, each reads the catalogue-wide pool.
 
 What the app said on the four audited instruments, live, on 2026-10-27 (the
 network harness, committed priors):

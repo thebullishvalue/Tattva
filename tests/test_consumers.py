@@ -237,10 +237,11 @@ def test_every_config_field_has_a_reader():
 
 def test_every_knob_has_a_reader():
     plain = [n for n, k in KNOBS.items() if not k.ref and n not in STUDY_GENERATED]
-    by_ref = [n for n, k in KNOBS.items() if k.ref]
+    by_ref = [k.ref.rsplit(".", 1)[1] for k in KNOBS.values() if k.ref]
     _check(plain, ("core/knobs.py",))
-    # A by-reference knob is read through its core.config constant (or the
-    # InstrumentConfig field it defaults).
+    # A by-reference knob is read through the constant it refers to (a
+    # core.config name, the InstrumentConfig field it defaults, or the engine
+    # attribute itself), outside its own definition.
     _check(by_ref, ("core/knobs.py",), kinds=("str", "name", "attr"))
     # A generated class summary is a measured row of the registry, from the study.
     assert all(KNOBS[n].kind == "measured" and n.startswith("PRIOR:") for n in STUDY_GENERATED)

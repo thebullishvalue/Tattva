@@ -637,6 +637,11 @@ def register_stock_target(display_name: str, ticker: str, market: str) -> None:
     STOCK_TARGET_MARKETS[display_name] = market
     excl = list(_INDEX_NAMES)
     excl += _INDIA_INDEX_ETFS if market == "india" else _US_INDEX_ETFS
+    # A typed symbol that is itself a column of the macro panel (TLT is 'US
+    # Treasury Long (20Y+)') must not be valued against its own column, nor
+    # Swayam's MMR read it as a driver: that column is the target itself.
+    excl += [name for name, tk in {**GLOBAL_MACRO_MAP, **MACRO_SYMBOLS_YF}.items()
+             if str(tk).upper() == str(ticker).upper() and name not in excl]
     TARGET_EXCLUDED_PREDICTORS.setdefault(display_name, excl)
     # The instrument's config is its market's asset-class stock config.
     INSTRUMENT_CONFIGS.setdefault(display_name,
@@ -651,6 +656,17 @@ def register_stock_target(display_name: str, ticker: str, market: str) -> None:
 # (default_swayam_members) for how these build the 12-member grid.
 SWAYAM_LENGTHS = (8, 14, 22, 34, 52)   # swayam 2026-07-21 class-level best (|IC| 0.096 vs default-5)
 SWAYAM_ROC_FRAC = 0.85                  # swayam 2026-07-21 class-level best (|IC| 0.094 vs 0.7)
+# The STOCK classes' view bank: per_asset 2026-07-21's stock recommendation
+# (asset-level, pooled Nifty100 / Nasdaq100 universes), pinned so it does not
+# drift with the global grid above. Every typed stock and the pooled-prior
+# study's ten stock members run on these (CLASS_CONFIG_DEFAULTS below).
+SWAYAM_LENGTHS_STOCK = (10, 14, 20, 28, 40)
+SWAYAM_ROC_FRAC_STOCK_INDIA = 0.7
+SWAYAM_ROC_FRAC_STOCK_US = 0.55
+# |log-log correlation| above which a macro candidate is a COPY of the target,
+# not a driver, and leaves Swayam's MMR pool (engines.swayam.kernel). High on
+# purpose: it catches replicas (r ~ 1.0), not genuinely correlated macro.
+SWAYAM_MMR_REPLICA_MAX_CORR = 0.98
 
 # (The empty-basket fallback flag lived here. With no baskets, there is no
 # empty-basket case to fall back FROM.)
@@ -772,8 +788,10 @@ CLASS_CONFIG_DEFAULTS: dict[str, InstrumentConfig] = {
     # value belongs in the per-instrument registry once one exists.
     "crypto":      InstrumentConfig(),
     # per_asset 2026-07-21 (asset-level, pooled Nifty100 / Nasdaq100 universes):
-    "stock_india": InstrumentConfig(swayam_lengths=(10, 14, 20, 28, 40), swayam_roc_frac=0.7),
-    "stock_us":    InstrumentConfig(swayam_lengths=(10, 14, 20, 28, 40), swayam_roc_frac=0.55)}
+    "stock_india": InstrumentConfig(swayam_lengths=SWAYAM_LENGTHS_STOCK,
+                                    swayam_roc_frac=SWAYAM_ROC_FRAC_STOCK_INDIA),
+    "stock_us":    InstrumentConfig(swayam_lengths=SWAYAM_LENGTHS_STOCK,
+                                    swayam_roc_frac=SWAYAM_ROC_FRAC_STOCK_US)}
 
 # Free-form stock ASSET-CLASS configs — one per market, applied to any symbol
 # entered under India Stocks / US Stocks (register_stock_target installs the

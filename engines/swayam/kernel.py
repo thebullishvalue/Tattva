@@ -39,6 +39,7 @@ import pandas as pd
 # (analytics.utils previously carried a second, non-equivalent copy that no
 # caller here ever used); import them so there is exactly one implementation.
 from analytics.utils import sigmoid as _sigmoid, zscore_clipped as _zscore_clipped, calculate_atr as _calculate_atr
+from core import config as _cfg
 from core.semantics import breadth_lean
 
 
@@ -154,7 +155,10 @@ def calculate_msf(
 #: the target rather than a driver of it, and dropped from the MMR pool. Guards
 #: the silent-death mode described in calculate_mmr. Set high deliberately: the
 #: point is to catch replicas (r ~ 1.0), not to thin genuinely correlated macro.
-MMR_REPLICA_MAX_CORR: float = 0.98
+#: Defined once in core.config (SWAYAM_MMR_REPLICA_MAX_CORR, registered in
+#: core.knobs). The correlation is full-sample: the one non-causal read on
+#: the Swayam path (disclosed in ARCHITECTURE.md, C14).
+MMR_REPLICA_MAX_CORR: float = _cfg.SWAYAM_MMR_REPLICA_MAX_CORR
 
 
 def calculate_mmr(

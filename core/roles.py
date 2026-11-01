@@ -82,7 +82,8 @@ ROLES: dict[str, Role] = {r.key: r for r in (
          "Grades: the call graded only on the sessions after the priors file's run date, the "
          "one clean out-of-sample record"),
     Role("grade:claim", "GRADE", "claim", "Claim grade", "claim",
-         "trust (as of each session, shrunk) and Mūla's claim-grade card (full history)"),
+         "trust (as of each session, shrunk) and, on every page, the claim's one grade at d*: "
+         "the own as-of grade through its grid date, the prior, t_post and its label"),
     Role("grade:sizer:swayam", "GRADE", "sizer:swayam", "Swayam sizer grade", "sizer:swayam",
          "β of the Swayam sizer: its z against d·Y on native claim rows; the Swayam page's "
          "contradicts / split / confirms payoff table"),
@@ -95,6 +96,10 @@ ROLES: dict[str, Role] = {r.key: r for r in (
     Role("evidence:gap_stationarity", "EVIDENCE", "claim", "Gap stationarity", None,
          "Mūla: ADF and KPSS on the published gap through d*, one word "
          "(core.semantics.gap_stationarity), a full-history diagnostic"),
+    Role("evidence:claim_history", "EVIDENCE", "claim", "The claim's full history", None,
+         "Mūla: the claim's sign over every resolved window and period by period, a "
+         "full-history diagnostic with no edge word; it sets nothing (trust reads the as-of "
+         "grade)"),
     Role("evidence:claim_side", "EVIDENCE", "claim", "The claim by side", None,
          "Overview's per-side line, Mūla and the Grades table: hit against the side-matched "
          "base, read off edges claim:buy and claim:sell"),
@@ -165,6 +170,7 @@ CARDS: dict[str, tuple[str, str]] = {
     "mula:valuation": ("claim", "call"),
     "mula:grade": ("grade:claim", "claim"),
     "mula:sides": ("evidence:claim_side", "claim"),
+    "mula:claim_history": ("evidence:claim_history", "claim"),
     "mula:gap_split": ("evidence:gap_split", "claim"),
     "mula:fair_value": ("evidence:fair_value", "claim"),
     "mula:claim_unit": ("evidence:claim_unit", "claim"),
@@ -201,6 +207,7 @@ CARDS: dict[str, tuple[str, str]] = {
     "data:gap": ("evidence:gap_split", "claim"),
     "data:model_fit": ("evidence:model_fit", "claim"),
     "data:published": ("precondition:published", "claim"),
+    "data:sample": ("infra:data", "call"),
     "data:printed": ("precondition:printed", "claim"),
     "data:precondition": ("precondition", "claim"),
     "data:claim_grade": ("grade:claim", "claim"),

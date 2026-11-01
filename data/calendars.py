@@ -30,6 +30,12 @@ Exposes, all with the same weekday fallback:
                               the spine and Swayam read).
   • ``session_today``       — the one "today", in the exchange's own time zone, for
                               the app's freshness and the engine's forming-session test.
+  • ``session_closed_through`` — the newest date whose session has CLOSED (today once
+                              its close has passed, else the day before): what the
+                              call's recency, P2 and the elapsed horizon count to.
+  • ``printed_sessions_behind`` — the target's sessions after d* that have closed: its
+                              own printed sessions where the spine has them, the
+                              calendar's beyond its newest print.
 """
 from __future__ import annotations
 
@@ -274,6 +280,72 @@ def session_today(exchange: str) -> pd.Timestamp:
         cal = _get_calendar(exchange)
         tz = str(getattr(cal, "tz", None) or "UTC") if cal is not None else "UTC"
     return pd.Timestamp.now(tz=tz).tz_localize(None).normalize()
+
+
+#: When a sentinel's day closes, as (hour, minute) in its time zone: the FX day at
+#: the New York 17:00 roll; crypto (and an unknown exchange, on UTC) at midnight.
+_SENTINEL_CLOSE = {_FX: (17, 0), _CRYPTO: (24, 0)}
+
+
+def session_closed_through(exchange: str, now=None) -> pd.Timestamp:
+    """The newest date whose session on ``exchange`` has CLOSED — normalised, tz-naive.
+
+    :func:`session_today` once today's session has closed (its exchange close
+    from the calendar; the FX roll at 17:00 New York; midnight for crypto and
+    an unknown exchange), else the day before. A day with no session (a
+    weekend, a holiday) has nothing still forming, so it is itself closed
+    through. ``now`` (tz-aware, or naive in the exchange's zone) pins the clock
+    for a test; by default it is the current time.
+
+    A call published after the close of d* trades at the close of d*+L, and
+    its h-session window runs from there: only sessions that have closed can
+    have elapsed, so the call's recency is counted to this date, never to a
+    session still trading.
+    """
+    tz = _SENTINEL_TZ.get(exchange)
+    cal = _get_calendar(exchange)
+    if tz is None:
+        tz = str(getattr(cal, "tz", None) or "UTC") if cal is not None else "UTC"
+    if now is None:
+        today, now = session_today(exchange), pd.Timestamp.now(tz=tz)
+    else:
+        now = pd.Timestamp(now)
+        now = now.tz_localize(tz) if now.tzinfo is None else now.tz_convert(tz)
+        today = now.tz_localize(None).normalize()
+    close = None
+    if cal is not None:
+        try:
+            if not cal.is_session(today):
+                return today
+            close = pd.Timestamp(cal.session_close(today))
+        except Exception as e:                       # out of bounds / lib hiccup
+            log.debug("session close unavailable for %s on %s: %s", exchange, today, e)
+    if close is None:
+        hh, mm = _SENTINEL_CLOSE.get(exchange, (24, 0))
+        close = (today + pd.Timedelta(hours=hh, minutes=mm)).tz_localize(tz)
+    return today if now >= close else today - pd.Timedelta(days=1)
+
+
+def printed_sessions_behind(ticker: str | None, spine, asof, through) -> int:
+    """The target's sessions after ``asof`` (d*) that have closed by ``through``.
+
+    ``spine`` is the target-printed spine (the prepared index: only sessions
+    the target itself printed). Where the spine reaches, its own rows after d*
+    are counted — so an exchange session on which the target did not print (a
+    US federal holiday on CME with no GC=F bar) is not a session of its
+    horizon; beyond the spine's newest print, which has no rows yet, the
+    exchange calendar stands in (:func:`trading_days_behind`). ``through`` is
+    :func:`session_closed_through` live, or a replay's end date. Always ≥ 0.
+    """
+    d = pd.Timestamp(asof).normalize()
+    through = pd.Timestamp(through).normalize()
+    if through <= d:
+        return 0
+    idx = pd.DatetimeIndex(pd.to_datetime(spine)).normalize()
+    known = idx[idx <= through]
+    after = int(((known > d)).sum())
+    edge = max(d, known.max()) if len(known) else d
+    return after + int(trading_days_behind(ticker, edge.date(), through.date()))
 
 
 def session_bars(bars: pd.DataFrame, ticker: str | None) -> pd.DataFrame:

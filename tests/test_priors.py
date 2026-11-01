@@ -67,6 +67,12 @@ def check_schema(data: dict) -> None:
     assert data["vintages"] == sorted(data["vintages"]) and all(v <= run_date for v in data["vintages"])
     assert all(pd.Timestamp(v).is_quarter_end for v in data["vintages"])
     assert all(u <= run_date for u in data["fingerprint_upto"].values())
+    if "fingerprint_check" in data:
+        # The fingerprint stage (studies/pooled_priors.py): every member is hashed to the
+        # last prior vintage, a settled quarter-end, and says whether the fingerprinted
+        # target history is the one the member ran on.
+        assert set(data["fingerprint_check"]) == set(members) == set(data["member_code"])
+        assert set(data["fingerprint_upto"].values()) <= {data["vintages"][-1]}
     cls_of = {m: data["universe"][m]["class"] for m in members}
     sizes = pd.Series(cls_of).value_counts().to_dict()
     assert set(data["priors"]) == set(OBJECTS)

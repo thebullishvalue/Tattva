@@ -14,7 +14,8 @@ typed: :func:`render_edge_table` turns the file into one markdown block —
     at the last vintage (μ ± se_μ, τ, k), and the pool a member reads;
   * the prior a member of each class actually reads for the claim — its
     leave-one-out entry — as the t that prior gives on its own;
-  * the measured gap-closure split per class (arm G);
+  * the measured gap-closure split per class (arm G): how much of an open
+    gap closed, and price's share of that closing;
   * decisions A, B and C, and the R4 / R6 abort checks.
 
 The README carries the block between :data:`BEGIN` and :data:`END`, and
@@ -174,34 +175,48 @@ def render_edge_table(priors_json_path: str) -> str:
     # ── Who closes the gap (arm G) ──────────────────────────────────────
     g = ((data.get("arms") or {}).get("G") or {}).get("per_class") or {}
     h = data.get("h")
-    out.append(f"**Who closes the gap** (arm G): over {h} sessions, the share of the open gap "
-               f"that price closed, and the slopes of the {h}-session change in log fair value "
-               f"and in log price on the gap — the mean over a class's members, with the SD "
-               f"across them.")
+    out.append(f"**Who closes the gap** (arm G): of a gap open at the start of a window, how "
+               f"much closed within {h} sessions (fair value's slope on the gap minus price's; "
+               f"the rest stayed open), price's share of that closing, and the slopes of the "
+               f"{h}-session change in log fair value and in log price on the gap — the mean "
+               f"over a class's members, with the SD across them.")
     out.append("")
-    rows = []
+    rows, closed_by = [], {}
     for cls in classes:
         r = g.get(cls)
         if not r:
             continue
         ps, bfv, bp = r.get("price_share") or {}, r.get("b_fv") or {}, r.get("b_price") or {}
         share = _num(ps.get("mean"))
+        fv_m, p_m = _num(bfv.get("mean")), _num(bp.get("mean"))
+        closed = fv_m - p_m if fv_m is not None and p_m is not None else None
+        if closed is not None:
+            closed_by[cls] = closed
         rows.append((asset_class_name(cls), str(int(r.get("k") or 0)),
+                     f"{_plain(closed * 100, 0)}%" if closed is not None else "—",
                      (f"{_signed(share * 100, 1)}% (SD {_plain(_num(ps.get('sd')) * 100, 1)}%)"
                       if share is not None and _num(ps.get("sd")) is not None else "—"),
                      f"{_signed(bfv.get('mean'))} (SD {_plain(bfv.get('sd'))})",
                      f"{_signed(bp.get('mean'))} (SD {_plain(bp.get('sd'))})"))
-    out += _table(("Class", "k", "Price's share of the closing", "Fair value's slope on the gap",
-                   "Price's slope on the gap"), rows)
+    out += _table(("Class", "k", f"Gap closed in {h} sessions", "Price's share of the closing",
+                   "Fair value's slope on the gap", "Price's slope on the gap"), rows)
     out.append("")
     shares = [(_num((g[c].get("price_share") or {}).get("mean")), c) for c in classes if c in g]
     shares = [(v, c) for v, c in shares if v is not None]
-    if shares:
+    if shares and closed_by:
         lo, hi = min(shares), max(shares)
-        out.append(f"Class by class, price did between {_signed(lo[0] * 100, 1)}% "
-                   f"({asset_class_name(lo[1])}) and {_signed(hi[0] * 100, 1)}% "
-                   f"({asset_class_name(hi[1])}) of the closing; fair value moving toward price "
-                   f"did the rest.")
+        clo, chi = min(closed_by.values()), max(closed_by.values())
+        sentence = (f"Class by class, {_plain(clo * 100, 0)}% to {_plain(chi * 100, 0)}% of an "
+                    f"open gap closed within {h} sessions and the rest stayed open. Price's share "
+                    f"of that closing ran from {_signed(lo[0] * 100, 1)}% "
+                    f"({asset_class_name(lo[1])}) to {_signed(hi[0] * 100, 1)}% "
+                    f"({asset_class_name(hi[1])}); fair value moving toward price did the rest")
+        negative = [asset_class_name(c) for v, c in shares if v < 0]
+        if negative:
+            sentence += (f". Where the share is negative ({', '.join(negative)}), price moved away "
+                         f"from fair value while the gap closed: fair value closed more than all "
+                         f"of it")
+        out.append(sentence + ".")
         out.append("")
 
     # ── Decisions and checks ────────────────────────────────────────────

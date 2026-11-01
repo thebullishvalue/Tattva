@@ -32,6 +32,7 @@ object as the registry does.
 from __future__ import annotations
 
 import math
+import re
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -42,6 +43,7 @@ from core.instruments import asset_class_name
 from core.knobs import knob
 from core.roles import ROLES
 from core.semantics import edge_tier
+from core.call import share_text, signed
 from ui.theme import chart_layout, style_axes, chart_color, chart_rgba, grid_rgba
 from ui.components import (class_pool, render_section_header, render_table_panel,
                            render_chart_panel, render_empty_state, render_kpi_strip,
@@ -82,12 +84,16 @@ def _num(x) -> float | None:
 
 def _pct(x) -> str:
     v = _num(x)
-    return f"{v * 100:+.2f}%" if v is not None else "—"
+    return f"{signed(v * 100)}%" if v is not None else "—"
 
 
 def _f(x, fmt: str = "+.3f") -> str:
+    """``x`` formatted; a signed value that rounds to zero prints unsigned (never '-0.000')."""
     v = _num(x)
-    return format(v, fmt) if v is not None else "—"
+    if v is None:
+        return "—"
+    m = re.fullmatch(r"\+\.(\d+)f", fmt)
+    return signed(v, int(m.group(1))) if m else format(v, fmt)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -107,24 +113,51 @@ def _pool_text(pool: dict | None, asset_class: str | None) -> str:
 
 
 def _row(key: str, role_key: str, name: str | None, edges: dict, grades_ts: dict, d_star,
-         priors_meta: dict, asset_class: str | None) -> dict:
-    """One table row: the full-history grade, and for a role object what it read at d*."""
+         priors_meta: dict, asset_class: str | None, has_ohlcv: bool = True) -> dict:
+    """One table row.
+
+    A ROLE object (the claim, a sizer) prints its ONE grade — the own as-of
+    grade it read at d*, graded through its grid date, the prior, the weight
+    the posterior gave the own grade, t_post and t_post's label — the same
+    numbers Overview, Mūla and Swayam print. The call and the evidence print
+    their full-history grade, labelled on their own t; the call's numbers are
+    not printed below its warm-up. Hit and payoff are full-history for every
+    row.
+    """
     e = edges.get(key) or {}
     role = ROLES[role_key]
     ic, se, t = _num(e.get("ic")), _num(e.get("se")), _num(e.get("t"))
+    n_win = int(e.get("n_win") or 0)
     hit, base = _num(e.get("hit")), _num(e.get("base"))
-    prior = t_post = power = "—"
+    payoff = e.get("payoff")
+    prior = t_post = power = weight = "—"
+    through = "full history"
     label = edge_tier(t)[0]
     g = grades_ts.get(key)
+    if role.kind != "EVIDENCE" and key not in ("call", "call:prospective") and not has_ohlcv \
+            and key == "sizer:swayam":
+        return {
+            "Object": name or role.title, "Role": f"{role.kind} → {role.target}", "Own IC": "—",
+            "± SE": "—", "n_win": 0, "Graded through": "—", "Hit vs base": "—", "Payoff": "—",
+            "Prior": "—", "Own weight": "—", "t_post": "—", "Trust / β": "β 0.00",
+            "Label": "not applicable (no OHLCV)", "Consumer": role.consumer,
+        }
     if g is not None and d_star is not None and d_star in g.index:
         a = g.loc[d_star]
+        # The role object's one grade: its as-of own grade at d* (what set trust or β).
+        ic, se, n_win = _num(a["ic"]), _num(a["se"]), int(_num(a["n_win"]) or 0)
+        gd = a.get("grid_date")
+        through = f"{pd.Timestamp(gd):%Y-%m-%d}" if ic is not None and pd.notna(gd) else "warming up"
         mu, sd = _num(a["prior_mu"]), _num(a["prior_sd"])
         scope = str(a["prior_scope"])
         vintage = pd.Timestamp(a["prior_vintage"]) if pd.notna(a.get("prior_vintage")) else None
+        has_prior = scope != "none" and mu is not None and sd is not None
         prior = (f"{scope} · k {int(a['prior_k'])} · {mu:+.3f} ± {sd:.3f} · vintage "
                  f"{f'{vintage:%Y-%m-%d}' if vintage is not None else '—'}"
-                 if scope != "none" and mu is not None and sd is not None
-                 else "none")
+                 if has_prior else "none")
+        w = _num(a.get("w_own"))
+        weight = (("0%: a copy of its pool's errors" if w is not None and w <= 0 else share_text(w))
+                  if has_prior and ic is not None else "—")
         tp = _num(a["t_post"])
         t_post = f"{tp:.2f}" if tp is not None else "ungraded"
         label = edge_tier(tp)[0]
@@ -136,34 +169,41 @@ def _row(key: str, role_key: str, name: str | None, edges: dict, grades_ts: dict
         prior = _pool_text(class_pool(priors_meta, asset_class, "call"), asset_class)
         if not e.get("graded"):
             label = str(e.get("status") or "ungraded")
-    elif key == "call:prospective" and not e.get("n_win"):
+            # Below the warm-up an issued call's IC, hit and payoff are not a grade.
+            ic = se = hit = base = None
+            payoff = None
+    elif key == "call:prospective" and n_win < knob("GRADE_WARMUP_WIN"):
         label = str(e.get("status") or "no prospective record")
+        ic = se = hit = base = None
+        payoff = None
     elif role.kind == "EVIDENCE" and key.startswith("claim:"):
         label = "one side: read hit vs base"
     return {
         "Object": name or role.title, "Role": f"{role.kind} → {role.target}",
         "Own IC": f"{ic:+.3f}" if ic is not None else "—",
         "± SE": f"{se:.3f}" if se is not None else "—",
-        "n_win": int(e.get("n_win") or 0),
+        "n_win": n_win, "Graded through": through,
         "Hit vs base": f"{hit:.0f}% vs {base:.0f}%" if hit is not None and base is not None else "—",
-        "Payoff": _pct(e.get("payoff")),
-        "Prior": prior, "t_post": t_post, "Trust / β": power, "Label": label,
+        "Payoff": _pct(payoff),
+        "Prior": prior, "Own weight": weight, "t_post": t_post, "Trust / β": power, "Label": label,
         "Consumer": role.consumer,
     }
 
 
 def _render_table(edges: dict, grades_ts: dict, d_star, horizon: int, priors_meta: dict,
-                  asset_class: str | None) -> None:
+                  asset_class: str | None, has_ohlcv: bool = True) -> None:
     render_section_header(
         "Every Grade",
         f"Each object's rank IC against the drift-neutral {horizon}-session return from the "
-        f"next close, on non-overlapping windows over the full history, with its hit against "
-        f"the side-matched no-skill rate and its mean drift-neutral payoff. For the claim and "
-        f"each sizer, the prior and the posterior t it read on d* — what set its trust or β. "
+        f"next close, on non-overlapping windows, with its hit against the side-matched "
+        f"no-skill rate and its mean drift-neutral payoff over the full history. The claim and "
+        f"each sizer show their one grade — the own as-of grade they read on d*, graded through "
+        f"the date shown, the prior, the weight the posterior gave the own grade and t_post, "
+        f"which set their trust or β; the rest are graded over the full history. "
         f"Priors: {priors_meta.get('label', 'none')}.",
         icon="grid", accent="accent", card="grades:table",
     )
-    rows = [_row(k, rk, name, edges, grades_ts, d_star, priors_meta, asset_class)
+    rows = [_row(k, rk, name, edges, grades_ts, d_star, priors_meta, asset_class, has_ohlcv)
             for k, rk, name in _ROWS if k in edges]
     if not rows:
         render_empty_state("Nothing graded yet", "The run produced no grades.", eyebrow="Grades")
@@ -320,6 +360,16 @@ def _render_study(priors_meta: dict) -> None:
         icon="layers", accent="accent", card="grades:study",
     )
     pm = priors_meta or {}
+    if pm.get("status") == "refused":
+        render_empty_state(
+            "priors file refused",
+            f"A pooled-prior file exists for this target but was refused "
+            f"({pm.get('refusal') or 'studied at another horizon or lag'}): every grade above is "
+            f"the instrument's own. Re-run <strong>studies/pooled_priors.py</strong> at this "
+            f"horizon and lag.",
+            eyebrow="Pooled-prior study",
+        )
+        return
     if pm.get("status") != "loaded":
         render_empty_state(
             "study not yet run",
@@ -329,6 +379,11 @@ def _render_study(priors_meta: dict) -> None:
             eyebrow="Pooled-prior study",
         )
         return
+    if pm.get("knobs_match") is False:
+        render_note(f"The study recorded a knobs registry other than this one (its hash "
+                    f"{pm.get('knobs_hash')}, this one {pm.get('knobs_hash_now')}): its numbers "
+                    f"were measured under that registry. Re-run the study to measure them under "
+                    f"this one.")
     _render_decisions(pm)
     _render_checks(pm)
     _render_arms(pm)
@@ -344,7 +399,8 @@ def render_grades_tab(edges: dict, grades_ts: dict, call_ts: pd.DataFrame | None
     edges, grades_ts, priors_meta = edges or {}, grades_ts or {}, priors_meta or {}
     d_star = verdict.get("asof")
     asset_class = ((edges.get("call") or {}).get("attrs") or {}).get("asset_class")
-    _render_table(edges, grades_ts, d_star, horizon, priors_meta, asset_class)
+    has_ohlcv = bool((call_ts.attrs if call_ts is not None else {}).get("has_ohlcv", True))
+    _render_table(edges, grades_ts, d_star, horizon, priors_meta, asset_class, has_ohlcv)
     if call_ts is not None and not call_ts.empty:
         _render_paths(call_ts)
     render_size_terciles(edges.get("call"), horizon)

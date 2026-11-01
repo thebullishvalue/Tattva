@@ -31,16 +31,40 @@ from data.circuit_breaker import all_circuits, CircuitState
 
 
 def _history_flag(priors_meta: dict, target: str, fingerprint: str) -> tuple[str, str]:
-    """``(value, subtext)``: is this the history the pooled priors were studied on?"""
-    if (priors_meta or {}).get("status") != "loaded":
+    """``(value, subtext)``: is this the history the pooled priors were studied on?
+
+    Compared at the session the study recorded for ``target``
+    (``fingerprint_upto``: its last prior vintage, a settled date) — the run's
+    fingerprint is hashed to exactly that session (``pipeline.run.prepare``),
+    so only a change to the rows the priors depend on can flag it.
+    """
+    pm = priors_meta or {}
+    if pm.get("status") == "refused":
+        return "nothing to compare", f"the priors file was refused: {pm.get('refusal')}"
+    if pm.get("status") != "loaded":
         return "nothing to compare", "no pooled-prior study yet"
-    studied = (priors_meta.get("fingerprints") or {}).get(target)
+    studied = (pm.get("fingerprints") or {}).get(target)
+    upto = (pm.get("fingerprint_upto") or {}).get(target)
     if not studied:
+        members = set(pm.get("members") or ())
+        base = target.rpartition(" (")[0]
+        twin = [m for m in sorted(members) if base and m.rpartition(" (")[0] == base]
+        if twin:
+            return ("nothing to compare",
+                    f"{target} is another listing of the study member {twin[0]}: it reads that "
+                    f"member's leave-one-out prior and has no studied history of its own")
         return "nothing to compare", f"{target} is not a member of the priors study"
+    through = f" through {upto}" if upto else ""
+    check = (pm.get("fingerprint_check") or {}).get(target)
+    if check and check != "verified":
+        return ("unverified study history",
+                f"the study could not verify the history it fingerprinted ({check}); its "
+                f"fingerprint {studied} is not compared")
     if studied != fingerprint:
         return ("history rewritten",
-                f"history differs from the panel the priors were studied on ({studied})")
-    return "same history", f"the panel the priors were studied on ({studied})"
+                f"the history{through} differs from the one the priors were studied on "
+                f"({studied}): a revised or missing series in rows the priors depend on")
+    return "same history", f"the history{through} the priors were studied on ({studied})"
 
 
 def _render_run(target: str) -> None:
@@ -49,6 +73,7 @@ def _render_run(target: str) -> None:
     asof, h, lag = ss.get("asof"), ss.get("horizon"), ss.get("exec_lag")
     epoch, fp = ss.get("epoch"), str(ss.get("fingerprint") or "")
     flag, flag_sub = _history_flag(ss.get("priors_meta") or {}, target, fp)
+    upto = ((ss.get("priors_meta") or {}).get("fingerprint_upto") or {}).get(target)
     card = "system:run"
     render_kpi_strip([
         {"label": "As of d*", "value": f"{asof:%d %b %Y}" if asof is not None else "—",
@@ -59,7 +84,9 @@ def _render_run(target: str) -> None:
         {"label": "Analysis epoch", "value": f"{epoch:%d %b %Y}" if epoch is not None else "—",
          "subtext": "the fixed first session of every history", "card": card},
         {"label": "History fingerprint", "value": fp or "—",
-         "subtext": "content hash of the settled prepared rows", "card": card},
+         "subtext": (f"content hash of the prepared rows through {upto}, the session the priors "
+                     f"study recorded" if upto else "content hash of the settled prepared rows"),
+         "card": card},
         {"label": "Against the priors", "value": flag, "subtext": flag_sub, "card": card,
          "color_class": "warning" if flag == "history rewritten" else "neutral"},
     ], max_cols=5, key="system-run")
@@ -69,6 +96,13 @@ def _render_priors() -> None:
     """The pooled-prior study's provenance, or that it has not run."""
     pm = st.session_state.get("priors_meta") or {}
     card = "system:priors"
+    if pm.get("status") == "refused":
+        render_kpi_strip([
+            {"label": "Pooled priors", "value": "priors file refused",
+             "subtext": f"{pm.get('refusal')} · every grade is the instrument's own",
+             "card": card},
+        ], max_cols=1, key="system-priors")
+        return
     if pm.get("status") != "loaded":
         render_kpi_strip([
             {"label": "Pooled priors", "value": "study not yet run",
@@ -83,7 +117,16 @@ def _render_priors() -> None:
          "subtext": f"git {str(pm.get('git_sha') or '—')[:10]}", "card": card},
         {"label": "Studied at", "value": f"h {pm.get('h', '—')} · L {pm.get('exec_lag', '—')}",
          "subtext": "a file studied at another h or L is refused", "card": card},
-    ], max_cols=3, key="system-priors")
+        {"label": "Knobs registry",
+         "value": ("as studied" if pm.get("knobs_match") else
+                   "not recorded" if pm.get("knobs_match") is None else "differs"),
+         "subtext": (f"the study's {pm.get('knobs_hash') or '—'} · this registry's "
+                     f"{pm.get('knobs_hash_now') or '—'}"
+                     + ("" if pm.get("knobs_match") is not False else
+                        ": its numbers were measured under another registry — re-run the study")),
+         "color_class": "warning" if pm.get("knobs_match") is False else "neutral",
+         "card": card},
+    ], max_cols=4, key="system-priors")
 
 
 def _render_coverage(engine) -> None:
@@ -173,10 +216,20 @@ def _render_caches_and_circuits() -> None:
     render_kpi_strip(items, max_cols=max(1, len(items)), key="system-circuits")
 
 
+def _knob_value(v) -> str:
+    """A knob's value as the table prints it: a study's class summary in words, not a dict."""
+    if isinstance(v, dict) and {"mu", "se_mu", "tau", "k"} <= set(v):
+        return (f"μ {v['mu']:+.3f} ± {v['se_mu']:.3f} · τ {v['tau']:.3f} · k {int(v['k'])}"
+                + (f" · {v['asof']}" if v.get("asof") else ""))
+    if isinstance(v, tuple):
+        return ", ".join(str(x) for x in v)
+    return str(v)
+
+
 def _knobs_table() -> pd.DataFrame:
     """The KNOBS registry, one row per knob, as core.knobs declares it."""
     return pd.DataFrame([{
-        "Knob": k.name, "Value": str(k.value), "Kind": k.kind, "Consumer": k.consumer,
+        "Knob": k.name, "Value": _knob_value(k.value), "Kind": k.kind, "Consumer": k.consumer,
         "Horizon coupling": k.horizon_coupling,
         "Reason or study": f"{k.study}@{k.date}" if k.kind == "measured" else k.reason,
     } for k in knobs.KNOBS.values()]).set_index("Knob")
@@ -230,7 +283,8 @@ def render_diagnostics_tab(engine, target: str) -> None:
         "where it is.",
         icon="cpu", accent="cyan", card="system:knobs",
     )
-    render_table_panel(_knobs_table(), "system-knobs", units=f"{len(knobs.KNOBS)} knobs",
+    render_table_panel(_knobs_table(), "system-knobs",
+                       context=f"the registry · {len(knobs.KNOBS)} knobs",
                        windowed=False, index_label="Knob", max_height=520)
     render_note("structural: fixed by an argument, never tuned · structural-inherited: an older "
                 "value kept without a study behind it, not evidence · measured: set by a "
@@ -244,5 +298,5 @@ def render_diagnostics_tab(engine, target: str) -> None:
         icon="grid", accent="cyan", card="system:roles",
     )
     render_table_panel(_roles_table(), "system-roles",
-                       units=f"{len(ROLES)} roles · {len(CARDS)} cards",
+                       context=f"the registry · {len(ROLES)} roles · {len(CARDS)} cards",
                        windowed=False, index_label="Role", max_height=520)

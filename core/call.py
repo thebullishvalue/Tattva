@@ -12,16 +12,17 @@ published after the close of t can trade at (L = EXECUTION_LAG).
 
     P1 published — FVO finite and the session not withheld (NO CALL, with the
                    engine's reason);
-    P2 printed   — the target printed at t and, at d*, is fewer than h
-                   sessions behind (NO CALL);
+    P2 printed   — the target printed at t and, at d*, its h-session window
+                   from the next close has not run: fewer than h + L of its
+                   sessions have closed since (NO CALL);
     P3 tradeable — a valuation ratio is never called (NO CALL);
     P4 |FVO| ≥ CLAIM_SIGMA — otherwise NO CLAIM, inside the noise.
 
 * ``trust_t = f(t_post of the claim, as of t)`` — the claim's EARNED base
   size. It is 0 until the claim's price-side grade clears STRENGTH_T0, and a
-  claim with trust 0 is a HOLD whose reason names that grade. Trust is never
-  the 'binding' factor: it is not something that limits the call, it is what
-  the call has earned.
+  claim with trust 0 is a HOLD whose reason names that grade. A binding factor
+  names a sizer, never trust: trust is not something that limits the call, it
+  is what the call has earned.
 * each sizer i — its reading z_i, clipped to ±SIZER_Z_CLIP (absent → 0), at
   ``β_i = SIZER_BETA_MAX · f(t_post_i) · SIZERS_ENABLED``. An unskilled sizer
   (β = 0) or an absent reading is exactly ×1.00, and a factor is positive and
@@ -48,9 +49,10 @@ import pandas as pd
 from core.instruments import asset_class_name
 from core.knobs import knob
 from core.roles import CHAIN, ROLES, chain_roles
-from core.semantics import CLAIM_SIGMA, claim_direction, edge_tier, swayam_word
+from core.semantics import CLAIM_SIGMA, claim_direction, edge_tier, swayam_word, valuation_state
 from core.trust import strength
 
+EXECUTION_LAG: int = knob("EXECUTION_LAG")
 SIZER_BETA_MAX: float = knob("SIZER_BETA_MAX")
 SIZER_Z_CLIP: float = knob("SIZER_Z_CLIP")
 STRENGTH_T0: float = knob("STRENGTH_T0")
@@ -120,6 +122,24 @@ def _strengths(t: np.ndarray) -> np.ndarray:
     return np.array([strength(v) for v in t], dtype=np.float64)
 
 
+def signed(x, nd: int = 2) -> str:
+    """``x`` with its sign to ``nd`` decimals; a value that rounds to zero prints
+    unsigned ('0.00', never '-0.00'), and an undefined one as an em dash."""
+    v = _num(x)
+    if v is None:
+        return "—"
+    out = f"{v:+.{nd}f}"
+    return f"{0:.{nd}f}" if float(out) == 0 else out
+
+
+def share_text(w) -> str:
+    """A weight in [0, 1] as a percentage: '<1%' for a positive weight that rounds to 0."""
+    v = _num(w)
+    if v is None:
+        return "—"
+    return "<1%" if 0 < v < 0.005 else f"{v:.0%}"
+
+
 def format_size(size) -> str:
     """The size as printed: a unitless index to two decimals, never a '%'."""
     v = _num(size)
@@ -145,41 +165,54 @@ def edge_periods(edge: dict | None) -> tuple[int, int]:
 # ═══════════════════════════════════════════════════════════════════════
 
 def _claim_grade_text(ic, se, n_win, mu, sd, scope, k, *, asset_class: str | None = None,
-                      study_date: str | None = None) -> str:
+                      study_date: str | None = None, through=None, w_own=None) -> str:
     """'own +0.070 ± 0.062, n_win 140; no pooled prior' — the claim grade in words.
 
     Given the instrument's ``asset_class`` key and the study's ``study_date``
     (the verdict's words), the prior is named as the pool it is, by the
     class's page name — 'Commodities class-LOO prior −0.001 ± 0.028, k 6,
     study 2026-10-27', or 'global-LOO prior …, study …' for a catalogue-wide
-    pool. call_ts's ``reason`` keeps the short form.
+    pool. ``through`` (the grid date the as-of grade was graded through) and
+    ``w_own`` (the posterior's weight on the own grade) are the verdict's too:
+    the own grade is named with its date, and a weight of 0 says why it moves
+    nothing. call_ts's ``reason`` keeps the short form.
     """
     ic, se, mu, sd = _num(ic), _num(se), _num(mu), _num(sd)
     n = int(_num(n_win) or 0)
-    own = (f"own {ic:+.3f} ± {se:.3f}, n_win {n}" if ic is not None and se is not None
+    when = pd.Timestamp(through) if through is not None and pd.notna(through) else None
+    dated = f", graded through {when:%d %b %Y}" if when is not None else ""
+    graded = ic is not None and se is not None
+    own = (f"own {ic:+.3f} ± {se:.3f}, n_win {n}{dated}" if graded
            else f"own grade warming up: {n} of {GRADE_WARMUP_WIN} windows")
     if str(scope) in _NO_PRIOR or mu is None or sd is None:
         return f"{own}; no pooled prior"
     pool = (f"{asset_class_name(asset_class)} {scope}"
             if asset_class and str(scope).startswith("class") else str(scope))
     study = f", study {study_date}" if study_date else ""
-    return f"{own}; {pool} prior {mu:+.3f} ± {sd:.3f}, k {int(_num(k) or 0)}{study}"
+    weight = ""
+    w = _num(w_own)
+    if graded and w is not None:
+        weight = (" · own weight 0%: this instrument's errors are nearly a copy of its pool's, "
+                  "so the pool alone sets t_post" if w <= 0 else f" · own weight {share_text(w)}")
+    return f"{own}; {pool} prior {mu:+.3f} ± {sd:.3f}, k {int(_num(k) or 0)}{study}{weight}"
 
 
 def _reason(action: str, precondition: str, r: dict, h: int, graded: bool,
-            text: str | None = None) -> str:
+            text: str | None = None, lag: int = EXECUTION_LAG) -> str:
     """Why this session's action is what it is, in numbers.
 
     ``text`` is the claim grade in words; by default the short form call_ts
     stores (:func:`_claim_grade_text` without the pool's class and study).
+    ``lag`` is L: the window opens at the close L sessions after d*, so it has
+    run once h + L sessions have closed since d*.
     """
     if action == "NO CALL":
         if precondition == "published":
             return r["withheld_reason"] or "no valuation published"
         if precondition == "printed":
             b = int(r["behind"])
-            return (f"{b} sessions behind: the {h}-session horizon has run" if b >= h
-                    else "the target did not print this session")
+            return (f"{b} sessions behind: the {h}-session horizon from the next close has run"
+                    if b >= h + lag else "the target did not print this session")
         return NOT_TRADEABLE
     if action == "NO CLAIM":
         return f"|FVO| {abs(r['fvo']):.2f}σ is inside the ±{CLAIM_SIGMA:g}σ noise"
@@ -214,10 +247,12 @@ def compose_series(inputs: pd.DataFrame, grades_ts: dict[str, pd.DataFrame], *,
     idx = inputs.index
     n = len(idx)
     h = int(inputs.attrs["h"])
+    lag = int(inputs.attrs.get("exec_lag", EXECUTION_LAG))
     nan = np.full(n, np.nan)
 
     published = inputs["published"].to_numpy(dtype=bool)
-    p2 = inputs["printed"].to_numpy(dtype=bool) & (inputs["behind"].to_numpy(dtype=np.int64) < h)
+    # P2: printed, and the window from the next close has not run (h + L closed since d*).
+    p2 = inputs["printed"].to_numpy(dtype=bool) & (inputs["behind"].to_numpy(dtype=np.int64) < h + lag)
     p3 = np.full(n, bool(tradeable))
     claim = inputs["claim"].to_numpy(dtype=np.int64)
     called = published & p2 & p3
@@ -274,7 +309,8 @@ def compose_series(inputs: pd.DataFrame, grades_ts: dict[str, pd.DataFrame], *,
     out["binding"] = np.where(d == 0, "", np.where(fx.min(axis=0) < 1.0, keys[low], "none"))
 
     rows = out.to_dict("records")
-    out["reason"] = [_reason(a, p, r, h, graded) for a, p, r in zip(action, precondition, rows)]
+    out["reason"] = [_reason(a, p, r, h, graded, lag=lag)
+                     for a, p, r in zip(action, precondition, rows)]
     out["grid_date"] = g["grid_date"].to_numpy() if graded else pd.NaT
     out = out[list(CALL_COLUMNS)]
     out.attrs = {**inputs.attrs, "tradeable": bool(tradeable), "sizers_enabled": bool(sizers_enabled)}
@@ -297,25 +333,28 @@ def _gap_words(target: str, fvo: float, pct: float) -> str:
             f"cross-section implies")
 
 
-def _sizer_reading(key: str, r: dict, d: int) -> tuple[str, str]:
+def _sizer_reading(key: str, r: dict, d: int, *, has_ohlcv: bool = True) -> tuple[str, str]:
     """(reading, detail) of one sizer on d*'s row."""
     if key == "swayam":
         lean, native = _num(r["swayam_lean"]), bool(r["swayam_native"])
         z = r["swayam_z"]
+        if not has_ohlcv:
+            return ("no Swayam read",
+                    "not applicable: the target has no OHLCV feed, so Swayam never reads it: ×1.00")
         if lean is None:
             return "no Swayam read", "no Swayam row on d*: ×1.00, nothing is filled in"
         if not native:
             return ("carried: no native row on d*",
-                    f"net breadth {lean * 100:+.0f} pts carried from an earlier session: a carried "
-                    f"row is ×1.00 and is not graded")
+                    f"net breadth {signed(lean * 100, 0)} pts carried from an earlier session: a "
+                    f"carried row is ×1.00 and is not graded")
         word = swayam_word(d * lean) if d else "no claim to confirm"
-        return (f"net breadth {lean * 100:+.0f} pts · {word}",
-                f"z = d·Lean = {z:+.2f} on a native row (±{SIZER_Z_CLIP:g} clip)")
+        return (f"net breadth {signed(lean * 100, 0)} pts · {word}",
+                f"z = d·Lean = {signed(z)} on a native row (±{SIZER_Z_CLIP:g} clip)")
     mr, kappa = _num(r["mr_prob"]), _num(r["kappa"])
     if mr is None:
         return "no ECM read", "the error-correction layer is warming up: ×1.00"
-    kap = f"κ̂ {kappa:+.4f}/d" if kappa is not None else "κ̂ —"
-    z = f"z = 2·MRProb − 1 = {r['reversion_z']:+.2f}" if d else "no claim to size: z = 0"
+    kap = f"κ̂ {signed(kappa, 4)}/d" if kappa is not None else "κ̂ —"
+    z = f"z = 2·MRProb − 1 = {signed(r['reversion_z'])}" if d else "no claim to size: z = 0"
     return f"P(price-side κ > 0) {mr:.2f}", f"MRProb {mr:.2f} · {kap} · {z}"
 
 
@@ -352,20 +391,24 @@ def _call_grade(e: dict | None, prospective: dict | None) -> dict:
 
 
 def verdict_from_row(call_ts: pd.DataFrame, edges: dict, *, asof, horizon: int,
-                     exec_lag: int, target: str) -> dict:
+                     exec_lag: int, target: str, closed_through=None) -> dict:
     """The verdict: ``call_ts`` read at d* (``asof``), in the words every page prints.
 
     Returns ``{action, word, direction, size, trust, claim_t, headline, limit,
     binding, chain, size_formula, call_grade, asof, horizon_days, exec_lag,
-    provisional, elapsed, caveat}``. ``chain`` is one row per ``CHAIN`` key,
-    each ``{role, key, title, reading, grade, effect, detail}``. Nothing here
-    is re-derived from anything but the row and the grades in ``edges``, and
-    no value is NaN (a missing number is None), so two verdicts of one row
-    compare equal.
+    provisional, provisional_closed, behind, elapsed, caveat, tradeable}``. ``chain`` is one row per ``CHAIN``
+    key, each ``{role, key, title, reading, grade, effect, detail}``.
+    ``behind`` is the target's sessions closed since d* (call_ts's own count)
+    and ``elapsed`` how many of the h sessions of the window from the next
+    close have run, ``clip(behind − L, 0, h)``. ``closed_through`` (the newest
+    closed session date, when the caller knows it) lets a PROVISIONAL d* say
+    that its session has since closed. Nothing here is re-derived from
+    anything but the row and the grades in ``edges``, and no value is NaN (a
+    missing number is None), so two verdicts of one row compare equal.
     """
-    h, edges = int(horizon), edges or {}
+    h, lag, edges = int(horizon), int(exec_lag), edges or {}
     call_grade = _call_grade(edges.get("call"), edges.get("call:prospective"))
-    base = {"horizon_days": h, "exec_lag": int(exec_lag), "call_grade": call_grade}
+    base = {"horizon_days": h, "exec_lag": lag, "call_grade": call_grade}
     when = pd.Timestamp(asof) if asof is not None else None
     if when is None or call_ts is None or when not in call_ts.index:
         return {**base, "action": "NO CALL", "word": "NO CALL", "direction": 0, "size": 0.0,
@@ -373,49 +416,57 @@ def verdict_from_row(call_ts: pd.DataFrame, edges: dict, *, asof, horizon: int,
                 "headline": f"NO CALL: {target} has no published valuation yet.",
                 "limit": "no valuation published", "binding": None, "chain": [],
                 "size_formula": f"no claim to size: size {format_size(0.0)}",
-                "asof": None, "provisional": False, "elapsed": 0, "caveat": None}
+                "asof": None, "provisional": False, "provisional_closed": False, "behind": 0,
+                "elapsed": 0, "caveat": None,
+                "tradeable": bool((call_ts.attrs if call_ts is not None else {}).get("tradeable", True))}
 
     r = call_ts.loc[when].to_dict()
     action, d = str(r["action"]), int(r["d"])
     fvo, pct = _num(r["fvo"]), _num(r["pct"]) or 0.0
     size, trust, t = float(r["size"]), float(r["trust"]), _num(r["claim_t"])
     tradeable = bool(call_ts.attrs.get("tradeable", True))
+    has_ohlcv = bool(call_ts.attrs.get("has_ohlcv", True))
 
     # ── The chain, in decision order ────────────────────────────────────
     raw = claim_direction(fvo)
     claim_side = {1: "BUY side (cheap)", -1: "SELL side (rich)"}.get(raw, "no claim")
+    # The one state word (core.semantics.valuation_state), as Mūla prints it.
     claim_reading = ("no valuation" if fvo is None else
-                     f"{abs(fvo):.2f}σ {'cheap' if fvo < 0 else 'rich'}" if raw else
+                     f"{abs(fvo):.2f}σ {valuation_state(fvo).lower()}" if raw else
                      "inside the noise")
     claim_detail = (f"{abs(pct):.1f}% {'below' if pct < 0 else 'above'} the level the macro "
                     f"cross-section implies (FVO {fvo:+.2f}σ; no claim inside ±{CLAIM_SIGMA:g}σ)"
                     if fvo is not None else "Mūla has published no valuation for this session")
 
     behind = int(r["behind"])
+    elapsed = int(min(max(behind - lag, 0), h))
     holds = {"precondition:published": bool(r["published"]),
-             "precondition:printed": bool(r["printed"]) and behind < h,
+             "precondition:printed": bool(r["printed"]) and behind < h + lag,
              "precondition:tradeable": tradeable,
              "precondition:claim_sigma": raw != 0}
     pre = chain_roles("precondition")
     failed = [p.title for p in pre if not holds[p.key]]
     pre_detail = " · ".join(f"{p.title} {'✓' if holds[p.key] else '✗'}" for p in pre)
-    pre_detail += f" · {behind} of {h} sessions behind"
+    pre_detail += (f" · {behind} {'session' if behind == 1 else 'sessions'} closed since d*, "
+                   f"{elapsed} of {h} of the horizon elapsed")
     pre_effect = ("the claim stands" if not failed else
                   "NO CLAIM" if failed == [ROLES["precondition:claim_sigma"].title] else "NO CALL")
 
     e_claim = edges.get("claim") or {}
     pos, nb = edge_periods(e_claim)
     # The claim's grade, its prior named as the pool it is (the instrument's
-    # class and the study's date, from call_ts's provenance stamp); the
-    # reason is rebuilt from it, so the headline, the limit and the trust row
-    # say one thing. call_ts's own reason keeps the short form.
+    # class and the study's date, from call_ts's provenance stamp), its own
+    # grade dated with the grid date it was graded through, and the weight the
+    # posterior gave it; the reason is rebuilt from it, so the headline and
+    # the trust row say one thing. call_ts's own reason keeps the short form.
     grade_text = _claim_grade_text(r["claim_ic"], r["claim_se"], r["claim_n_win"],
                                    r["claim_prior_mu"], r["claim_prior_sd"],
                                    r["claim_prior_scope"], r["claim_prior_k"],
                                    asset_class=call_ts.attrs.get("asset_class"),
-                                   study_date=call_ts.attrs.get("priors_run_date"))
+                                   study_date=call_ts.attrs.get("priors_run_date"),
+                                   through=r.get("grid_date"), w_own=r.get("claim_w_own"))
     reason = _reason(action, str(r["precondition"]), r, h,
-                     str(r["claim_prior_scope"]) != "ungraded", text=grade_text)
+                     str(r["claim_prior_scope"]) != "ungraded", text=grade_text, lag=lag)
     periods = f"; full history {pos} of {nb} periods positive" if nb else ""
     trust_grade = (f"{grade_text}{periods} → t_post {t:.2f} · {edge_tier(t)[0]}" if t is not None
                    else f"{grade_text}{periods} → ungraded")
@@ -432,14 +483,17 @@ def verdict_from_row(call_ts: pd.DataFrame, edges: dict, *, asof, horizon: int,
                 key, f"t_post {t:.2f}" if t is not None else "ungraded", trust_grade,
                 f"trust {trust:.2f}",
                 f"f(t) opens at {STRENGTH_T0:g} and is full at {STRENGTH_T1:g}; trust is the "
-                f"claim's earned base size and is never the binding factor"))
+                f"claim's earned base size, and a binding factor names a sizer, never trust"))
         elif key == "size":
             pass                                     # appended after the formula below
         else:
             s = next(x for x in SIZERS if f"sizer:{x.key}" == key)
-            reading, detail = _sizer_reading(s.key, r, d)
+            reading, detail = _sizer_reading(s.key, r, d, has_ohlcv=has_ohlcv)
             st = _num(r[f"{s.key}_t"])
-            grade = f"t_post {st:.2f} · {edge_tier(st)[0]}" if st is not None else "ungraded"
+            if s.key == "swayam" and not has_ohlcv:
+                grade = "not applicable (no OHLCV)"
+            else:
+                grade = f"t_post {st:.2f} · {edge_tier(st)[0]}" if st is not None else "ungraded"
             chain.append(_chain_row(key, reading, grade,
                                     f"β {r[f'{s.key}_beta']:.2f} → ×{r[f'{s.key}_factor']:.2f}", detail))
 
@@ -462,7 +516,10 @@ def verdict_from_row(call_ts: pd.DataFrame, edges: dict, *, asof, horizon: int,
         clause = (f"the claim has not been shown to pay on price: t_post {t:.2f} ({grade_text})"
                   if t is not None else f"the claim is ungraded ({reason.removeprefix('claim ungraded: ')})")
         headline = f"HOLD: {gap}, but {clause}; acting needs a t_post above {STRENGTH_T0:g}."
-        limit = f"Limited by the claim's grade: {reason}"
+        # What holds it, in one clause: the claim's grade has earned no trust
+        # (the headline carries the grade itself, the trust row the arithmetic).
+        limit = (f"Held: the claim's grade has earned no trust (t_post {t:.2f} < {STRENGTH_T0:g})"
+                 if t is not None else "Held: the claim is ungraded, so it has earned no trust")
     else:
         headline = (f"{action} · size {format_size(size)}: {gap}; the claim's price-side grade "
                     f"(t_post {t:.2f}) earns trust {trust:.2f}.")
@@ -470,13 +527,19 @@ def verdict_from_row(call_ts: pd.DataFrame, edges: dict, *, asof, horizon: int,
         if b in {s.key for s in SIZERS}:
             s = next(x for x in SIZERS if x.key == b)
             limit = (f"Limited by {s.title}: ×{r[f'{b}_factor']:.2f} "
-                     f"({_sizer_reading(b, r, d)[0]})")
+                     f"({_sizer_reading(b, r, d, has_ohlcv=has_ohlcv)[0]})")
         else:
             limit = "none: sizers neutral or confirming"
 
     last = call_ts.index[-1]
     caveat = None
-    if bool(r["provisional"]):
+    closed = (closed_through is not None
+              and pd.Timestamp(closed_through).normalize() >= when.normalize())
+    if bool(r["provisional"]) and closed:
+        caveat = (f"PROVISIONAL: {when:%d %b %Y} was valued while its session was still forming; "
+                  f"that session has closed since, and these data predate its close — refresh "
+                  f"the data to settle it.")
+    elif bool(r["provisional"]):
         caveat = (f"PROVISIONAL: {when:%d %b %Y} is a session still forming; the call is "
                   f"published and may be revised once when it closes.")
     elif last > when:
@@ -488,6 +551,7 @@ def verdict_from_row(call_ts: pd.DataFrame, edges: dict, *, asof, horizon: int,
         **base, "action": action, "word": action, "direction": d, "size": size,
         "trust": trust, "claim_t": t, "headline": headline, "limit": limit,
         "binding": str(r["binding"]) or None, "chain": chain, "size_formula": size_formula,
-        "asof": when, "provisional": bool(r["provisional"]), "elapsed": min(behind, h),
-        "caveat": caveat,
+        "asof": when, "provisional": bool(r["provisional"]),
+        "provisional_closed": bool(r["provisional"]) and closed, "behind": behind,
+        "elapsed": elapsed, "caveat": caveat, "tradeable": tradeable,
     }

@@ -441,15 +441,104 @@ def _finite(x) -> float | None:
 def edge_text(edge: dict | None) -> str:
     """A grade as a lean's subtext: 'IC +0.026 ± 0.075 (t 0.35, n/h 136)'.
 
-    ``edge`` is one of the pipeline's grades (an ``edges`` entry). With no IC, SE or t yet it
-    says so, with the windows it has: an ungraded lean is never shown bare.
+    ``edge`` is one of the pipeline's grades (an ``edges`` entry), or a role
+    object's one grade (:func:`role_edge`), which adds the grid date it was
+    graded through and the posterior t with its label — 'IC −0.059 ± 0.057
+    (t −1.04, n/h 162) through 15 Oct 2026 · t_post −0.35 · no measured edge'.
+    With no IC, SE or t yet it says so, with the windows it has: an ungraded
+    lean is never shown bare.
     """
     e = edge or {}
     ic, se, t = (_finite(e.get(k)) for k in ("ic", "se", "t"))
     n_win = int(e.get("n_win") or 0)
     if ic is None or se is None or t is None:
-        return f"IC not yet graded (n/h {n_win})"
-    return f"IC {ic:+.3f} ± {se:.3f} (t {t:.2f}, n/h {n_win})"
+        out = f"IC not yet graded (n/h {n_win})"
+    else:
+        out = f"IC {ic:+.3f} ± {se:.3f} (t {t:.2f}, n/h {n_win})"
+    if "t_post" in e:
+        through = e.get("through")
+        if through is not None and ic is not None:
+            out += f" through {pd.Timestamp(through):%d %b %Y}"
+        tp = _finite(e.get("t_post"))
+        out += (f" · t_post {tp:.2f} · {_t_tier(tp)[0]}" if tp is not None else " · ungraded")
+    return out
+
+
+def role_edge(edge: dict | None) -> dict:
+    """A role object's ONE grade — the one every page prints for it.
+
+    ``edge`` is the object's ``edges`` entry; its ``asof_grade`` is the own
+    as-of grade the call read at d* (graded through ``grid_date``), its prior
+    and its posterior. Returns ``{ic, se, t, n_win, through, prior_mu,
+    prior_sd, prior_scope, w_own, t_post, label}``: ``t`` is the own grade's
+    t, ``label`` the tier of ``t_post`` (``core.semantics.edge_tier``) — the
+    only edge word a role object carries. The edge's full-history fields are
+    a diagnostic, never this.
+    """
+    g = (edge or {}).get("asof_grade") or {}
+    ic, se = _finite(g.get("ic")), _finite(g.get("se"))
+    tp = _finite(g.get("t_post"))
+    return {"ic": ic, "se": se, "t": ic / se if ic is not None and se else None,
+            "n_win": int(_finite(g.get("n_win")) or 0), "through": g.get("grid_date"),
+            "prior_mu": _finite(g.get("prior_mu")), "prior_sd": _finite(g.get("prior_sd")),
+            "prior_scope": str(g.get("prior_scope") or "none"), "w_own": _finite(g.get("w_own")),
+            "t_post": tp, "label": _t_tier(tp)[0]}
+
+
+def own_grade_label(g: dict) -> str:
+    """'Own grade · graded through 15 Oct 2026' — a role grade's KPI label, dated."""
+    through = g.get("through")
+    return (f"Own grade · graded through {pd.Timestamp(through):%d %b %Y}"
+            if through is not None and g.get("ic") is not None else "Own grade · as of d*")
+
+
+def own_weight_text(g: dict) -> str:
+    """The posterior's weight on the own grade, and what a weight of 0 means."""
+    w = _finite(g.get("w_own"))
+    if g.get("prior_scope") in (None, "none", "ungraded") or g.get("prior_mu") is None:
+        return "1.00 with no prior: the own grade alone"
+    if g.get("ic") is None:
+        return "0: no own grade yet, the prior predictive alone"
+    if w is not None and w <= 0:
+        return ("0%: this instrument's errors are nearly a copy of its class pool's, so the pool "
+                "alone sets t_post")
+    return "the rest is the class pool's"
+
+
+def gap_split_text(gs: dict | None, horizon: int) -> str | None:
+    """What the gap split measured, in one sentence, or None when it was not measured.
+
+    ``gs`` is ``evidence['gap_split']``: of a gap open at the start of a
+    window, ``closed`` (= b_fv − b_price) closed within the horizon and the
+    rest stayed open; price did ``price_share`` of that closing and fair value
+    moving toward price the rest. A negative share is said as what it is —
+    price moved away from fair value, and fair value closed more than the
+    whole closing — and a gap that widened on average is said to have widened.
+    """
+    g = gs or {}
+    closed, share, se = _finite(g.get("closed")), _finite(g.get("price_share")), _finite(g.get("se_share"))
+    b_fv, b_p = _finite(g.get("b_fv")), _finite(g.get("b_price"))
+    if closed is None or b_fv is None or b_p is None:
+        return None
+    h = int(horizon)
+    if closed <= 0:
+        return (f"Of a gap open at the start of a window, none closed within {h} sessions on "
+                f"average: it widened by {-closed:.0%} of the gap (price's slope on the gap "
+                f"{b_p:+.2f}, fair value's {b_fv:+.2f}).")
+    rest = (f" and {1 - closed:.0%} stayed open" if closed < 1 else ", more than all of it")
+    head = f"Of a gap open at the start of a window, {closed:.0%} closed within {h} sessions{rest}"
+    sd = f" (± {se:.0%})" if se is not None else ""
+    if share is None:
+        return head + "."
+    if share < 0:
+        return (f"{head}. Fair value moving toward price did all of that closing and more "
+                f"({b_fv:.0%} of the gap): price moved away from fair value, a share of "
+                f"{share:+.0%}{sd} of the closing.")
+    if share > 1:
+        return (f"{head}: price did {share:.0%}{sd} of that closing — more than all of it — while "
+                f"fair value moved away from price.")
+    return (f"{head}; price did {share:.0%}{sd} of that closing and fair value moving toward "
+            f"price did the rest ({1 - share:.0%}).")
 
 
 def class_pool(priors_meta: dict | None, asset_class: str | None, obj: str) -> dict | None:
@@ -825,7 +914,7 @@ _TABLE_FONTS = ("https://fonts.googleapis.com/css2?"
 # code that words the call (tests/test_copy.py holds the reserved words to
 # them).
 
-from core.call import ACTIONS, edge_periods, format_size  # noqa: E402
+from core.call import ACTIONS, edge_periods, format_size, share_text, signed  # noqa: E402
 from core.instruments import asset_class_name  # noqa: E402
 from core.knobs import knob as _knob  # noqa: E402
 from core.roles import CHAIN  # noqa: E402
@@ -847,12 +936,13 @@ def _action_class(action: str) -> str:
 
 
 def _pct(v) -> str:
-    """A drift-neutral payoff (a log return) in percent, or an em dash."""
+    """A drift-neutral payoff (a log return) in percent, or an em dash ('0.00%', never '-0.00%')."""
     v = _finite(v)
-    return f"{v * 100:+.2f}%" if v is not None else "—"
+    return f"{signed(v * 100)}%" if v is not None else "—"
 
 
-def _render_call_grade(cg: dict, horizon: int, pool: dict | None, pool_label: str) -> None:
+def _render_call_grade(cg: dict, horizon: int, pool: dict | None, pool_label: str,
+                       tradeable: bool = True) -> None:
     """The GRADE→call strip: the call graded on the sessions it was issued.
 
     Graded, its IC ± SE (t, n/h) on the issued sessions; below the warm-up,
@@ -866,6 +956,16 @@ def _render_call_grade(cg: dict, horizon: int, pool: dict | None, pool_label: st
     prospective = cg.get("prospective") or {}
     card = "overview:call_grade"
     n_win = int(cg.get("n_win") or 0)
+    if not tradeable:
+        # A valuation ratio is never called (P3): there is no issued call to
+        # grade, and 'coverage 0 of 0' or 'held at trust 0' would describe one.
+        render_kpi_strip([
+            {"label": "Call grade · as issued", "value": "not called",
+             "subtext": ("a valuation ratio is not a traded price: no call is ever issued on it, "
+                         "and its claim is graded as evidence on the Mūla page"), "card": card}],
+            max_cols=1, key="call-grade")
+        return
+    warmed = n_win >= warm
     if cg.get("graded") and None not in (cg.get("ic"), cg.get("se"), cg.get("t")):
         items = [{"label": "Call grade · as issued", "value": f"{cg['ic']:+.3f}",
                   "subtext": f"± {cg['se']:.3f} (t {cg['t']:.2f}, n/h {n_win}) · {cg['label']}",
@@ -881,19 +981,24 @@ def _render_call_grade(cg: dict, horizon: int, pool: dict | None, pool_label: st
              "subtext": (f"± {pool['se_mu']:.3f} · k {int(pool['k'])} · {pool_label}" if pool
                          else pool_label), "card": card},
         ]
+    # Below the warm-up the issued calls' numbers are not a grade: hit and the
+    # issued-vs-held payoff on a handful of overlapping sessions are not shown.
     items += [
         {"label": "Coverage", "value": f"{cg.get('issued_n', 0)} of {cg.get('claim_n', 0)}",
-         "subtext": (f"claim sessions on which a call was issued ({cg['coverage']:.0%})"
+         "subtext": (f"claim sessions on which a call was issued ({share_text(cg['coverage'])})"
                      if cg.get("coverage") is not None
                      else "claim sessions on which a call was issued"), "card": card},
         {"label": "Hit vs base",
          "value": (f"{cg['hit']:.0f}% vs {cg['base']:.0f}%"
-                   if cg.get("hit") is not None and cg.get("base") is not None else "—"),
-         "subtext": "issued calls, against the side-matched no-skill rate", "card": card},
+                   if warmed and cg.get("hit") is not None and cg.get("base") is not None else "—"),
+         "subtext": ("issued calls, against the side-matched no-skill rate" if warmed
+                     else f"not yet graded: {n_win} of {warm} issued windows"), "card": card},
         {"label": "Issued vs held",
-         "value": f"{_pct(ip.get('mean'))} / {_pct(hp.get('mean'))}",
+         "value": f"{_pct(ip.get('mean'))} / {_pct(hp.get('mean'))}" if warmed else "—",
          "subtext": (f"drift-neutral {horizon}D claim payoff · n/h "
-                     f"{ip.get('n_win', 0)} / {hp.get('n_win', 0)}"), "card": card},
+                     f"{ip.get('n_win', 0)} / {hp.get('n_win', 0)}" if warmed
+                     else f"not yet graded: n/h {ip.get('n_win', 0)} issued / "
+                          f"{hp.get('n_win', 0)} held"), "card": card},
         {"label": "Prospective record", "value": f"{prospective.get('n_win', 0)} windows",
          "subtext": prospective.get("status", ""), "card": card},
     ]
@@ -951,6 +1056,8 @@ def render_hero_card(verdict: dict, *, priors_meta: dict | None = None,
     elif pm.get("status") == "loaded":
         pool_label = (f"the study graded no call in the {name} class" if name
                       else "the study graded no call in this class")
+    elif pm.get("status") == "refused":
+        pool_label = str(pm.get("label"))
     else:
         pool_label = f"study not yet run: {pm.get('label') or 'no pooled prior'}"
     render_section_header(
@@ -961,7 +1068,8 @@ def render_hero_card(verdict: dict, *, priors_meta: dict | None = None,
         f"sessions it issued against those it held.",
         icon="target", accent="accent", card="overview:call_grade",
     )
-    _render_call_grade(verdict["call_grade"], h, pool, pool_label)
+    _render_call_grade(verdict["call_grade"], h, pool, pool_label,
+                       tradeable=bool(verdict.get("tradeable", True)))
     render_gate_rows(verdict, CHAIN)
 
 
@@ -1065,21 +1173,29 @@ def render_call_history(call_ts: pd.DataFrame | None, price: pd.Series | None,
     style_axes(fig, y_title="Price", row=1, col=1)
     style_axes(fig, y_title="Trust", y_range=[-0.05, 1.05], row=2, col=1)
     issued, claimed = int((w != 0).sum()), int((call_ts["d"] != 0).sum())
-    render_chart_panel(
-        fig, "overview_history", units="price · issued calls · trust", windowed=False,
-        footer=(f"{issued} of {claimed} claim sessions issued; a marker's area follows its size "
-                f"(1.00 is a fully trusted claim with neutral sizers)." if issued else
-                f"No call issued on this history: all {claimed} claim sessions were held at "
-                f"trust 0."))
+    if not bool(call_ts.attrs.get("tradeable", True)):
+        footer = ("Never called: the target is a valuation ratio, not a traded price; its claim "
+                  "is graded as evidence on the Mūla page.")
+    elif issued:
+        footer = (f"{issued} of {claimed} claim sessions issued; a marker's area follows its size "
+                  f"(1.00 is a fully trusted claim with neutral sizers).")
+    else:
+        footer = (f"No call issued on this history: all {claimed} claim sessions were held at "
+                  f"trust 0.")
+    render_chart_panel(fig, "overview_history", units="price · issued calls · trust",
+                       windowed=False, footer=footer)
     terc = (edge or {}).get("terciles") or {}
+    warm = _knob("GRADE_WARMUP_WIN")
+    warmed = int((edge or {}).get("n_win") or 0) >= warm
     items = []
     for k, name in _TERCILES:
         b = terc.get(k) or {}
         se = _finite(b.get("se"))
-        items.append({"label": name, "value": _pct(b.get("mean")),
-                      "subtext": (f"issued sizes · ± {se * 100:.2f}% · n/h {int(b.get('n_win') or 0)}"
-                                  if se is not None else
-                                  f"issued sizes · n/h {int(b.get('n_win') or 0)}"),
+        nw = int(b.get("n_win") or 0)
+        items.append({"label": name, "value": _pct(b.get("mean")) if warmed else "—",
+                      "subtext": ((f"issued sizes · ± {se * 100:.2f}% · n/h {nw}" if se is not None
+                                   else f"issued sizes · n/h {nw}") if warmed
+                                  else f"issued sizes · not yet graded · n/h {nw}"),
                       "card": "overview:terciles"})
     render_kpi_strip(items, max_cols=3, key="overview-terciles")
 
@@ -1109,14 +1225,18 @@ def render_size_terciles(edge: dict | None, horizon: int) -> None:
             eyebrow="Grades",
         )
         return
+    # Below the call's warm-up its issued payoffs are not a grade, and are not printed.
+    warmed = int(e.get("n_win") or 0) >= _knob("GRADE_WARMUP_WIN")
     rows = []
     for name, b in ((*((n, terc.get(k)) for k, n in _TERCILES),
                      ("All issued", ivh.get("issued")), ("Claim held (not issued)", ivh.get("held")))):
         b = b or {}
         se = _finite(b.get("se"))
+        shown = warmed or name.startswith("Claim held")
         rows.append({"Sessions": name, "n": int(b.get("n") or 0),
-                     "Windows (n/h)": int(b.get("n_win") or 0), "Mean payoff": _pct(b.get("mean")),
-                     "± SE": f"{se * 100:.2f}%" if se is not None else "—"})
+                     "Windows (n/h)": int(b.get("n_win") or 0),
+                     "Mean payoff": _pct(b.get("mean")) if shown else "not yet graded",
+                     "± SE": f"{se * 100:.2f}%" if se is not None and shown else "—"})
     render_table_panel(pd.DataFrame(rows), "grades-terciles", units=f"drift-neutral {horizon}D payoff",
                        windowed=False, label_col="Sessions", max_height=220)
     render_note(f"Decision C: the size carries no tier word (TIER_RULE "
@@ -1148,14 +1268,19 @@ def edge_summary_text(edge: dict | None, what: str) -> str:
 
 
 def render_edge_panel(edge: dict | None, key: str, *, what: str, title: str, card: str,
-                      show_chart: bool = True) -> None:
+                      show_chart: bool = True, diagnostic: bool = False) -> None:
     """One object's full-history grade: its IC, its durability, its windows, its periods.
 
-    ``title`` names the grade ('Claim grade', 'Lean grade'), ``what`` the
-    thing graded in the footer, ``card`` the registered card it is drawn
-    under. Neutral-toned throughout — a grade is never a trade colour.
-    Renders an explicit empty state rather than nothing when the series is
-    too short to grade — "not measured" is information too.
+    ``title`` names the grade ('Lean grade'), ``what`` the thing graded in
+    the footer, ``card`` the registered card it is drawn under. Neutral-toned
+    throughout — a grade is never a trade colour. Renders an explicit empty
+    state rather than nothing when the series is too short to grade — "not
+    measured" is information too.
+
+    ``diagnostic`` draws a ROLE object's full-history grade (the claim's):
+    labelled a full-history diagnostic, with no edge word — the object's one
+    grade and its one label are its as-of grade and t_post (:func:`role_edge`),
+    and this number sets nothing.
     """
     from ui.theme import chart_layout, style_axes, chart_color, chart_rgba, grid_rgba
     ic = (edge or {}).get("ic")
@@ -1168,6 +1293,11 @@ def render_edge_panel(edge: dict | None, key: str, *, what: str, title: str, car
         )
         return
     label, _tone = edge_tier(edge)
+    if diagnostic:
+        span = edge.get("span") or ()
+        label = ("every resolved window" + (f" through {pd.Timestamp(span[-1]):%d %b %Y}"
+                                            if len(span) == 2 and span[-1] is not None else "")
+                 + "; it does not set trust")
     se = edge.get("se")
     # Only scored periods are drawn: an unscored one has no IC, and drawing it
     # as an empty bar read as a bad period.
@@ -1224,7 +1354,9 @@ def _fmt_cell(value, precision: int) -> str:
     if isinstance(value, float):
         if value != value:            # NaN
             return "—"
-        return f"{value:,.{precision}f}"
+        out = f"{value:,.{precision}f}"
+        # A value that rounds to zero prints unsigned: never '-0.00'.
+        return out.lstrip("-") if out.startswith("-") and not out.strip("-0.,") else out
     if isinstance(value, (int,)) and not isinstance(value, bool):
         return f"{value:,}"
     try:
@@ -1268,8 +1400,10 @@ def _prettify_header(name: str) -> str:
             out.append(word)
         else:
             out.append(word[:1].upper() + word[1:])
-        # Preserve non-alphanumeric tokens verbatim (Δ, %, etc.)
-        if not word[:1].isalnum():
+        # Preserve non-alphanumeric tokens verbatim (Δ, %, etc.), and a word
+        # that opens with a Greek or other non-ASCII letter (β, ρ, τ, μ):
+        # capitalising it turns 'β' into 'Β', which reads as a Latin B.
+        if not word[:1].isalnum() or not word[:1].isascii():
             out[-1] = word
     return " ".join(out)
 

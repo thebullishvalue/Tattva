@@ -253,8 +253,7 @@ def _member(name: str, rng, common: dict, spec: dict) -> dict:
     inputs = gather_inputs(fvo_ts, sw, instrument=inst, h=H, today=idx[-1])
     grades = grade_series(inputs, inputs["price"], h=H, exec_lag=LAG, priors=None, instrument=inst)
     return {"target": name, "asset_class": inst.asset_class, "ticker": inst.ticker, "h": H,
-            "exec_lag": LAG, "asof": idx[-1], "start": idx[0], "fingerprint": f"fp-{name}",
-            "fingerprint_upto": idx[-2], "inputs": inputs,
+            "exec_lag": LAG, "asof": idx[-1], "start": idx[0], "inputs": inputs,
             "grades": {o: g[["ic", "se", "n_win", "grid_date"]] for o, g in grades.items()},
             "gap_split": None}
 
@@ -284,8 +283,11 @@ def _run(records, out, previous=None):
     run_date = max(r["inputs"].index[-1] for r in records.values())
     names = list(records)
     result = study.analyse(records, universe_names=names, run_date=run_date, previous=previous)
+    cutoff = study.fingerprint_cutoff(run_date)
+    fps = {m: {"fingerprint": f"fp-{m}", "upto": cutoff, "check": "verified"} for m in names}
     code = study.finish(result, records, out, universe_names=names, failures={}, run_date=run_date,
-                        git={"sha": "test", "dirty": []}, mode="test", complete=False)
+                        git={"sha": "test", "dirty": []}, mode="test", complete=False,
+                        fingerprints=fps)
     return result, code
 
 
@@ -365,7 +367,12 @@ def registry(monkeypatch):
         monkeypatch.setattr(mod, name, dict(getattr(mod, name)))
 
 
-def test_the_cli_runs_offline_and_resumes(registry, quick, tmp_path, capsys):
+def test_the_cli_runs_offline_and_resumes(registry, quick, tmp_path, capsys, offline_fetch):
+    from core.trust import load_priors
+    from pipeline.run import fetch_panel, prepare, target_bars
+    from ui.tabs.tab_diagnostics import _history_flag
+    from pipeline.assemble import describe_priors
+
     out, wd = tmp_path / "out.json", tmp_path / "work"
     argv = ["--out", str(out), "--offline-fixture", "--members", "Gold", "--workdir", str(wd),
             "--no-arm-p", "--allow-dirty"]
@@ -373,13 +380,64 @@ def test_the_cli_runs_offline_and_resumes(registry, quick, tmp_path, capsys):
     first = out.read_bytes()
     data = json.loads(first)
     assert (data["mode"], data["complete"], data["members"]) == ("offline-fixture", False, ["Gold"])
-    assert data["fingerprint_upto"]["Gold"] < data["run_date"] == "2026-10-16"
+    # The history is fingerprinted to the last prior vintage, a settled quarter-end, and the
+    # fingerprinted target history is the one the member ran on.
+    assert data["fingerprint_upto"]["Gold"] == data["vintages"][-1] == "2026-09-30"
+    assert data["run_date"] == "2026-10-16" and data["fingerprint_check"]["Gold"] == "verified"
+    # The app, comparing at exactly that recorded session, reads 'same history'.
+    table = load_priors(H, LAG, path=str(out))
+    panel = fetch_panel("Gold")
+    bars, _ = target_bars("Gold")
+    app_fp = prepare(panel, "Gold", bars=bars, priors=table).fingerprint
+    assert app_fp == data["fingerprints"]["Gold"]
+    assert _history_flag(describe_priors(table), "Gold", app_fp)[0] == "same history"
+    # A row after the cutoff — the newest sessions a source can still revise — moves nothing.
+    revised = panel.copy()
+    revised.loc[revised.index[-1], "Gold"] *= 1.01
+    assert prepare(revised, "Gold", bars=bars, priors=table).fingerprint == app_fp
     assert json.loads((wd / "timings.json").read_text())["Gold"] > 0
     # A rerun resumes from the cached member and writes the same bytes.
     capsys.readouterr()
     assert study.main(argv) == 0
     assert "Gold: cached" in capsys.readouterr().out and out.read_bytes() == first
     assert study.main(["--out", str(out), "--members", "Nowhere"]) == 1
+
+
+def test_a_fingerprint_is_provenance_and_moves_no_prior_or_decision(registry, quick, tmp_path,
+                                                                     capsys, monkeypatch):
+    """The fingerprint stage runs after the analysis and nothing in the analysis reads it:
+    re-pooled from cached members written by other code (--reuse-members), with every
+    fingerprint changed, the study writes the same priors, decisions, arms and checks, and
+    records which code each member record came from."""
+    import pickle
+
+    out, wd = tmp_path / "one.json", tmp_path / "work"
+    argv = ["--out", str(out), "--offline-fixture", "--members", "Gold", "--workdir", str(wd),
+            "--no-arm-p", "--allow-dirty"]
+    assert study.main(argv) == 0
+    one = json.loads(out.read_text())
+    cached = wd / "members" / "Gold.pkl"
+    got = pickle.loads(cached.read_bytes())
+    got["code"] = "older-member-code"
+    cached.write_bytes(pickle.dumps(got))
+    monkeypatch.setattr(study, "fingerprint_member", lambda target, rec, **k: {
+        "fingerprint": "not-the-same", "upto": k["cutoff"], "verified": False})
+    two_out = tmp_path / "two.json"
+    capsys.readouterr()
+    assert study.main(["--out", str(two_out), *argv[2:], "--reuse-members"]) == 0
+    log = capsys.readouterr().out
+    assert "code older-member-code, reused" in log and "Gold: ok in" not in log
+    two = json.loads(two_out.read_text())
+    provenance = {"fingerprints", "fingerprint_check", "member_code"}
+    assert {k: v for k, v in one.items() if k not in provenance} == \
+        {k: v for k, v in two.items() if k not in provenance}
+    assert two["fingerprints"]["Gold"] == "not-the-same" != one["fingerprints"]["Gold"]
+    assert two["fingerprint_check"]["Gold"].startswith("unverified")
+    assert two["member_code"]["Gold"] == "older-member-code" != one["member_code"]["Gold"]
+    # Without --reuse-members a record from other code is run again.
+    capsys.readouterr()
+    assert study.main(argv) == 0
+    assert "Gold: ok in" in capsys.readouterr().out
 
 
 def test_the_universe_is_the_pre_registered_one(registry):

@@ -25,8 +25,13 @@ it, so no measured value is ever typed by hand. With no file the placeholders
 the study owns keep their defaults.
 
 Engine and data constants that are already named and documented where they
-live are registered BY REFERENCE (``ref``) rather than copied, so the registry
-cannot drift from the value the code runs on.
+live are registered BY REFERENCE (``ref``, ``module.attribute``) rather than
+copied, so the registry cannot drift from the value the code runs on: the
+value is read from that module at registration, and tests/test_knobs.py holds
+every ref to its module's value. The same test fails the build when a
+decision-path module defines a numeric module-level constant that no knob
+refers to (or that it does not declare as evidence-only or a numerical
+guard).
 
 No Streamlit dependency.
 """
@@ -107,10 +112,27 @@ def _register(name: str, value: Any, kind: KnobKind, *, consumer: str,
     KNOBS[name] = Knob(name, value, kind, consumer, horizon_coupling, reason, ref=ref)
 
 
-def _by_ref(name: str, *, consumer: str, horizon_coupling: str, reason: str) -> None:
+def _by_ref(name: str, *, consumer: str, horizon_coupling: str, reason: str,
+            kind: KnobKind = "structural") -> None:
     """Register a constant that lives in ``core.config`` without copying it."""
-    _register(name, getattr(_cfg, name), "structural", consumer=consumer,
+    _register(name, getattr(_cfg, name), kind, consumer=consumer,
               horizon_coupling=horizon_coupling, reason=reason, ref=f"core.config.{name}")
+
+
+def _by_module(name: str, module: str, *, consumer: str, horizon_coupling: str, reason: str,
+               attr: str | None = None, kind: KnobKind = "structural") -> None:
+    """Register an engine constant where it lives (``module.attr``), by reference.
+
+    The engines import no registry (they are fitted, not configured, by the
+    call path), so their structural constants are read from the module that
+    runs on them; ``attr`` defaults to ``name``.
+    """
+    import importlib
+
+    attr = attr or name
+    value = getattr(importlib.import_module(module), attr)
+    _register(name, value, kind, consumer=consumer, horizon_coupling=horizon_coupling,
+              reason=reason, ref=f"{module}.{attr}")
 
 
 def _placeholder(name: str, value: Any, *, consumer: str, horizon_coupling: str) -> None:
@@ -318,6 +340,128 @@ _by_ref("ANALYSIS_EPOCH", consumer="infrastructure: every fetch start and the pr
                "history rewrite")
 
 # ════════════════════════════════════════════════════════════════════════
+# The stock classes' Swayam view bank and its replica screen (core.config)
+# ════════════════════════════════════════════════════════════════════════
+
+_STOCK_GRID = ("per_asset 2026-07-21 stock recommendation (asset-level, pooled Nifty100 / "
+               "Nasdaq100 universes), pinned apart from the global grid; not re-validated")
+_by_ref("SWAYAM_LENGTHS_STOCK", kind="structural-inherited",
+        consumer="sizer:swayam input for every India Stocks and US Stocks target (the view "
+                 "bank's timescale axis), the ten study stocks included",
+        horizon_coupling="horizon-free by declaration: indicator lookbacks in sessions",
+        reason=_STOCK_GRID)
+_by_ref("SWAYAM_ROC_FRAC_STOCK_INDIA", kind="structural-inherited",
+        consumer="sizer:swayam input for India Stocks targets: each view's ROC length as a "
+                 "share of its length",
+        horizon_coupling="horizon-free: a fraction of each view's own length", reason=_STOCK_GRID)
+_by_ref("SWAYAM_ROC_FRAC_STOCK_US", kind="structural-inherited",
+        consumer="sizer:swayam input for US Stocks targets: each view's ROC length as a share "
+                 "of its length",
+        horizon_coupling="horizon-free: a fraction of each view's own length", reason=_STOCK_GRID)
+_by_ref("SWAYAM_MMR_REPLICA_MAX_CORR",
+        consumer="sizer:swayam input: a macro driver this correlated with the target is a copy "
+                 "and leaves the MMR pool (a FULL-SAMPLE correlation: the one non-causal read "
+                 "on the Swayam path, disclosed under C14)",
+        horizon_coupling="horizon-free: a log-log correlation",
+        reason="set high on purpose: it catches replicas (r ~ 1.0) whose MMR would explain the "
+               "target with itself, not genuinely correlated macro")
+
+# ════════════════════════════════════════════════════════════════════════
+# Mūla's engine: the publication gate (P1) and the claim's internals
+# (registered where they live, engines.mula.*)
+# ════════════════════════════════════════════════════════════════════════
+
+_VAL, _FAC, _ECM = "engines.mula.valuation", "engines.mula.factors", "engines.mula.ecm"
+_by_module("PANEL_MIN_COVERAGE", _VAL,
+           consumer="precondition:published (P1): a session is Valid and published only if "
+                    "this share of the admitted instruments that could print did print",
+           horizon_coupling="horizon-free: a share of the cross-section",
+           reason="a settled session sits near 1.0 and a half-open one far below (61 of ~209 "
+                  "observed live); 0.60 leaves room for genuine holiday overlap across the "
+                  "global panel while catching a session that has not finished posting")
+_by_module("PANEL_MIN_PRINTS", _VAL,
+           consumer="precondition:published (P1): the fewest instruments that must print for a "
+                    "session to be Valid and published, beside the coverage share",
+           horizon_coupling="horizon-free: a count of instruments",
+           reason="a ratio cannot express it (Christmas 2025: 10 of 53 open); realised k runs "
+                  "to 13, and ~2.3× that is the smallest cross-section worth estimating one from")
+_by_module("PUBLISH_WARMUP_PRINTS", _VAL,
+           consumer="precondition:published (P1): the publication warm-up after the burn-in — "
+                    "the gap must have printed this often in the window before a session",
+           horizon_coupling="horizon-free: a count of sessions",
+           reason="the warm-up the retired window stack imposed (its shortest window read "
+                  "nothing below 10 prints), kept so deleting the stack moved no published "
+                  "value (tests/test_golden_mula.py)")
+_by_module("PUBLISH_WARMUP_WINDOW", _VAL,
+           consumer="precondition:published (P1): the window PUBLISH_WARMUP_PRINTS counts in",
+           horizon_coupling="horizon-free: sessions (a month)",
+           reason="the retired stack's shortest window, 21 sessions; kept with "
+                  "PUBLISH_WARMUP_PRINTS so no published value moved")
+_by_module("SESSION_SPARSE_FRACTION", _VAL,
+           consumer="precondition:published (P1): the reason a withheld session is given — "
+                    "'market closed' below this share of the admitted cross-section scheduled "
+                    "open, 'incomplete fetch' at or above; it voids nothing itself",
+           horizon_coupling="horizon-free: a share of the cross-section",
+           reason="scheduled over ADMITTED tells a holiday (49/240 open) from the admission "
+                  "ramp (31/31) without a panel-wide median, which misread the ramp")
+_by_module("K_MAX", _FAC,
+           consumer="claim: the most latent factors the valuation's factor bank retains",
+           horizon_coupling="horizon-free: a count of factors",
+           reason="a storage bound, not a modelling choice: the Marchenko–Pastur edge decides "
+                  "the count and exceeds it only on degenerate panels (baked into array shapes)")
+_by_module("MP_EDGE_HYSTERESIS", _FAC,
+           consumer="claim: the band around the Marchenko–Pastur edge inside which the factor "
+                    "count holds its previous value",
+           horizon_coupling="horizon-free: scaled by 1/√(effective sample)",
+           reason="small enough that a genuine factor enters promptly, large enough that an "
+                  "eigenvalue on the edge stops rewriting the regressor set (measured "
+                  "2026-08-17: it moved k on 1 row in ~2,350)")
+_by_module("Z_CLIP", _FAC,
+           consumer="claim: the winsorisation of standardised returns in the factor bank, in σ",
+           horizon_coupling="horizon-free: σ units",
+           reason="outlier-resistant covariance: a single 20σ print would otherwise rotate the "
+                  "whole eigenbasis; a robustness device, not a signal threshold")
+_by_module("MEMORY_GRID", _FAC,
+           consumer="claim: the correlation memories the factor bank averages over",
+           horizon_coupling="horizon-free: memories in sessions (half, one and two years)",
+           reason="the support of the prior over memory, not a selected value: the data "
+                  "weight the three")
+_by_module("ECM_GRID", _ECM, attr="_ECM_GRID",
+           consumer="sizer:reversion input: the error-correction layer's discount grid "
+                    "(MRProb and κ̂)",
+           horizon_coupling="horizon-free: coefficient memories from ~10 sessions to permanent",
+           reason="on differenced data fast memories are legitimate, so the grid spans "
+                  "adaptation to permanence and the data select within it")
+_by_module("ECM_POOL_ALPHA", _ECM, attr="_POOL_ALPHA",
+           consumer="sizer:reversion input: the forgetting exponent of the layer's expert-pool "
+                    "weights",
+           horizon_coupling="horizon-free: a memory of ~100 sessions",
+           reason="Raftery et al.'s dynamic model averaging: 1/(1 − 0.99) ≈ 100 sessions of "
+                  "log-score memory")
+_by_module("ECM_WARMUP", _ECM, attr="WARMUP",
+           consumer="sizer:reversion input: sessions of absorbed evidence before MRProb and κ̂ "
+                    "publish",
+           horizon_coupling="horizon-free: half a year of sessions",
+           reason="enough for a two-coefficient regression and for the pool's log-score "
+                  "differences to reflect evidence rather than the uniform start")
+_by_module("ECM_SCALE_HALFLIFE", _ECM, attr="_SCALE_HALFLIFE",
+           consumer="sizer:reversion input: the memory of the layer's internal scale trackers",
+           horizon_coupling="horizon-free: ~2 years of sessions",
+           reason="standardises the regressions' inputs on a slow scale, so a burst does not "
+                  "rescale the coefficients")
+_by_module("ECM_SCALE_WARMUP", _ECM, attr="_SCALE_WARMUP",
+           consumer="sizer:reversion input: sessions the scale trackers learn before the "
+                    "regressions start",
+           horizon_coupling="horizon-free: a count of sessions",
+           reason="the DLMs carry unit-variance priors and must see standardised inputs from "
+                  "their first step; an untrained tracker would divide by its floor")
+_by_module("ECM_SCALE_FLOOR", _ECM, attr="_SCALE_FLOOR",
+           consumer="sizer:reversion input: the floor on the tracked scales",
+           horizon_coupling="horizon-free: a log-return scale",
+           reason="below it the input is degenerate (a constant series): a numerical floor, "
+                  "far under any traded instrument's scale")
+
+# ════════════════════════════════════════════════════════════════════════
 # Placeholders the pooled-prior study replaces (register_measured)
 # ════════════════════════════════════════════════════════════════════════
 
@@ -325,7 +469,10 @@ _STUDY_COUPLING = "measured at the study's h and L: one priors file per (h, L)"
 _placeholder("SIZERS_ENABLED", True,
              consumer="composer: β_i = SIZER_BETA_MAX · f(t_post,i) · SIZERS_ENABLED (Decision B)",
              horizon_coupling=_STUDY_COUPLING)
-_placeholder("TIER_RULE", "none", consumer="composer: tier words on the size (Decision C)",
+_placeholder("TIER_RULE", "none",
+             consumer="display: Decision C's recorded value on the Grades page and the size's "
+                      "note; no code issues a tier word (C11: the size is an index), so a "
+                      "'causal_tercile' result takes effect only through an owner-signed change",
              horizon_coupling=_STUDY_COUPLING)
 _placeholder("CLAIM_CENTRING", "none",
              consumer="claim: Decision A, recorded by the study, never applied without an owner-signed change",

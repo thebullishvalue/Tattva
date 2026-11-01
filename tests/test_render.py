@@ -330,16 +330,19 @@ def test_the_synthetic_states_are_the_states_they_name():
 
 def test_a_hold_names_the_class_pool_and_the_study_it_was_shrunk_toward():
     """The verdict names the pool behind a HOLD — the instrument's class, by its page
-    name, for a class pool, and the study's date — in its headline, its limit and the
-    trust row; call_ts's own reason keeps the short form (it is graded data, unchanged)."""
+    name, for a class pool, and the study's date — in its headline and the trust row,
+    and its limit says in one clause what holds it (the claim's grade has earned no
+    trust); call_ts's own reason keeps the short form (it is graded data, unchanged)."""
     run_date = json.loads(FIXTURE_PRIORS.read_text())["run_date"]
     for state, pool, k in (("hold_class", "Commodities class-LOO prior +0.000", 6),
                            ("hold_global", "global-LOO prior +0.000", 36)):
         b = synthetic_bundle(state)
         v = b.verdict
         trust = {r["key"]: r for r in v["chain"]}["trust"]["grade"]
-        for text in (v["headline"], v["limit"], trust):
+        for text in (v["headline"], trust):
             assert f"{pool} ± 0.010, k {k}, study {run_date}" in text, (state, text)
+        assert v["limit"] == (f"Held: the claim's grade has earned no trust "
+                              f"(t_post {v['claim_t']:.2f} < 1.645)"), v["limit"]
         reason = b.session["call_ts"].loc[v["asof"], "reason"]
         assert "study" not in reason and "Commodities" not in reason and "commodity" not in reason
         assert reason.endswith(f"{pool.split(' prior')[0].split()[-1]} prior +0.000 ± 0.010, k {k})")
@@ -348,9 +351,11 @@ def test_a_hold_names_the_class_pool_and_the_study_it_was_shrunk_toward():
     b = synthetic_bundle("hold")
     v = b.verdict
     trust = {r["key"]: r for r in v["chain"]}["trust"]["grade"]
-    for text in (v["headline"], v["limit"], trust):
+    for text in (v["headline"], trust):
         assert "no pooled prior" in text and "study" not in text, text
-    assert v["limit"] == f"Limited by the claim's grade: {b.session['call_ts'].loc[v['asof'], 'reason']}"
+    assert v["limit"].startswith("Held: the claim's grade has earned no trust")
+    # The limit no longer contradicts the trust row: trust is earned, a sizer binds.
+    assert "Limited by the claim's grade" not in v["limit"]
     assert "pooled" not in v["call_grade"]
 
 
@@ -545,3 +550,150 @@ def test_the_landing_page_renders_with_registered_cards():
     cards = [c for m in at.markdown for c in re.findall(r'data-card="([^"]*)"', m.value)]
     assert {"landing:coverage", "landing:systems", "landing:returns"} <= set(cards) <= set(CARDS)
     assert any(b.label == "Run Analysis" for b in at.button)
+
+
+# ─── One grade per role object, on every page ────────────────────────────────
+
+#: The tier labels (core.semantics.edge_tier).
+TIERS = ("measured against: neutral, never inverted", "negative, unproven", "no measured edge",
+         "unproven", "edge", "solid edge", "ungraded")
+#: The cards that print a role object's grade, by object.
+ROLE_CARDS = {"mula:grade": "claim", "mula:valuation": "claim",
+              "mula:reversion_grade": "sizer:reversion", "swayam:sizer_grade": "sizer:swayam"}
+
+
+def _cards(markdown: list[str]) -> list[tuple[str, str]]:
+    """``(card id, visible text)`` of every KPI item drawn."""
+    out = []
+    for v in markdown:
+        m = re.search(r'<div class="metric-card[^"]*" data-card="([^"]*)"', v)
+        if m:
+            out.append((m.group(1), page_text([v])))
+    return out
+
+
+def _one_label(text: str, label: str, where) -> None:
+    assert label in text, (where, label, text)
+    others = [t for t in TIERS if t != label and t not in label]
+    assert not [t for t in others if t in text], (where, label, [t for t in others if t in text])
+
+
+def _role_grades(edges: dict, grades_ts: dict, d_star) -> dict:
+    """Per role object: its one grade at d* (own as-of IC, t_post's label) and its
+    full-history IC, as the pages format them."""
+    from core.semantics import edge_tier
+
+    out = {}
+    for key in ("claim", "sizer:swayam", "sizer:reversion"):
+        g = grades_ts.get(key)
+        if g is None or d_star not in g.index:
+            continue
+        a = g.loc[d_star]
+        ic, full = a["ic"], (edges.get(key) or {}).get("ic")
+        out[key] = {"own": f"{ic:+.3f}" if np.isfinite(ic) else None,
+                    "full": f"{full:+.3f}" if full is not None and np.isfinite(full) else None,
+                    "label": edge_tier(a["t_post"])[0]}
+    return out
+
+
+def _every_run(gold_app):
+    ss = gold_app.session_state
+    yield "fixture", ss["edges"], ss["grades_ts"], ss["asof"], ss["verdict"], rendered_app(gold_app)
+    for state in STATES:
+        b = synthetic_bundle(state)
+        yield (state, b.session["edges"], b.session["grades_ts"], b.verdict["asof"], b.verdict,
+               {spec: rendered_states()[(state, spec)] for spec in
+                ("Overview", "Mūla", "Swayam", "Grades")})
+
+
+def test_each_role_object_shows_one_grade_and_one_label_on_every_page(gold_app):
+    """The claim and each sizer print ONE grade everywhere — the own as-of grade the call
+    read at d*, and t_post's label — on Overview's chain, Mūla's and Swayam's strips
+    and the Grades table. The full-history IC is only a labelled diagnostic, with no
+    edge word."""
+    seen = 0
+    for where, edges, grades_ts, d_star, verdict, pages in _every_run(gold_app):
+        role = _role_grades(edges, grades_ts, d_star)
+        for page, r in pages.items():
+            history = [t for c, t in _cards(r.markdown) if c == "mula:claim_history"]
+            if history and (edges.get("claim") or {}).get("ic") is not None:
+                assert "does not set trust" in " ".join(history), (where, history)
+            for card, text in _cards(r.markdown):
+                key = ROLE_CARDS.get(card)
+                if key in role:
+                    seen += 1
+                    want = role[key]
+                    if want["own"] is not None and want["full"] not in (None, want["own"]):
+                        assert want["full"] not in text, (where, page, card, text)
+                    if card != "mula:valuation" or want["own"] is not None:
+                        others = [t for t in TIERS if t != want["label"] and t not in want["label"]]
+                        assert not [t for t in others if t in text], (where, page, card, text)
+                if card == "mula:claim_history":
+                    # The diagnostic: no tier word at all.
+                    assert not [t for t in TIERS[:6] if re.search(rf"\b{re.escape(t)}\b", text)
+                                and t != "edge"], (where, text)
+            if page == "Grades":
+                frame = next((f for f in r.iframes if "own weight" in f.lower()), "")
+                for key, name in (("claim", "Claim grade"), ("sizer:swayam", "Swayam sizer grade"),
+                                  ("sizer:reversion", "Reversion sizer grade")):
+                    if key not in role:
+                        continue
+                    row = next(re.sub(r"<[^>]+>", " ", m) for m in
+                               re.findall(r"<tr[^>]*>(.*?)</tr>", frame, re.S) if f">{name}<" in m)
+                    row = html.unescape(row)
+                    if role[key]["own"] is not None:
+                        assert role[key]["own"] in row, (where, name, row)
+                        if role[key]["full"] not in (None, role[key]["own"]):
+                            assert role[key]["full"] not in row, (where, name, row)
+                    _one_label(row, role[key]["label"], (where, name))
+        if "claim" in role and verdict.get("chain"):
+            trust = {c["key"]: c for c in verdict["chain"]}["trust"]["grade"]
+            if role["claim"]["own"] is not None:
+                assert f"own {role['claim']['own']}" in trust, (where, trust)
+            _one_label(trust, role["claim"]["label"], (where, "trust row"))
+    assert seen, "no role-grade card was drawn: the check is vacuous"
+
+
+def test_the_gap_split_says_what_was_measured():
+    from ui.components import gap_split_text
+
+    gold = gap_split_text({"b_price": -0.030, "b_fv": 0.376, "closed": 0.406, "price_share": 0.073,
+                           "se_share": 0.162}, 10)
+    assert "41% closed within 10 sessions and 59% stayed open" in gold
+    assert "price did 7% (± 16%) of that closing" in gold and "did the rest (93%)" in gold
+    away = gap_split_text({"b_price": 0.11, "b_fv": 0.52, "closed": 0.41, "price_share": -0.27,
+                           "se_share": 0.12}, 10)
+    assert "price moved away from fair value" in away and "-27% (± 12%)" in away
+    assert "Fair value moving toward price did all of that closing and more (52% of the gap)" in away
+    assert "price did -27" not in away and "price closed" not in away
+    wider = gap_split_text({"b_price": 0.05, "b_fv": 0.02, "closed": -0.03, "price_share": None}, 10)
+    assert "none closed" in wider and "widened by 3%" in wider
+    assert gap_split_text({}, 10) is None
+
+
+def test_a_valuation_ratio_and_a_target_with_no_ohlcv_show_nothing_they_cannot_have():
+    pe = rendered_states()[("no_call", "Overview")].text
+    assert "not called" in pe and "Coverage" not in pe and "held at trust 0" not in pe
+    assert "Never called: the target is a valuation ratio" in pe
+    jeera = synthetic_bundle("jeera")
+    row = {r["key"]: r for r in jeera.verdict["chain"]}["sizer:swayam"]
+    assert row["grade"] == "not applicable (no OHLCV)" and "t_post" not in row["grade"]
+    assert "sizer:swayam" not in jeera.session["grades_ts"]
+    sw = rendered_states()[("jeera", "Swayam")].text
+    assert "not applicable" in sw and "warming up" not in sw
+    grades = next(f for f in rendered_states()[("jeera", "Grades")].iframes
+                  if "own weight" in f.lower())
+    assert "not applicable (no OHLCV)" in html.unescape(grades)
+
+
+def test_ungraded_call_numbers_are_not_printed_below_the_warm_up():
+    for state in ("hold", "buy"):
+        b = synthetic_bundle(state)
+        cg = b.verdict["call_grade"]
+        if cg["n_win"] >= knob("GRADE_WARMUP_WIN"):
+            continue
+        text = rendered_states()[(state, "Overview")].text
+        ip = (cg.get("issued_payoff") or {}).get("mean")
+        assert "Issued vs held" in text and "not yet graded: n/h" in text, state
+        if ip is not None:
+            assert f"{ip * 100:+.2f}%" not in text.split("Issued vs held")[1][:80], state

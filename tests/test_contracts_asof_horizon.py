@@ -93,8 +93,10 @@ def test_a_withheld_newest_row_reads_every_input_at_d_star():
     assert verdict["action"] == asm.call_ts.loc[d_star, "action"]
     assert asm.call_ts.loc[dates[-1], "action"] == "NO CALL"      # the withheld row issues nothing
 
-    bar = app._asof_status(sig, "GC=F", dates[-1] + pd.Timedelta(days=3))
+    bar = app._asof_status(sig, verdict)
     assert bar["as_of"] == d_star == bar["valued_as_of"]
+    # The chip reads the verdict's own count: one number for P2, the elapsed horizon and it.
+    assert bar["behind"] == verdict["behind"] == asm.call_ts.loc[d_star, "behind"]
 
 
 def test_the_bar_reads_d_star_on_the_live_run(gold_app):

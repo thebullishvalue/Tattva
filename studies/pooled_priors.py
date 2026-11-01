@@ -6,6 +6,7 @@ three decisions the catalogue makes (owner decision 2).
     python -m studies.pooled_priors --out data/priors/pooled_priors_h10_L1.json
     python -m studies.pooled_priors --out OUT.json --members Gold,Silver --workdir DIR
     python -m studies.pooled_priors --out OUT.json --offline-fixture --allow-dirty   # plumbing, no network
+    python -m studies.pooled_priors --out OUT.json --workdir DIR --reuse-members     # re-pool cached members
 
 PRE-REGISTRATION. Everything below was fixed, and committed, before the study
 was first run on the network; ``git log`` on this file proves the order. Its
@@ -37,6 +38,10 @@ recorded). Kept: the composer's inputs, the as-of own grades of the claim and
 both sizers (``grades_ts``), their full-history grades, the gap split and the
 claim's unit. A member that raises is logged, listed under ``failures`` and
 left out. Runs are cached per member under ``--workdir`` and a rerun resumes.
+``--reuse-members`` re-pools the cached members of the workdir's run date
+whatever code wrote them (their failures included) and runs only the members
+with no cached record; each record's member-stage code key is written to the
+output (``member_code``).
 
 OBJECTS. Each is graded as the app grades it: ``core.grade`` on the
 drift-neutral forward return Y − μ at h = 10 and L = EXECUTION_LAG, on the
@@ -147,10 +152,24 @@ nothing.
 OUTPUT ``pooled_priors_h{h}_L{L}.json``: study, git_sha, git_dirty,
 script_sha256, run_date, epoch, h, exec_lag, knobs_hash, code_version, mode,
 complete, universe, members, failures, held_out, classes, fingerprints (each
-member's history fingerprint, hashed up to ``fingerprint_upto``, its newest
-settled session on or before the run date), vintages, priors[object][member
+member's history fingerprint, hashed up to ``fingerprint_upto``: the study's
+LAST PRIOR VINTAGE, the quarter-end every prior it wrote is dated on or
+before — the only rows the priors depend on, and a date long settled when the
+study runs), fingerprint_check (whether the fingerprinted target history is
+the one the member ran on), member_code, vintages, priors[object][member
 | '__class__:<class>'][vintage] = {mu, var_mu, tau2, kappa, se_floor, k,
 scope}, summary, decisions {A, B, C}, arms {E, F, P, G}, checks {R4, R5, R6}.
+
+FINGERPRINTS are provenance and are computed in a stage of their own, after
+the analysis and outside the member records: each member's panel and bars are
+fetched to the run date and prepared exactly as ``pipeline.run.prepare``
+prepares the app's run (no Mūla fit), and hashed to the cutoff
+(``data.prep.history_fingerprint``); the prepared target series is checked
+against the cached record's. The analysis never reads them, so a fingerprint
+can change no prior and no decision, and a resumed study recomputes them from
+the cached members without refitting any. The app hashes its own history to
+the same recorded cutoff and compares (System: 'same history' / 'history
+rewritten').
 Floats to 10 significant digits, NaN as null, keys sorted: re-run on the same
 histories, code and run date it is byte for byte the same file. Wall times
 go to the work directory's log, not into the file.
@@ -195,6 +214,7 @@ from core.instruments import INSTRUMENTS, instrument  # noqa: E402
 from core.knobs import knob, knobs_hash  # noqa: E402
 from core.semantics import claim_direction, claim_oscillator  # noqa: E402
 from core.trust import PriorTable, load_priors  # noqa: E402
+from data.prep import PrepError  # noqa: E402
 from pipeline import run as pipeline_run  # noqa: E402
 from pipeline.assemble import _claim_rows, _payoff, _shrunk, gather_inputs  # noqa: E402
 from pipeline.evidence import claim_unit  # noqa: E402
@@ -279,6 +299,19 @@ def vintages(run_date: pd.Timestamp) -> list[pd.Timestamp]:
     return list(pd.date_range(start, run_date, freq="QE"))
 
 
+def fingerprint_cutoff(run_date: pd.Timestamp) -> pd.Timestamp:
+    """The session every member's history is fingerprinted to: the last prior vintage.
+
+    Every prior the study writes is dated on or before it, so it is the last
+    row the priors depend on, and a quarter-end is long settled by the run
+    date — unlike the newest session, which a source can still revise (the
+    first committed study hashed 27 of 37 members to a session yfinance revised
+    later that day, and the app flagged 'history rewritten' on them all).
+    """
+    vints = vintages(pd.Timestamp(run_date))
+    return vints[-1] if vints else pd.Timestamp(ANALYSIS_EPOCH) - pd.Timedelta(days=1)
+
+
 # ════════════════════════════════════════════════════════════════════════
 # One member: the app's pipeline, with no prior
 # ════════════════════════════════════════════════════════════════════════
@@ -328,12 +361,10 @@ def run_member(target: str, *, run_date: pd.Timestamp, fetch, arm_p: bool) -> di
     run = pipeline_run.run_target(target, end=run_date, priors=None, fetch=fetch)
     fvo_ts = run["fvo_ts"]
     inputs = gather_inputs(fvo_ts, run["swayam_daily"], instrument=inst, h=h, today=run_date)
-    settled = fvo_ts.index[-2] if len(fvo_ts) > 1 else fvo_ts.index[0] - pd.Timedelta(days=1)
     rec = {
         "version": RECORD_VERSION, "target": target, "asset_class": inst.asset_class,
         "ticker": inst.ticker, "h": h, "exec_lag": int(run["exec_lag"]), "asof": run["asof"],
-        "start": fvo_ts.index[0], "fingerprint": run["fingerprint"],
-        "fingerprint_upto": min(pd.Timestamp(settled), run_date),
+        "start": fvo_ts.index[0],
         "inputs": inputs,
         "grades": {obj: g[["ic", "se", "n_win", "grid_date"]] for obj, g in run["grades_ts"].items()},
         "edges": {k: {f: run["edges"][k].get(f) for f in ("ic", "se", "t", "n_win")}
@@ -345,6 +376,65 @@ def run_member(target: str, *, run_date: pd.Timestamp, fetch, arm_p: bool) -> di
         rec["arm_p"] = path_sensitivity(target, run_date=run_date, fetch=fetch,
                                         base_ic=float(rec["edges"]["claim"]["ic"]))
     return rec
+
+
+def fingerprint_member(target: str, rec: dict, *, run_date: pd.Timestamp, cutoff: pd.Timestamp,
+                       fetch) -> dict:
+    """One member's history fingerprint at ``cutoff``, prepared as the app prepares it.
+
+    The panel and the bars are fetched to the run date and prepared by
+    ``pipeline.run.prepare`` with a table that records ``cutoff`` for the
+    member — the call the app makes with the committed file — so the
+    fingerprint is the one the app computes on the same history. No Mūla fit.
+    ``verified`` says the fetch is a clean copy of what the member ran on: the
+    prepared target series through ``cutoff`` is the cached record's (its dates
+    and its prints), no registered predictor is missing from the fetch, and
+    none of the member's predictors was rebuilt from a stale snapshot (a
+    different series); ``why`` names what failed.
+    """
+    table = PriorTable({}, {"fingerprint_upto": {target: cutoff.strftime("%Y-%m-%d")}})
+    panel = pipeline_run.fetch_panel(target, epoch=ANALYSIS_EPOCH, end=run_date, fetch=fetch)
+    bars, _ = pipeline_run.target_bars(target, epoch=ANALYSIS_EPOCH, end=run_date, fetch=fetch)
+    prep = pipeline_run.prepare(panel, target, epoch=ANALYSIS_EPOCH, bars=bars, priors=table)
+    mine = prep.data[target].astype(float)
+    mine = mine[mine.index <= cutoff]
+    theirs = pd.to_numeric(rec["inputs"]["price"], errors="coerce").astype(float)
+    theirs = theirs[theirs.index <= cutoff]
+    why = []
+    if not (mine.index.equals(theirs.index)
+            and np.array_equal(mine.to_numpy(), theirs.to_numpy(), equal_nan=True)):
+        why.append("the fetched target history through the cutoff differs from the member run's")
+    absent = list(prep.report.get("feats_absent") or [])
+    if absent:
+        why.append(f"the fetch lacks registered predictors {sorted(absent)[:5]}")
+    stale = sorted(set((panel.attrs or {}).get("stale_backfills") or {}) & set(prep.features))
+    if stale:
+        why.append(f"the fetch rebuilt predictors from a stale snapshot {stale[:5]}")
+    return {"fingerprint": prep.fingerprint, "upto": cutoff, "verified": not why,
+            "why": "; ".join(why)}
+
+
+def fingerprint_members(records: dict[str, dict], *, run_date: pd.Timestamp, fetch,
+                        log=lambda msg: None) -> dict[str, dict]:
+    """Every member's ``{fingerprint, upto, check}`` at the study's cutoff.
+
+    Provenance only: it reads the records (to verify) and the fetched panel,
+    and nothing the analysis computes reads it back. A member whose fetch or
+    preparation fails is recorded with no fingerprint and the reason.
+    """
+    cutoff = fingerprint_cutoff(run_date)
+    out = {}
+    for m, rec in records.items():
+        try:
+            fp = fingerprint_member(m, rec, run_date=run_date, cutoff=cutoff, fetch=fetch)
+            check = ("verified" if fp["verified"] else
+                     f"unverified: {fp.get('why') or 'the fetch is not the member run history'}")
+            out[m] = {"fingerprint": fp["fingerprint"], "upto": cutoff, "check": check}
+        except (PrepError, RuntimeError, KeyError, ValueError) as e:
+            out[m] = {"fingerprint": None, "upto": cutoff, "check": f"failed: {type(e).__name__}: {e}"}
+        if out[m]["check"] != "verified":
+            log(f"fingerprint {m}: {out[m]['check']}")
+    return out
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -902,8 +992,14 @@ def _clean(x):
 
 
 def build_output(result: dict, records: dict, *, universe_names: list[str], failures: dict,
-                 run_date: pd.Timestamp, git: dict, mode: str, complete: bool) -> dict:
-    """The output file's content: provenance, then the study's results."""
+                 run_date: pd.Timestamp, git: dict, mode: str, complete: bool,
+                 fingerprints: dict[str, dict], member_code: dict[str, str] | None = None) -> dict:
+    """The output file's content: provenance, then the study's results.
+
+    ``fingerprints`` is :func:`fingerprint_members`'s — provenance, merged
+    here and read by nothing in ``result``; ``member_code`` each member
+    record's member-stage code key.
+    """
     names = result["names"]
     classes: dict[str, list[str]] = {}
     for m in names:
@@ -917,8 +1013,10 @@ def build_output(result: dict, records: dict, *, universe_names: list[str], fail
         "universe": {m: {"class": instrument(m).asset_class, "ticker": instrument(m).ticker}
                      for m in universe_names},
         "members": names, "failures": failures, "held_out": result["held_out"], "classes": classes,
-        "fingerprints": {m: records[m]["fingerprint"] for m in names},
-        "fingerprint_upto": {m: records[m]["fingerprint_upto"] for m in names},
+        "fingerprints": {m: fingerprints[m]["fingerprint"] for m in names},
+        "fingerprint_upto": {m: pd.Timestamp(fingerprints[m]["upto"]) for m in names},
+        "fingerprint_check": {m: fingerprints[m].get("check", "verified") for m in names},
+        "member_code": {m: (member_code or {}).get(m, _code_key()) for m in names},
         "vintages": result["vintages"], "priors": result["priors"], "summary": result["summary"],
         "decisions": result["decisions"], "arms": result["arms"], "checks": result["checks"],
     })
@@ -1060,23 +1158,35 @@ def _slug(name: str) -> str:
 
 
 def run_members(members: list[str], *, run_date: pd.Timestamp, workdir: Path, fetch,
-                arm_p: bool, log) -> tuple[dict, dict, dict]:
-    """Run (or resume) each member: ``(records, failures, timings)``. A member
-    cached from this code and run date is reused; a failed one is retried."""
+                arm_p: bool, log, reuse: bool = False) -> tuple[dict, dict, dict, dict]:
+    """Run (or resume) each member: ``(records, failures, timings, member_code)``.
+
+    A member cached from this code and run date is reused; a failed one is
+    retried. With ``reuse``, every member cached for this run date is reused
+    whatever code wrote it — its failure too, as recorded — and only a member
+    with no cached record runs. ``member_code`` is each record's code key.
+    """
     key = _code_key()
     cache = workdir / "members"
     cache.mkdir(parents=True, exist_ok=True)
     p_set = set(p_members()) if arm_p else set()
-    records, failures, timings = {}, {}, {}
+    records, failures, timings, codes = {}, {}, {}, {}
     for n, m in enumerate(members, 1):
         path = cache / f"{_slug(m)}.pkl"
         if path.is_file():
             with open(path, "rb") as fh:
                 got = pickle.load(fh)
-            if got.get("code") == key and got.get("run_date") == run_date and not got.get("error") \
+            same = got.get("code") == key or reuse
+            if reuse and got.get("run_date") == run_date and got.get("error"):
+                failures[m] = got["error"]
+                log(f"[{n}/{len(members)}] {m}: cached failure reused — {got['error']}")
+                continue
+            if same and got.get("run_date") == run_date and not got.get("error") \
                     and (m not in p_set or "arm_p" in got["record"]):
                 records[m] = got["record"]
-                log(f"[{n}/{len(members)}] {m}: cached ({got.get('wall_s', 0):.0f} s when run)")
+                codes[m] = str(got.get("code"))
+                log(f"[{n}/{len(members)}] {m}: cached ({got.get('wall_s', 0):.0f} s when run"
+                    + ("" if got.get("code") == key else f"; code {got.get('code')}, reused") + ")")
                 continue
         t0 = time.perf_counter()
         try:
@@ -1093,8 +1203,9 @@ def run_members(members: list[str], *, run_date: pd.Timestamp, workdir: Path, fe
             log(f"[{n}/{len(members)}] {m}: FAILED in {wall:.0f} s — {err}")
         else:
             records[m] = rec
+            codes[m] = key
             log(f"[{n}/{len(members)}] {m}: ok in {wall:.0f} s")
-    return records, failures, timings
+    return records, failures, timings, codes
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1110,6 +1221,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-arm-p", action="store_true", help="skip arm P (a plumbing run: not complete)")
     ap.add_argument("--allow-dirty", action="store_true",
                     help="run on uncommitted source (recorded in git_dirty)")
+    ap.add_argument("--reuse-members", action="store_true",
+                    help="re-pool every member cached in --workdir for its run date, whatever "
+                         "code wrote it (recorded per member in member_code)")
     args = ap.parse_args(argv)
 
     names = universe()
@@ -1146,8 +1260,9 @@ def main(argv: list[str] | None = None) -> int:
             fh.write(line + "\n")
 
     log(f"study {mode} · run date {run_date:%Y-%m-%d} · {len(members)} members · workdir {workdir}")
-    records, failures, timings = run_members(members, run_date=run_date, workdir=workdir, fetch=fetch,
-                                             arm_p=not args.no_arm_p, log=log)
+    records, failures, timings, member_code = run_members(
+        members, run_date=run_date, workdir=workdir, fetch=fetch, arm_p=not args.no_arm_p,
+        log=log, reuse=args.reuse_members)
     timing_file = workdir / "timings.json"
     old = json.loads(timing_file.read_text()) if timing_file.is_file() else {}
     timing_file.write_text(json.dumps({**old, **{m: round(t, 1) for m, t in timings.items()}}, indent=1))
@@ -1162,8 +1277,11 @@ def main(argv: list[str] | None = None) -> int:
     print(text)
     (workdir / "report.txt").write_text(text + "\n", encoding="utf-8")
     complete = set(records) | set(failures) == set(names) and not args.no_arm_p
+    # Provenance, after the analysis and read by nothing in it.
+    fingerprints = fingerprint_members(records, run_date=run_date, fetch=fetch, log=log)
     code = finish(result, records, args.out, universe_names=names, failures=failures,
-                  run_date=run_date, git=git, mode=mode, complete=complete)
+                  run_date=run_date, git=git, mode=mode, complete=complete,
+                  fingerprints=fingerprints, member_code=member_code)
     log(f"wrote {args.out}" if code == 0 else f"aborted (exit {code}): nothing written")
     return code
 

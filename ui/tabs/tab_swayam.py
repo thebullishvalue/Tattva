@@ -46,9 +46,11 @@ from core.config import UI_CHART_HEIGHT_LARGE
 from core.knobs import knob
 from core.semantics import SWAYAM_DEAD, edge_tier
 from ui.theme import chart_layout, style_axes, chart_color, chart_rgba, grid_rgba
+from core.call import share_text
 from ui.components import (render_kpi_strip, render_section_header, render_empty_state,
                            render_chart_panel, render_table_panel, render_edge_panel,
-                           render_gate_rows, edge_summary_text, window_cutoff)
+                           render_gate_rows, edge_summary_text, window_cutoff, role_edge,
+                           own_grade_label)
 
 #: The sizer's three words, in the order the payoff table reads them.
 _WORDS = ("contradicts", "split", "confirms")
@@ -118,15 +120,28 @@ def _render_sizer_row(verdict: dict, edge: dict | None, lean_edge: dict | None) 
     lean, native = _num(r["swayam_lean"]), bool(r["swayam_native"])
     z, t = _num(r["swayam_z"]), _num(r["swayam_t"])
     beta, factor = _num(r["swayam_beta"]) or 0.0, _num(r["swayam_factor"]) or 1.0
-    g = (edge or {}).get("asof_grade") or {}
-    ic, se, n_win = _num(g.get("ic")), _num(g.get("se")), int(_num(g.get("n_win")) or 0)
-    mu, sd, scope = _num(g.get("prior_mu")), _num(g.get("prior_sd")), str(g.get("prior_scope") or "none")
+    sizer, grade = "swayam:sizer", "swayam:sizer_grade"
+    if not bool(call_ts.attrs.get("has_ohlcv", True)):
+        # A sizer the target cannot have: no OHLCV, so no Swayam reading ever,
+        # and no grade — not a class prior's prediction standing in for one.
+        render_kpi_strip([
+            {"label": "Reading on d*", "value": "—",
+             "subtext": "no Swayam read: the target has no OHLCV feed", "card": sizer},
+            {"label": "Own grade", "value": "not applicable",
+             "subtext": "no OHLCV: Swayam never reads this target, so it is not graded",
+             "card": grade},
+            {"label": "Effect", "value": f"×{factor:.2f}", "subtext": f"β {beta:.2f}: not applicable",
+             "card": sizer, "tooltip": TOOLTIPS["effect"]},
+        ], max_cols=3, key="swayam-sizer")
+        return
+    g = role_edge(edge)
+    ic, se, n_win = g["ic"], g["se"], g["n_win"]
+    mu, sd, scope = g["prior_mu"], g["prior_sd"], g["prior_scope"]
     has_prior = scope not in ("none", "ungraded") and mu is not None and sd is not None
     prior_label = (st.session_state.get("priors_meta") or {}).get("label", "no pooled prior")
     # The newest native view-bank session at or before d* (pipeline.run.build_swayam).
     last = st.session_state.get("swayam_native_last")
     since = f"the {last:%d %b %Y} session" if last is not None else "an earlier session"
-    sizer, grade = "swayam:sizer", "swayam:sizer_grade"
     render_kpi_strip([
         {"label": "Reading on d*", "value": f"{lean * 100:+.0f} pts" if lean is not None else "—",
          "subtext": ("a native row" if native else
@@ -135,12 +150,15 @@ def _render_sizer_row(verdict: dict, edge: dict | None, lean_edge: dict | None) 
          "card": sizer, "lean": True, "edge": lean_edge or {}, "tooltip": TOOLTIPS["reading"]},
         {"label": "z = d·Lean", "value": f"{z:+.2f}" if z is not None else "—",
          "subtext": "the claim-aligned reading", "card": sizer, "tooltip": TOOLTIPS["z"]},
-        {"label": "Own grade · as of d*",
+        {"label": own_grade_label(g),
          "value": f"{ic:+.3f}" if ic is not None else "warming up",
-         "subtext": (f"± {se:.3f} · {n_win} windows" if ic is not None and se is not None
+         "subtext": (f"± {se:.3f} · {n_win} windows · what β read at d*"
+                     if ic is not None and se is not None
                      else f"{n_win} of {knob('GRADE_WARMUP_WIN')} windows"), "card": grade},
         {"label": "Prior", "value": scope if has_prior else "none",
-         "subtext": f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label, "card": grade},
+         "subtext": (f"{mu:+.3f} ± {sd:.3f} · own weight {share_text(g['w_own'])}"
+                     if has_prior and ic is not None
+                     else f"{mu:+.3f} ± {sd:.3f}" if has_prior else prior_label), "card": grade},
         {"label": "t_post", "value": f"{t:.2f}" if t is not None else "ungraded",
          "subtext": edge_tier(t)[0], "card": grade},
         {"label": "Effect", "value": f"×{factor:.2f}",
@@ -184,8 +202,10 @@ def _render_buckets(edge: dict | None, horizon: int) -> None:
         })
     render_table_panel(pd.DataFrame(rows), "swayam-buckets", units=f"drift-neutral {horizon}D payoff",
                        windowed=False, label_col="Swayam", max_height=160,
-                       footer=html.escape(edge_summary_text(
-                           edge, "the Swayam sizer's z (d·Lean) on claim sessions")))
+                       footer=html.escape(
+                           "Full-history diagnostic (it sets no β; β reads the as-of grade above) — "
+                           + edge_summary_text(edge, "the Swayam sizer's z (d·Lean) on claim "
+                                                     "sessions")))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -264,9 +284,10 @@ def _render_individual_views(view_dfs: dict) -> None:
         cdf = view_dfs[sym].iloc[-60:]
         cols = [c for c in ("Close", "Unified_Osc", "MSF_Osc", "MMR_Osc", "Condition")
                 if c in cdf.columns]
+        _tgt = str(st.session_state.get("active_target", "") or "").upper()
         render_table_panel(
-            cdf[cols], "swayam-view-drilldown",
-            units="last 60 sessions", windowed=False, index_label="Date", max_rows=60, max_height=520,
+            cdf[cols], "swayam-view-drilldown", context=f"{_tgt} · the last 60 sessions",
+            windowed=False, index_label="Date", max_rows=60, max_height=520,
         )
 
 

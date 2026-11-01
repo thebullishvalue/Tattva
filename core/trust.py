@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from core.knobs import PRIORS_DIR, knob, priors_file_name
+from core.knobs import PRIORS_DIR, knob, knobs_hash, priors_file_name
 
 #: f(t) opens at T0 (a one-sided 5% false-open per look) and is full at T1.
 STRENGTH_T0: float = knob("STRENGTH_T0")
@@ -91,19 +91,43 @@ class PriorTable:
             who for by_who in self._priors.values() for who in by_who
             if not who.startswith("__class__:")}
 
+    def member_for(self, instrument: str, asset_class: str | None = None) -> str | None:
+        """The study member whose leave-one-out prior ``instrument`` reads, or None.
+
+        A member reads its own. Another LISTING of a member — the same company
+        under the same base symbol on another exchange of the same asset class,
+        as the app names a typed stock ('RELIANCE (BSE)' for the member
+        'RELIANCE (NSE)') — reads that member's: its class's all-member pool
+        contains the member, whose price is its own, so reading that pool would
+        count its own grade twice. Anything else reads its class's all-member
+        entry (None here).
+        """
+        if instrument in self._members:
+            return instrument
+        base, sep, rest = str(instrument).rpartition(" (")
+        if not sep or not rest.endswith(")"):
+            return None
+        classes = {m: (u or {}).get("class") for m, u in (self.meta.get("universe") or {}).items()}
+        same = [m for m in sorted(self._members)
+                if m.rpartition(" (")[0] == base and m.endswith(")")
+                and (asset_class is None or classes.get(m, asset_class) == asset_class)]
+        return same[0] if len(same) == 1 else None
+
     def lookup(self, obj: str, instrument: str, asset_class: str, t) -> Prior | None:
         """The latest vintage on or before ``t`` for this object and instrument.
 
         A study member (listed in ``meta['members']``, or holding an entry of
         its own for any object) gets its own leave-one-out entry and nothing
         else: its class's all-member entry contains the member itself, so a
-        member with no entry for ``obj`` gets None rather than that pool. Any
-        other instrument gets its class's all-member entry. None when the
-        object, the entry or a vintage on or before ``t`` is missing.
+        member with no entry for ``obj`` gets None rather than that pool. So
+        does another listing of a member (:meth:`member_for`). Any other
+        instrument gets its class's all-member entry. None when the object,
+        the entry or a vintage on or before ``t`` is missing.
         """
         by_who = self._priors.get(obj) or {}
-        if instrument in self._members:
-            entries = by_who.get(instrument)
+        who = self.member_for(instrument, asset_class)
+        if who is not None:
+            entries = by_who.get(who)
         else:
             entries = by_who.get(f"__class__:{asset_class}")
         if not entries:
@@ -121,12 +145,14 @@ class PriorTable:
     def fingerprint_upto(self, instrument: str) -> pd.Timestamp | None:
         """The session the study hashed ``instrument``'s history up to, or None.
 
-        The study records each member's history fingerprint over its settled
-        rows on or before the study's run date. A run compared with this
-        table hashes its own history up to the same session
+        The study records each member's history fingerprint over its rows on
+        or before its last prior vintage (a quarter-end, settled long before
+        the run date: the last row any prior depends on). A run compared with
+        this table hashes its own history up to exactly that session
         (``pipeline.run.prepare``), so the two fingerprints differ only when
-        that history did — not on every newer session. None for an
-        instrument outside the study.
+        that history did — not on every newer session, nor on a newest one a
+        source revised. None for an instrument outside the study (another
+        listing of a member included: its history is its own).
         """
         upto = (self.meta.get("fingerprint_upto") or {}).get(instrument)
         return pd.Timestamp(upto) if upto else None
@@ -137,7 +163,11 @@ def load_priors(h: int, exec_lag: int, path: str | None = None) -> PriorTable | 
 
     None when the study has not been run (no file). A file studied at a
     different h or L is REFUSED (``ValueError``): its priors grade a different
-    estimand, and shrinking toward them would mix two questions.
+    estimand, and shrinking toward them would mix two questions. A file whose
+    recorded ``knobs_hash`` is not this registry's is loaded and DISCLOSED:
+    ``meta['knobs_match']`` is False (None when the file records no hash) and
+    ``meta['knobs_hash_now']`` is this registry's hash, so a page can say the
+    study ran under other knobs.
     """
     p = Path(path) if path is not None else PRIORS_DIR / priors_file_name(h, exec_lag)
     if not p.is_file():
@@ -147,7 +177,24 @@ def load_priors(h: int, exec_lag: int, path: str | None = None) -> PriorTable | 
         raise ValueError(f"{p.name} was studied at h={data.get('h')}, L={data.get('exec_lag')}; "
                          f"this run grades h={h}, L={exec_lag}")
     meta = {k: v for k, v in data.items() if k != "priors"}
+    now = knobs_hash()
+    recorded = meta.get("knobs_hash")
+    meta.update(knobs_hash_now=now, knobs_match=(None if not recorded else recorded == now))
     return PriorTable(data.get("priors") or {}, meta)
+
+
+def priors_for_run(h: int, exec_lag: int, path: str | None = None) -> tuple[PriorTable | None, str | None]:
+    """``(table, refusal)``: the one loader the app and ``run_target`` share.
+
+    ``table`` is :func:`load_priors`'s; when the file is refused (studied at
+    another h or L) it is None and ``refusal`` says why, so the run degrades
+    to per-instrument grades and the pages can say the file was refused
+    rather than that the study has not run.
+    """
+    try:
+        return load_priors(h, exec_lag, path), None
+    except ValueError as e:
+        return None, str(e)
 
 
 @dataclass

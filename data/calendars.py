@@ -1,9 +1,9 @@
 """
-Tattva — per-exchange trading calendars: the session spine, freshness and "today".
+Tattva — per-exchange trading calendars (Phase 1: freshness counting).
 
 तत्त्व (Tattva) — "Principle / Essence"
 
-The freshness notices count "trading days behind" Mūla's as-of session. Historically
+The freshness notices count "trading days behind" the latest data bar. Historically
 that used ``np.busday_count`` — a plain Mon–Fri mask with NO holiday awareness, so it
 over-counts by ~1 across every market holiday (Diwali, Thanksgiving, …) and flashes a
 premature stale notice. This module resolves a ticker to its exchange and counts
@@ -19,23 +19,12 @@ Design constraints (system context):
   • Conservative — unknown tickers fall back to the Mon–Fri weekmask, never to an
     arbitrary calendar that could mis-state freshness.
 
-Exposes, all with the same weekday fallback:
-  • ``trading_days_behind`` — holiday-aware sessions between Mūla's as-of session d*
-                              and today (the freshness chip and notices).
+Exposes three primitives, all with the same weekday fallback:
+  • ``trading_days_behind`` — holiday-aware "trading days behind" (freshness notices).
+  • ``is_session``          — was a given ticker's exchange open on a given day? (the
+                              exchange-aware partial-session gate, app.py Phase 2).
   • ``session_mask``        — vectorised session membership over a date index (the
-                              target-exchange model spine, data.prep).
-  • ``target_printed``      — did the TARGET itself print on each date? (the other
-                              half of the spine: an open exchange is not a print).
-  • ``session_bars``        — the target's OHLCV on its own weekday sessions (the bars
-                              the spine and Swayam read).
-  • ``session_today``       — the one "today", in the exchange's own time zone, for
-                              the app's freshness and the engine's forming-session test.
-  • ``session_closed_through`` — the newest date whose session has CLOSED (today once
-                              its close has passed, else the day before): what the
-                              call's recency, P2 and the elapsed horizon count to.
-  • ``printed_sessions_behind`` — the target's sessions after d* that have closed: its
-                              own printed sessions where the spine has them, the
-                              calendar's beyond its newest print.
+                              target-exchange model spine, app.py Phase 3).
 """
 from __future__ import annotations
 
@@ -189,12 +178,35 @@ def _get_calendar(mic: str):
         return None
 
 
+def is_session(ticker: str | None, day) -> bool:
+    """True if ``ticker``'s exchange held a trading session on ``day``.
+
+    Holiday-aware when ``exchange_calendars`` is installed; otherwise (and for FX /
+    unknown tickers / out-of-bounds dates) falls back to "is a weekday" — which makes
+    every caller degrade to the legacy Mon–Fri behaviour with the library absent.
+    Never raises.
+    """
+    ts = pd.Timestamp(day).normalize()
+    mic = resolve_exchange(ticker)
+    if mic == _CRYPTO:
+        return True                     # 24x7x365 — weekends and holidays included
+    cal = _get_calendar(mic)
+    if cal is None:
+        return bool(ts.dayofweek < 5)
+    try:
+        if ts < cal.first_session or ts > cal.last_session:
+            return bool(ts.dayofweek < 5)
+        return bool(cal.is_session(ts))
+    except Exception:
+        return bool(ts.dayofweek < 5)
+
+
 def session_mask(ticker: str | None, dates) -> np.ndarray:
     """Boolean mask over ``dates`` — True where ``ticker``'s exchange had a session.
 
-    Holiday-aware when ``exchange_calendars`` is installed; for FX, unknown tickers and
-    out-of-bounds dates it falls back to "is a weekday" (crypto: every day), so with no
-    library a weekday-only frame is returned unchanged. Never raises.
+    Vectorised companion to :func:`is_session` for filtering a whole index in one call
+    (Phase 3 spine restriction). Same weekday fallback semantics: with no library the
+    mask is simply "is a weekday", so a weekday-only frame is returned unchanged.
     """
     dts = pd.DatetimeIndex(pd.to_datetime(dates)).normalize()
     if len(dts) == 0:
@@ -220,21 +232,17 @@ def session_mask(ticker: str | None, dates) -> np.ndarray:
         return weekday
 
 
-def _busday_behind(asof: date, today: date) -> int:
-    """Legacy Mon–Fri count: trading days strictly after ``asof`` through ``today``."""
-    return max(0, int(np.busday_count(asof + timedelta(days=1), today + timedelta(days=1))))
+def _busday_behind(latest: date, today: date) -> int:
+    """Legacy Mon–Fri count: trading days strictly after ``latest`` through ``today``."""
+    return max(0, int(np.busday_count(latest + timedelta(days=1), today + timedelta(days=1))))
 
 
-def trading_days_behind(ticker: str | None, asof: date, today: date) -> int:
-    """Sessions strictly after ``asof`` up to & including ``today`` for ``ticker``'s
+def trading_days_behind(ticker: str | None, latest: date, today: date) -> int:
+    """Sessions strictly after ``latest`` up to & including ``today`` for ``ticker``'s
     exchange. Holiday-aware when ``exchange_calendars`` is installed; otherwise the
     exact legacy Mon–Fri ``busday_count``. Always ``>= 0``.
-
-    Measured from d*, Mūla's as-of session — the session the call is about — not
-    from the panel's newest date: a withheld newest row is data, not a valuation,
-    so it cannot make a call any fresher.
     """
-    if today <= asof:
+    if today <= latest:
         return 0
     mic = resolve_exchange(ticker)
     # Crypto trades 24×7, but the model spine does not: fetch_commodity_dataset
@@ -243,160 +251,21 @@ def trading_days_behind(ticker: str | None, asof: date, today: date) -> int:
     # calendar days here would call that bar two days stale every weekend; the
     # weekday count is the honest one for a weekday spine.
     if mic == _CRYPTO:
-        return _busday_behind(asof, today)
+        return _busday_behind(latest, today)
     cal = _get_calendar(mic)
     if cal is None:
-        return _busday_behind(asof, today)
+        return _busday_behind(latest, today)
     try:
-        start = pd.Timestamp(asof) + pd.Timedelta(days=1)
+        start = pd.Timestamp(latest) + pd.Timedelta(days=1)
         end = pd.Timestamp(today)
         # Clamp to the calendar's known bounds so a far-future/near-epoch date can't
         # raise; outside bounds we simply fall back to the weekday count.
         if start < cal.first_session or end > cal.last_session:
-            return _busday_behind(asof, today)
+            return _busday_behind(latest, today)
         return max(0, int(len(cal.sessions_in_range(start, end))))
     except Exception as e:
         log.debug("session count failed for %s/%s: %s; weekday fallback", ticker, mic, e)
-        return _busday_behind(asof, today)
-
-
-#: Time zones for the two sentinels, which have no calendar to supply one. The
-#: FX day rolls at the New York close; crypto has no close, so it keeps UTC.
-_SENTINEL_TZ = {_FX: "America/New_York", _CRYPTO: "UTC"}
-
-
-def session_today(exchange: str) -> pd.Timestamp:
-    """Today's date where ``exchange`` trades — normalised and tz-naive.
-
-    ``exchange`` is what :func:`resolve_exchange` returns (a MIC, a sentinel, or
-    "" for unknown, which reads UTC). There used to be two "todays": the app's
-    min(UTC date, machine-local date) and the engine's machine-local
-    ``Timestamp.today()``, which disagree for an hour or more every day on any
-    host whose clock is not the exchange's. One date, the exchange's own, now
-    decides both whether data is behind and whether a row is still forming.
-    """
-    tz = _SENTINEL_TZ.get(exchange)
-    if tz is None:
-        cal = _get_calendar(exchange)
-        tz = str(getattr(cal, "tz", None) or "UTC") if cal is not None else "UTC"
-    return pd.Timestamp.now(tz=tz).tz_localize(None).normalize()
-
-
-#: When a sentinel's day closes, as (hour, minute) in its time zone: the FX day at
-#: the New York 17:00 roll; crypto (and an unknown exchange, on UTC) at midnight.
-_SENTINEL_CLOSE = {_FX: (17, 0), _CRYPTO: (24, 0)}
-
-
-def session_closed_through(exchange: str, now=None) -> pd.Timestamp:
-    """The newest date whose session on ``exchange`` has CLOSED — normalised, tz-naive.
-
-    :func:`session_today` once today's session has closed (its exchange close
-    from the calendar; the FX roll at 17:00 New York; midnight for crypto and
-    an unknown exchange), else the day before. A day with no session (a
-    weekend, a holiday) has nothing still forming, so it is itself closed
-    through. ``now`` (tz-aware, or naive in the exchange's zone) pins the clock
-    for a test; by default it is the current time.
-
-    A call published after the close of d* trades at the close of d*+L, and
-    its h-session window runs from there: only sessions that have closed can
-    have elapsed, so the call's recency is counted to this date, never to a
-    session still trading.
-    """
-    tz = _SENTINEL_TZ.get(exchange)
-    cal = _get_calendar(exchange)
-    if tz is None:
-        tz = str(getattr(cal, "tz", None) or "UTC") if cal is not None else "UTC"
-    if now is None:
-        today, now = session_today(exchange), pd.Timestamp.now(tz=tz)
-    else:
-        now = pd.Timestamp(now)
-        now = now.tz_localize(tz) if now.tzinfo is None else now.tz_convert(tz)
-        today = now.tz_localize(None).normalize()
-    close = None
-    if cal is not None:
-        try:
-            if not cal.is_session(today):
-                return today
-            close = pd.Timestamp(cal.session_close(today))
-        except Exception as e:                       # out of bounds / lib hiccup
-            log.debug("session close unavailable for %s on %s: %s", exchange, today, e)
-    if close is None:
-        hh, mm = _SENTINEL_CLOSE.get(exchange, (24, 0))
-        close = (today + pd.Timedelta(hours=hh, minutes=mm)).tz_localize(tz)
-    return today if now >= close else today - pd.Timedelta(days=1)
-
-
-def printed_sessions_behind(ticker: str | None, spine, asof, through) -> int:
-    """The target's sessions after ``asof`` (d*) that have closed by ``through``.
-
-    ``spine`` is the target-printed spine (the prepared index: only sessions
-    the target itself printed). Where the spine reaches, its own rows after d*
-    are counted — so an exchange session on which the target did not print (a
-    US federal holiday on CME with no GC=F bar) is not a session of its
-    horizon; beyond the spine's newest print, which has no rows yet, the
-    exchange calendar stands in (:func:`trading_days_behind`). ``through`` is
-    :func:`session_closed_through` live, or a replay's end date. Always ≥ 0.
-    """
-    d = pd.Timestamp(asof).normalize()
-    through = pd.Timestamp(through).normalize()
-    if through <= d:
-        return 0
-    idx = pd.DatetimeIndex(pd.to_datetime(spine)).normalize()
-    known = idx[idx <= through]
-    after = int(((known > d)).sum())
-    edge = max(d, known.max()) if len(known) else d
-    return after + int(trading_days_behind(ticker, edge.date(), through.date()))
-
-
-def session_bars(bars: pd.DataFrame, ticker: str | None) -> pd.DataFrame:
-    """The target's OHLCV bars on its own sessions, on the spine's weekday calendar.
-
-    yfinance can return a placeholder bar on a non-session (USD/INR carried a
-    Saturday bar with O=H=L=C), and crypto's weekend bars would be valued
-    against Friday's macro — the shared panel is a weekday spine. Bars BEFORE
-    the spine starts are kept: they are Swayam's warm-up (~640-680 per target).
-    """
-    idx = pd.DatetimeIndex(bars.index)
-    keep = session_mask(ticker, idx) & np.asarray(idx.dayofweek < 5)
-    return bars[keep]
-
-
-def target_printed(price, bars: pd.DataFrame | None, dates) -> pd.Series:
-    """Did the TARGET itself print on each of ``dates``? → bool Series on ``dates``.
-
-    An open exchange is not a print. Gold's spine is the CME calendar, but on 35
-    US federal holidays GC=F has no bar at all: the panel carries Friday's close
-    forward and the row used to be valued, graded and counted as one of the h
-    sessions of a forward return, so "10 sessions" was sometimes nine.
-
-    With the target's own OHLCV (``bars``), a print is a bar with a finite
-    Close on that date. Outside the span the bars cover — a feed that ends a
-    session before the close feed, or starts later — and when there are no bars
-    at all, it falls back to the repeat rule: the panel is forward-filled at
-    source and continuous prices do not repeat exactly, so a value identical to
-    the previous row's is a carried one. (The rule also drops the rare genuine
-    unchanged close — 6 of Gold's ~1,400 valued sessions — which is why the bars
-    decide wherever they exist.)
-
-    ``price`` is positionally aligned with ``dates``. Causal: each date reads its
-    own bar, or its own and the previous row's value.
-    """
-    dts = pd.DatetimeIndex(pd.to_datetime(dates)).normalize()
-    px = pd.to_numeric(pd.Series(np.asarray(price, dtype=object)), errors="coerce").to_numpy(dtype=float)
-    finite = np.isfinite(px)
-    repeat = np.zeros(len(px), dtype=bool)
-    repeat[1:] = finite[1:] & finite[:-1] & (px[1:] == px[:-1])
-    out = finite & ~repeat
-    if bars is not None and len(bars) and "Close" in bars.columns:
-        close = pd.to_numeric(bars["Close"], errors="coerce")
-        bidx = pd.DatetimeIndex(bars.index)
-        if bidx.tz is not None:
-            bidx = bidx.tz_localize(None)
-        bidx = bidx.normalize()[np.isfinite(close.to_numpy(dtype=float))]
-        if len(bidx):
-            covered = np.asarray((dts >= bidx.min()) & (dts <= bidx.max()))
-            out = np.where(covered, np.asarray(dts.isin(bidx)) & finite, out)
-    return pd.Series(out.astype(bool), index=dts, name="TargetPrinted")
+        return _busday_behind(latest, today)
 
 
 def panel_session_matrix(names, dates) -> np.ndarray:

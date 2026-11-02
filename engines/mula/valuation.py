@@ -42,14 +42,10 @@ out-of-sample evidence:
   efficiency, but every coefficient has a name, which is what makes the
   output auditable.
 
-What drives the published level is read off the fit itself: factor and
-block levels are linear in the standardised returns, so the fitted level
-decomposes exactly into per-instrument contributions, summed here to the
-asset-class blocks (``block_attribution``). (Leave-one-block-out refits used
-to run beside the two views, for a driver ablation and a cross-section
-"consistency" score. They were a separate model of the block view only, the
-score measured block-versus-latent view mismatch rather than the agreement
-its label claimed, and nothing on the call read it; they went.)
+Leave-one-block-out refits give ablation-based driver importance and a
+cross-sectional consistency score: independent slices of the world either
+agree about the mispricing or they do not, and that agreement is itself a
+decision-relevant quantity.
 
 References
 ----------
@@ -72,18 +68,23 @@ import numpy as np
 import pandas as pd
 
 from analytics.adaptive import AdaptiveThreshold
-from analytics.causal import EPS, DynamicModelAverage, OnlineAR1
-from core.config import (FVO_BURN_IN as BURN_IN, FVO_MIN_PRINTS as MIN_PRINTS,
-                         FVO_VALUATION_DELTAS as VALUATION_DELTAS)
+from analytics.causal import (EPS, BatchDLM, DynamicModelAverage, EWMA,
+                              ExpandingRank, OnlineAR1)
 from .factors import K_MAX, AdaptiveVolPanel, OnlineFactorModel
 from .blocks import block_membership
+from .regime import RegimeFilter
 
-# BURN_IN (observations absorbed before valuation is published), MIN_PRINTS
-# (prints an instrument needs by time t to enter the cross-section at t) and
-# VALUATION_DELTAS (the level regression's discount grid) are the engine's
-# defaults; their one definition, with its argument, is core.config's
-# FVO_BURN_IN, FVO_MIN_PRINTS and FVO_VALUATION_DELTAS (registered in
-# core.knobs), and an instrument's config passes its own.
+#: Observations absorbed before valuation is published.  One year is the
+#: point at which an exponentially weighted correlation matrix over ~200
+#: instruments has accumulated enough weight for the Marchenko-Pastur edge
+#: to be meaningful; publishing earlier would be publishing the prior.
+BURN_IN = 252
+
+#: Prints an instrument must have accumulated *by time t* before it may
+#: enter the cross-section at time t.  A second moment is not estimable from
+#: less, and the gate is applied forward in time so admission never
+#: retroactively changes.
+MIN_PRINTS = 250
 
 #: Fraction of the ADMITTED cross-section that must actually have printed on a
 #: date for that date's valuation to be published Valid. A settled session
@@ -120,16 +121,6 @@ SESSION_SPARSE_FRACTION: float = 0.60
 CI_LEVEL: float = 0.95
 CI_MIN_OBS: int = 252
 
-#: The publication warm-up after the burn-in: a session is valued once the gap
-#: has printed on at least PUBLISH_WARMUP_PRINTS of the PUBLISH_WARMUP_WINDOW
-#: sessions before it. It is the warm-up the retired window stack imposed (its
-#: shortest window, 21 sessions, read nothing below 10 prints), kept as the
-#: publication rule so that deleting the stack did not move one published value
-#: (tests/test_golden_mula.py). On a prepared spine the gap prints every session
-#: after the burn-in, so it withholds the first 10 of them as 'warming up'.
-PUBLISH_WARMUP_PRINTS: int = 10
-PUBLISH_WARMUP_WINDOW: int = 21
-
 #: Adaptive-conformal step size. Each published interval nudges the working
 #: miscoverage level by at most this much, so the band chases realised coverage
 #: without lurching on any single outcome. 0.01 moves the level ~1pp per miss,
@@ -141,9 +132,8 @@ CI_ADAPT_GAMMA: float = 0.01
 CI_ALPHA_MIN: float = 0.005      # never wider than a ~99.5% interval
 CI_ALPHA_MAX: float = 0.20       # never tighter than an ~80% interval
 
-#: (The discount grid for the valuation regression, VALUATION_DELTAS above —
-#: core.config.FVO_VALUATION_DELTAS — spans implied coefficient memories of
-#: ~4 years, ~8 years, ~40 years and permanent.)
+#: Discount grid for the valuation regression, spanning implied coefficient
+#: memories of ~4 years, ~8 years, ~40 years and permanent.
 #:
 #: The restriction to the slow end of the family is a modelling commitment,
 #: not a tuned choice, and it is the single most consequential decision in
@@ -158,6 +148,7 @@ CI_ALPHA_MAX: float = 0.20       # never tighter than an ~80% interval
 #: data still selects, and the selection is stable: shifting the grid one
 #: notch slower moves the reported mispricing by well under a percentage
 #: point.
+VALUATION_DELTAS = (0.999, 0.9995, 0.9999, 1.0)
 
 
 def _mix_ll(w: np.ndarray, ll: np.ndarray) -> float:
@@ -197,14 +188,6 @@ class MarketValuationEngine:
     # -----------------------------------------------------------------
     def run(self, target_px: pd.Series, expl_px: pd.DataFrame,
             printed: pd.DataFrame, progress_cb=None) -> dict:
-        """One causal pass: the fair value, its gap and the gap's persistence.
-
-        Returns ``series`` (one row per session: ``fair_value``, ``gap``,
-        ``pct_mispricing``, ``fvo``, ``pred_sd``, ``fv_sd``, ``ci_lo`` /
-        ``ci_hi``, ``k_factors``, ``gap_halflife``, ``gap_phi``, ``price``,
-        ``n_available``, ``n_admitted``) and ``block_attribution`` (every 21
-        sessions and the last: each block's contribution to the fitted level).
-        """
         idx = target_px.index
         T = len(idx)
         cols = list(expl_px.columns)
@@ -223,6 +206,7 @@ class MarketValuationEngine:
 
         vol = AdaptiveVolPanel(self.n)
         fac = OnlineFactorModel(self.n)
+        regime = RegimeFilter(d=2)
 
         block_var = np.ones(self.n_blocks)
         block_w = np.zeros(self.n_blocks)
@@ -230,11 +214,33 @@ class MarketValuationEngine:
         block_contrib = np.zeros((self.n_blocks, self.n))
         blam = math.exp(-math.log(2.0) / 252.0)
 
+        gvol = EWMA(halflife=42.0)
+        glogvol = EWMA(halflife=252.0)
+        # Continuous market stress.  The HMM posterior is a *classification*
+        # and on daily data it saturates at 0/1, which makes it useless as a
+        # graded input to the decision layer.  The empirical percentile of
+        # realised global volatility against its own history is graded,
+        # distribution-free, and equally causal.
+        stress_rank = ExpandingRank()
+        # Cross-sectional dispersion of standardised returns.  A liquidity /
+        # market-quality proxy that needs no volume or spread data: when
+        # liquidity provision withdraws, the cross-section fans out even
+        # after each name has been normalised by its own volatility
+        # (Ang et al. 2006; Herskovic et al. 2016 on common idiosyncratic
+        # volatility as a priced liquidity-linked factor).
+        disp_rank = ExpandingRank()
+
         lat_bank: DynamicModelAverage | None = None
         blk_bank: DynamicModelAverage | None = None
+        loo: BatchDLM | None = None
+        # row j is the block-view design with block j ablated
+        loo_mask = np.ones((self.n_blocks, self.n_blocks + 1))
+        for j in range(self.n_blocks):
+            loo_mask[j, 1 + j] = 0.0
         view_logw = np.zeros(2)
 
         gap_ar = OnlineAR1(halflife=504.0)
+        gap_rank = ExpandingRank()
         # Causal empirical quantile of |fvo| — the conformal band multiplier.
         # min_obs guards the opening stretch where a quantile of a handful of
         # residuals is noise; below it the Gaussian constant is used unchanged.
@@ -242,12 +248,29 @@ class MarketValuationEngine:
         # Working miscoverage level for the adaptive-conformal band; starts at
         # the nominal and is driven by realised coverage from there.
         ci_alpha = 1.0 - CI_LEVEL
+        resid_ewma = EWMA(halflife=252.0)
+        agree_ew = 0.0
+        agree_w = 0.0
 
         # -- output buffers ------------------------------------------------
         out = {k: np.full(T, np.nan) for k in (
             "fair_value", "gap", "pct_mispricing", "fvo", "pred_sd", "fv_sd",
-            "ci_lo", "ci_hi", "k_factors", "gap_halflife", "gap_phi",
+            "ci_lo", "ci_hi", "resid_rmse", "k_factors", "explained_var",
+            "corr_memory", "t_eff", "xs_consistency", "gap_halflife",
+            "gap_phi", "stress", "regime_stress", "regime_persistence",
+            "switch_prob", "regime_drift", "regime_entropy",
+            "w_latent", "w_block", "gap_percentile", "adapt_memory",
+            "factor_var_share", "loo_dispersion", "xs_dispersion",
+            "xs_dispersion_pct",
         )}
+        out["regime_label"] = np.array(["initialising"] * T, dtype=object)
+        lat_beta = np.full((T, K_MAX + 1), np.nan)
+        blk_beta = np.full((T, self.n_blocks + 1), np.nan)
+        blk_level_hist = np.full((T, self.n_blocks), np.nan)
+        fac_level_hist = np.full((T, K_MAX), np.nan)
+        fac_contrib_hist = np.full((T, K_MAX), np.nan)
+        blk_contrib_hist = np.full((T, self.n_blocks), np.nan)
+        blk_importance = np.full((T, self.n_blocks), np.nan)
         attrib_dates: list[int] = []
         attrib_rows: list[np.ndarray] = []
 
@@ -277,9 +300,35 @@ class MarketValuationEngine:
             z = np.where(avail, (r - mu) / np.maximum(sig, 1e-8), 0.0)
             z = np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
 
+            # ---- global risk factor in raw return units (for the regime) --
+            V = fac.loadings()
+            if V.shape[1] > 0 and avail.any():
+                w0 = V[:, 0] * avail
+                nrm = float(np.abs(w0).sum())
+                g = float(np.dot(np.nan_to_num(r, nan=0.0), w0) / nrm) if nrm > EPS else 0.0
+            else:
+                g = float(np.nanmean(np.where(avail, r, np.nan))) if avail.any() else 0.0
+                g = 0.0 if not np.isfinite(g) else g
+            gs = gvol.std
+            gz = g / gs if gs > EPS else 0.0
+            lv = math.log(max(gs, 1e-8))
+            lvz = (lv - glogvol.mean) / max(glogvol.std, 1e-6) if glogvol.n > 20 else 0.0
+            reg = regime.update(np.array([np.clip(gz, -8, 8), np.clip(lvz, -8, 8)]))
+            stress_c = stress_rank.cdf(lv) if glogvol.n > 60 else np.nan
+            stress_rank.update(lv)
+            gvol.update(g)
+            glogvol.update(lv)
+
             # ---- factors ---------------------------------------------------
             finfo = fac.update(z, avail)
             k = finfo["k"]
+
+            if avail_hist[t] >= 5:
+                xs_disp = float(np.std(z[avail]))
+                xs_disp_pct = disp_rank.cdf(xs_disp)
+                disp_rank.update(xs_disp)
+            else:
+                xs_disp, xs_disp_pct = np.nan, np.nan
 
             # ---- asset-class blocks ---------------------------------------
             cnt = self.block_M @ avail.astype(float)
@@ -336,6 +385,10 @@ class MarketValuationEngine:
                 blk_bank = DynamicModelAverage(
                     self.n_blocks + 1, grid=self.deltas, prior_scale=v0 * 25.0,
                     prior_var=v0 * 25.0, prior_mean=pm_b)
+                loo = BatchDLM(self.n_blocks, self.n_blocks + 1,
+                               np.full(self.n_blocks, 0.999),
+                               prior_scale=v0 * 25.0, prior_var=v0 * 25.0,
+                               prior_mean=pm_b)
 
             # ---- predict, then absorb (strict order) ------------------------
             f_lat, q_lat, qp_lat = lat_bank.forecast_parts(Flat)
@@ -368,11 +421,16 @@ class MarketValuationEngine:
             gap = p - fv
             fvo = gap / sd
 
+            Floo = loo_mask * Fblk[None, :]
+            f_loo, _, _ = loo.forecast(Floo)
+            loo_gaps = p - f_loo
+
             # ---- absorb -----------------------------------------------------
             w_lat_pre = lat_bank.w.copy()
             w_blk_pre = blk_bank.w.copy()
             lat_bank.update(Flat, p)
             blk_bank.update(Fblk, p)
+            loo.update(Floo, p)
             # mixture predictive log-likelihood of each view, scored with the
             # weights that were current *before* p_t was seen
             ll = np.array([
@@ -385,6 +443,7 @@ class MarketValuationEngine:
 
             gap_ar.update(gap)
             phi, se = gap_ar.solve()
+            resid_ewma.update(gap * gap)
 
             # The gap's own persistence. `phi` is published (GapPhi) because the
             # error-correction layer needs it to project the gap forward over
@@ -402,6 +461,26 @@ class MarketValuationEngine:
                       if 0 < phi < 1 else np.nan)
             else:
                 hl = np.nan
+
+            sgn = np.sign(gap)
+            agree = float(np.mean(np.sign(loo_gaps) == sgn)) if sgn != 0 else 0.5
+            # Daily agreement across twelve ablations is a twelve-point
+            # proportion and jumps between discrete levels session to session.
+            # It is averaged over the *mispricing's own inferred half-life* --
+            # the timescale on which a disagreement would actually matter --
+            # rather than over an arbitrary window.  Exponential averaging is
+            # one-sided, so this smooths without reaching forward.
+            hl_s = float(np.clip(hl, 5.0, 126.0)) if np.isfinite(hl) else 21.0
+            lam_s = math.exp(-math.log(2.0) / hl_s)
+            agree_ew = lam_s * agree_ew + (1.0 - lam_s) * agree
+            agree_w = lam_s * agree_w + (1.0 - lam_s)
+            xs_cons = max(0.0, 2.0 * (agree_ew / max(agree_w, EPS)) - 1.0)
+            loo_disp = float(np.std(loo_gaps) / max(abs(gap), sd))
+
+            beta_l = lat_bank.coef
+            beta_b = blk_bank.coef
+            contrib_l = beta_l[1:] * finfo["levels"][:K_MAX]
+            contrib_b = beta_b[1:] * block_levels
 
             pct = math.expm1(gap)
 
@@ -452,6 +531,8 @@ class MarketValuationEngine:
                 ci_alpha + CI_ADAPT_GAMMA * ((1.0 - CI_LEVEL) - _missed),
                 CI_ALPHA_MIN, CI_ALPHA_MAX))
             fvo_rank.update(abs(fvo))
+            gap_pct = gap_rank.cdf(gap)                 # rank among prior gaps
+            gap_rank.update(gap)
 
             out["fair_value"][t] = math.exp(fv)
             out["gap"][t] = gap
@@ -461,30 +542,81 @@ class MarketValuationEngine:
             out["fv_sd"][t] = fv_sd
             out["ci_lo"][t] = math.exp(fv - zc * sd)
             out["ci_hi"][t] = math.exp(fv + zc * sd)
+            out["resid_rmse"][t] = math.sqrt(max(resid_ewma.mean, 0.0))
             out["k_factors"][t] = k
+            out["explained_var"][t] = finfo["explained"]
+            out["corr_memory"][t] = finfo["memory"]
+            out["t_eff"][t] = finfo["t_eff"]
+            out["xs_consistency"][t] = xs_cons
+            out["loo_dispersion"][t] = loo_disp
             out["gap_halflife"][t] = hl
             out["gap_phi"][t] = phi
+            out["stress"][t] = stress_c
+            out["xs_dispersion"][t] = xs_disp
+            out["xs_dispersion_pct"][t] = xs_disp_pct
+            out["regime_stress"][t] = reg["stress"]
+            out["regime_persistence"][t] = reg["persistence"]
+            out["switch_prob"][t] = reg["switch_prob"]
+            out["regime_drift"][t] = reg["drift"]
+            out["regime_entropy"][t] = reg["entropy"]
+            out["regime_label"][t] = reg["label"]
+            out["w_latent"][t] = w[0]
+            out["w_block"][t] = w[1]
+            out["gap_percentile"][t] = gap_pct
+            out["adapt_memory"][t] = (w[0] * lat_bank.effective_memory
+                                      + w[1] * blk_bank.effective_memory)
+            tot_c = float(np.sum(np.abs(contrib_l)) + np.sum(np.abs(contrib_b)))
+            out["factor_var_share"][t] = (
+                float(np.sum(np.abs(contrib_l))) / tot_c if tot_c > EPS else np.nan)
+
+            lat_beta[t] = beta_l
+            blk_beta[t] = beta_b
+            blk_level_hist[t] = block_levels
+            fac_level_hist[t] = finfo["levels"][:K_MAX]
+            fac_contrib_hist[t] = contrib_l
+            blk_contrib_hist[t] = contrib_b
+            denom = max(float(np.sum(np.abs(loo_gaps - gap))), EPS)
+            blk_importance[t] = np.abs(loo_gaps - gap) / denom
 
             if t % 21 == 0 or t == T - 1:
-                # Each instrument's part of the fitted level (the views' own
-                # coefficients times its exact share of every factor and block
-                # level), summed to its asset-class block.
-                inst = (w[0] * (lat_bank.coef[1:K_MAX + 1] @ fac.instrument_contribution())
-                        + w[1] * (blk_bank.coef[1:] @ block_contrib))
+                inst = (w[0] * (beta_l[1:K_MAX + 1] @ fac.instrument_contribution())
+                        + w[1] * (beta_b[1:] @ block_contrib))
                 attrib_dates.append(t)
-                attrib_rows.append(self.block_M @ inst)
+                attrib_rows.append(inst.copy())
 
             if progress_cb is not None and (t % 250 == 0 or t == T - 1):
                 progress_cb((t + 1) / T)
 
         df = pd.DataFrame({k: v for k, v in out.items()}, index=idx)
+        df["price"] = np.exp(P)
         df["n_available"] = avail_hist
         df["n_admitted"] = admit_hist
 
         return {
             "series": df,
-            "block_attribution": pd.DataFrame(
-                np.array(attrib_rows) if attrib_rows else np.zeros((0, self.n_blocks)),
+            "latent_beta": pd.DataFrame(
+                lat_beta, index=idx,
+                columns=["intercept"] + [f"F{j+1}" for j in range(K_MAX)]),
+            "block_beta": pd.DataFrame(
+                blk_beta, index=idx, columns=["intercept"] + self.block_names),
+            "block_levels": pd.DataFrame(blk_level_hist, index=idx,
+                                         columns=self.block_names),
+            "factor_levels": pd.DataFrame(
+                fac_level_hist, index=idx,
+                columns=[f"F{j+1}" for j in range(K_MAX)]),
+            "factor_contrib": pd.DataFrame(
+                fac_contrib_hist, index=idx,
+                columns=[f"F{j+1}" for j in range(K_MAX)]),
+            "block_contrib": pd.DataFrame(blk_contrib_hist, index=idx,
+                                          columns=self.block_names),
+            "block_importance": pd.DataFrame(blk_importance, index=idx,
+                                             columns=self.block_names),
+            "instrument_attribution": pd.DataFrame(
+                np.array(attrib_rows) if attrib_rows else np.zeros((0, self.n)),
                 index=idx[attrib_dates] if attrib_dates else pd.DatetimeIndex([]),
-                columns=self.block_names),
+                columns=self.tickers),
+            "loadings": pd.DataFrame(
+                fac.loadings(), index=self.tickers,
+                columns=[f"F{j+1}" for j in range(fac.loadings().shape[1])]),
+            "burn_in": self.burn_in,
         }

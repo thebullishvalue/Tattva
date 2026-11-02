@@ -1,163 +1,176 @@
 """
-Tattva — System tab: what the call runs on.
-तत्त्व (Tattva) — "Principle / Essence"
+Tattva — System tab: does the machinery behind the call actually hold up?
 
-INFRASTRUCTURE — everything here guarantees one as-of row and causality, and
-none of it is a grade or a reading of the market:
+Everything here answers a question the engine pages assume the answer to. Each
+engine page grades its own lean; this page puts the grades side by side, shows
+what the convergence learner concluded from them, the statistics of the gap
+Mūla's call rests on, and whether the data layer feeding all of it is healthy.
 
-  1 STATE     which history, which session?       d* · h and L · epoch · fingerprint · history rewritten?
-  2 TRUST     which pooled priors?                the study's provenance, or 'not yet run'
-  3 DETAIL    is the data sound?                  the newest session's coverage · withheld sessions ·
-                                                  caches and circuit breakers
-  4 RECORD    what can move it, and why?          the KNOBS registry · the ROLES registry
+Reading order — the house convention every analysis tab follows:
 
-(The gap's stationarity is evidence about the claim and is on the Mūla page,
-once; the OU half-life, the θ-stability chip and the duplicate ADF / KPSS
-cards that sat here went with the second definition they carried. Every
-grade is on the Grades page.)
+  1 ANSWER    does any of it work?               Walk-forward edge, every engine
+  2 TRUST     what did the learner conclude?     Learned vs prior dimension weights
+  3 STATE     is the gap a valid spread?         Gap statistics (OU · ADF · KPSS)
+  4 DETAIL    is the data sound?                 Data layer health
+
+(Driver importance moved to the Mūla page, beside the valuation it explains;
+the regime chart that duplicated Swayam's went; and the "Signal Performance"
+table — a BUY/SELL event study of Mūla's window stretch, titled "walk-forward
+hit rates" though it was neither the hero's call nor walk-forward — went with
+the rival signal it graded.)
 """
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
-import core.knobs as knobs
-from core.roles import CARDS, CHIPS, ROLES
-from ui.components import (render_kpi_strip, render_note, render_section_header,
-                           render_table_panel)
+from ui.theme import (chart_layout, style_axes,
+                      chart_color, chart_rgba, grid_rgba)
+from ui.components import (render_metric_card, render_section_header, render_chip,
+                           render_empty_state, render_chart_panel, render_table_panel,
+                           render_note, edge_tier, edge_periods)
+from core.config import UI_CHART_HEIGHT_MEDIUM
 from data.cache import all_caches
 from data.circuit_breaker import all_circuits, CircuitState
 
+# ── Tooltip definitions ────────────────────────────────────────────────────
+TOOLTIPS = {
+    "ou_half_life": (
+        "Full-history Ornstein-Uhlenbeck fit on the mispricing gap: days for a shock to the "
+        "gap to halve. It measures the gap's persistence however it closes — mostly through "
+        "fair value moving, on most instruments — not how fast price converges."
+    ),
+    "adf_pvalue": (
+        "Tests whether the gap has a unit root (drifts away from fair value for good). "
+        "p < 0.05 rejects the unit root."
+    ),
+    "kpss_pvalue": (
+        "Corroborating test with the opposite null: is the gap stationary? p > 0.05 fails "
+        "to reject stationarity — a second, independent confirmation."
+    ),
+}
 
-def _history_flag(priors_meta: dict, target: str, fingerprint: str) -> tuple[str, str]:
-    """``(value, subtext)``: is this the history the pooled priors were studied on?
-
-    Compared at the session the study recorded for ``target``
-    (``fingerprint_upto``: its last prior vintage, a settled date) — the run's
-    fingerprint is hashed to exactly that session (``pipeline.run.prepare``),
-    so only a change to the rows the priors depend on can flag it.
-    """
-    pm = priors_meta or {}
-    if pm.get("status") == "refused":
-        return "nothing to compare", f"the priors file was refused: {pm.get('refusal')}"
-    if pm.get("status") != "loaded":
-        return "nothing to compare", "no pooled-prior study yet"
-    studied = (pm.get("fingerprints") or {}).get(target)
-    upto = (pm.get("fingerprint_upto") or {}).get(target)
-    if not studied:
-        members = set(pm.get("members") or ())
-        base = target.rpartition(" (")[0]
-        twin = [m for m in sorted(members) if base and m.rpartition(" (")[0] == base]
-        if twin:
-            return ("nothing to compare",
-                    f"{target} is another listing of the study member {twin[0]}: it reads that "
-                    f"member's leave-one-out prior and has no studied history of its own")
-        return "nothing to compare", f"{target} is not a member of the priors study"
-    through = f" through {upto}" if upto else ""
-    check = (pm.get("fingerprint_check") or {}).get(target)
-    if check and check != "verified":
-        return ("unverified study history",
-                f"the study could not verify the history it fingerprinted ({check}); its "
-                f"fingerprint {studied} is not compared")
-    if studied != fingerprint:
-        return ("history rewritten",
-                f"the history{through} differs from the one the priors were studied on "
-                f"({studied}): a revised or missing series in rows the priors depend on")
-    return "same history", f"the history{through} the priors were studied on ({studied})"
+#: The engines graded on the System page, in reading order: key in the
+#: ``edges`` session dict → (display name, what is graded).
+_EDGE_ROWS = (
+    ("mula", "Mūla", "the valuation call (oscillator lean)"),
+    ("swayam", "Swayam", "net breadth (oversold − overbought)"),
+    ("composite", "Convergence", "the learned weighted composite"),
+)
 
 
-def _render_run(target: str) -> None:
-    """d*, h and L, the epoch and the history's fingerprint — read off the bundle."""
-    ss = st.session_state
-    asof, h, lag = ss.get("asof"), ss.get("horizon"), ss.get("exec_lag")
-    epoch, fp = ss.get("epoch"), str(ss.get("fingerprint") or "")
-    flag, flag_sub = _history_flag(ss.get("priors_meta") or {}, target, fp)
-    upto = ((ss.get("priors_meta") or {}).get("fingerprint_upto") or {}).get(target)
-    card = "system:run"
-    render_kpi_strip([
-        {"label": "As of d*", "value": f"{asof:%d %b %Y}" if asof is not None else "—",
-         "subtext": "Mūla's newest published session: every verdict input is read here",
-         "card": card},
-        {"label": "Horizon", "value": f"{h}D" if h is not None else "—",
-         "subtext": f"from the close {lag} session(s) after d* (EXECUTION_LAG)", "card": card},
-        {"label": "Analysis epoch", "value": f"{epoch:%d %b %Y}" if epoch is not None else "—",
-         "subtext": "the fixed first session of every history", "card": card},
-        {"label": "History fingerprint", "value": fp or "—",
-         "subtext": (f"content hash of the prepared rows through {upto}, the session the priors "
-                     f"study recorded" if upto else "content hash of the settled prepared rows"),
-         "card": card},
-        {"label": "Against the priors", "value": flag, "subtext": flag_sub, "card": card,
-         "color_class": "warning" if flag == "history rewritten" else "neutral"},
-    ], max_cols=5, key="system-run")
-
-
-def _render_priors() -> None:
-    """The pooled-prior study's provenance, or that it has not run."""
-    pm = st.session_state.get("priors_meta") or {}
-    card = "system:priors"
-    if pm.get("status") == "refused":
-        render_kpi_strip([
-            {"label": "Pooled priors", "value": "priors file refused",
-             "subtext": f"{pm.get('refusal')} · every grade is the instrument's own",
-             "card": card},
-        ], max_cols=1, key="system-priors")
+def _render_edges(edges: dict, horizon: int) -> None:
+    """Every engine's walk-forward edge, side by side, graded one way."""
+    rows, bars = [], []
+    for key, name, what in _EDGE_ROWS:
+        e = (edges or {}).get(key) or {}
+        ic = e.get("ic")
+        tier, chip = edge_tier(ic)
+        pos, nb = edge_periods(e)
+        rows.append({
+            "Engine": name, "Graded": what,
+            "IC": f"{ic:+.3f}" if ic is not None and np.isfinite(ic) else "—",
+            "± SE": f"{e['se']:.3f}" if e.get("se") is not None and np.isfinite(e.get("se")) else "—",
+            "Calls": int(e.get("n", 0) or 0),
+            "Periods +": f"{pos}/{nb}" if nb else "—",
+            "Read": chip,
+        })
+        for b in e.get("blocks") or []:
+            if b.get("ic") is not None and np.isfinite(b.get("ic")):
+                bars.append((name, f"{str(b.get('start'))[:7]}", b.get("ic")))
+    if not any(r["IC"] != "—" for r in rows):
+        render_empty_state(
+            "Nothing graded yet",
+            "The walk-forward edges need roughly a year of published history past each "
+            "engine's warm-up before a non-overlapping read exists.",
+            eyebrow="System",
+        )
         return
-    if pm.get("status") != "loaded":
-        render_kpi_strip([
-            {"label": "Pooled priors", "value": "study not yet run",
-             "subtext": f"{pm.get('label', 'no pooled prior')} · POOLED_PRIOR "
-                        f"{knobs.KNOBS['POOLED_PRIOR'].value or 'unset'}", "card": card},
-        ], max_cols=1, key="system-priors")
-        return
-    render_kpi_strip([
-        {"label": "Study", "value": str(pm.get("study") or "—"),
-         "subtext": f"run {pm.get('run_date') or '—'} · {pm.get('label') or ''}", "card": card},
-        {"label": "Script SHA-256", "value": str(pm.get("sha") or "—")[:12],
-         "subtext": f"git {str(pm.get('git_sha') or '—')[:10]}", "card": card},
-        {"label": "Studied at", "value": f"h {pm.get('h', '—')} · L {pm.get('exec_lag', '—')}",
-         "subtext": "a file studied at another h or L is refused", "card": card},
-        {"label": "Knobs registry",
-         "value": ("as studied" if pm.get("knobs_match") else
-                   "not recorded" if pm.get("knobs_match") is None else "differs"),
-         "subtext": (f"the study's {pm.get('knobs_hash') or '—'} · this registry's "
-                     f"{pm.get('knobs_hash_now') or '—'}"
-                     + ("" if pm.get("knobs_match") is not False else
-                        ": its numbers were measured under another registry — re-run the study")),
-         "color_class": "warning" if pm.get("knobs_match") is False else "neutral",
-         "card": card},
-    ], max_cols=4, key="system-priors")
+    render_table_panel(pd.DataFrame(rows), "system-edges", units=f"non-overlapping {horizon}d IC", windowed=False,
+                       label_col="Engine", max_height=200)
+    if bars:
+        fig = go.Figure()
+        colours = {"Mūla": "violet", "Swayam": "cyan", "Convergence": "accent"}
+        for name in dict.fromkeys(n for n, _p, _v in bars):
+            pts = [(p, v) for n, p, v in bars if n == name]
+            fig.add_trace(go.Bar(x=[p for p, _ in pts], y=[v for _, v in pts], name=name,
+                                 marker=dict(color=chart_color(colours.get(name, "slate")))))
+        fig.add_hline(y=0, line_color=grid_rgba(0.10), line_width=0.6)
+        fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM), barmode="group")
+        style_axes(fig, y_title="IC per period")
+        render_chart_panel(fig, "system-edge-blocks", units="IC per period, by engine", windowed=False)
+    render_note("A durable edge is positive in most periods, not large in one. With ~100–150 "
+                "non-overlapping calls the 1-SE band is roughly ±0.08–0.10 — read the IC "
+                "against it.")
 
 
-def _render_coverage(engine) -> None:
-    """The newest session's cross-section, and why any session was not valued."""
-    ts = getattr(engine, "ts_data", None)
-    if ts is None or ts.empty:
-        return
-    last = ts.iloc[-1]
-    printed, sched, admitted = (int(v) if pd.notna(v) else 0 for v in
-                                (pd.to_numeric(last[c], errors="coerce")
-                                 for c in ("NAvailable", "NScheduled", "NAdmitted")))
-    absent = list(getattr(engine, "panel_absent", []) or [])
-    reasons = ts["WithheldReason"].astype(str)
-    counts = reasons[reasons != ""].value_counts()
-    card = "system:health"
-    render_kpi_strip([
-        {"label": "Newest session · printed", "value": f"{printed} of {sched}",
-         "subtext": f"instruments whose markets were open, of {admitted} admitted", "card": card},
-        {"label": "Open and not printed", "value": str(len(absent)),
-         "subtext": (", ".join(absent[:6]) + (f" +{len(absent) - 6} more" if len(absent) > 6 else "")
-                     if absent else "none"),
-         "color_class": "warning" if absent else "neutral", "card": card},
-        {"label": "Sessions not valued", "value": str(int(counts.sum())),
-         "subtext": " · ".join(f"{k} {int(v)}" for k, v in counts.items()) or "none", "card": card},
-    ], max_cols=3, key="system-coverage")
+def render_diagnostics_tab(engine, signal, horizon: int = 10):
+    """System — edges, learner, gap statistics, data layer."""
+    render_section_header(
+        "Walk-Forward Edge — Every Engine",
+        f"Each engine's lean against the {horizon}-day forward return, on non-overlapping "
+        f"windows: the same grading every engine page shows for itself.",
+        icon="trending", accent="accent",
+    )
+    _render_edges(st.session_state.get("edges") or {}, horizon)
 
+    _render_intelligence_center()
 
-def _render_caches_and_circuits() -> None:
-    """Two-tier cache statistics and circuit-breaker state for each external service."""
-    items = []
-    for cache in all_caches():
+    render_section_header(
+        "Gap Statistics",
+        "Is Mūla's mispricing gap a valid mean-reverting spread at all? Necessary for the "
+        "valuation to mean anything; the price-side reversion read on the Mūla page is what "
+        "makes it a trade.",
+        icon="crosshair", accent="violet",
+    )
+    adf = float(signal.get("adf_pvalue", np.nan) if signal.get("adf_pvalue") is not None else np.nan)
+    kpss = float(signal.get("kpss_pvalue", np.nan) if signal.get("kpss_pvalue") is not None else np.nan)
+    stationary = bool(np.isfinite(adf) and np.isfinite(kpss) and adf < 0.05 and kpss > 0.05)
+    theta_stable = bool(signal.get("theta_stable", True))
+    c1, c2, c3 = st.columns(3, gap="small")
+    with c1:
+        hl = signal.get("ou_half_life")
+        render_metric_card("OU Half-Life (full history)",
+                           f"{float(hl):.0f}d" if hl is not None and np.isfinite(hl) else "—",
+                           "Persistence of the gap itself", "info", tooltip=TOOLTIPS["ou_half_life"])
+    with c2:
+        render_metric_card("ADF p-value", f"{adf:.3f}" if np.isfinite(adf) else "—",
+                           "Rejects a unit root if p < 0.05",
+                           "success" if np.isfinite(adf) and adf < 0.05 else "danger",
+                           tooltip=TOOLTIPS["adf_pvalue"])
+    with c3:
+        render_metric_card("KPSS p-value", f"{kpss:.3f}" if np.isfinite(kpss) else "—",
+                           "Consistent with stationarity if p > 0.05",
+                           "success" if np.isfinite(kpss) and kpss > 0.05 else "danger",
+                           tooltip=TOOLTIPS["kpss_pvalue"])
+    # Tones by EQUALITY. The chip used to test `"Stationary" in label`, which is
+    # also true of "Non-Stationary", so it was green whatever the tests said.
+    st.markdown(
+        f'<div class="chip-row">'
+        f'<span class="cr-item">Stationarity'
+        f'{render_chip("Stationary" if stationary else "Non-stationary", "success" if stationary else "warning", as_html=True)}</span>'
+        f'<span class="cr-item">\u03b8 Stability'
+        f'{render_chip("Stable" if theta_stable else "Unstable", "success" if theta_stable else "warning", as_html=True)}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 4. DATA LAYER HEALTH — cache hit rate + circuit breaker state per source
+    # ═══════════════════════════════════════════════════════════════════════
+    render_section_header(
+        "Data Layer Health",
+        "Two-tier cache statistics and circuit-breaker state for each external service.",
+        icon="database",
+        accent="cyan",
+    )
+
+    # ── Caches ────────────────────────────────────────────────────────────
+    cache_cols = st.columns(len(all_caches()))
+    for col, cache in zip(cache_cols, all_caches()):
         s = cache.stats()
         hit_pct = s["hit_rate"] * 100.0
         total = s["hits"] + s["misses"]
@@ -176,18 +189,22 @@ def _render_caches_and_circuits() -> None:
             sub = f"{s['disk_entries']} disk · last fetch {mins:.0f}m ago"
         else:
             sub = f"{s['disk_entries']} disk · no fetch this run"
-        items.append({
-            "label": f"CACHE · {s['namespace'].upper()}",
-            "value": f"{hit_pct:.0f}%" if total else "—", "subtext": sub,
-            "color_class": color_cls, "card": "system:health",
-            "tooltip": (f"{s['hits']} hits / {s['misses']} misses · "
-                        f"{s['stale_hits']} stale-fallback · "
-                        f"{s['writes']} writes · TTL {s['ttl_seconds']}s · version {s['version']}"),
-        })
-    render_kpi_strip(items, max_cols=max(1, len(items)), key="system-caches")
+        with col:
+            render_metric_card(
+                f"CACHE · {s['namespace'].upper()}",
+                f"{hit_pct:.0f}%" if total else "—",
+                sub,
+                color_cls,
+                tooltip=(
+                    f"{s['hits']} hits / {s['misses']} misses · "
+                    f"{s['stale_hits']} stale-fallback · "
+                    f"{s['writes']} writes · TTL {s['ttl_seconds']}s · version {s['version']}"
+                ),
+            )
 
-    items = []
-    for cb in all_circuits():
+    # ── Circuit Breakers ──────────────────────────────────────────────────
+    circ_cols = st.columns(len(all_circuits()))
+    for col, cb in zip(circ_cols, all_circuits()):
         st_dict = cb.get_state()
         state = st_dict["state"]
         if state == CircuitState.CLOSED.value:
@@ -204,99 +221,62 @@ def _render_caches_and_circuits() -> None:
             mins = (pd.Timestamp.now().timestamp() - last_fail) / 60.0
             sub = f"{st_dict['failure_count']} fails · last {mins:.0f}m ago"
         else:
-            sub = f"{st_dict['success_count']} successful requests"
-        items.append({
-            "label": f"CIRCUIT · {st_dict['name'].upper()}", "value": label_val, "subtext": sub,
-            "color_class": color_cls, "card": "system:health",
-            "tooltip": (f"Threshold: {st_dict['failure_threshold']} failures · "
-                        f"Recovery: {st_dict['recovery_timeout']:.0f}s · "
-                        f"OPEN blocks requests; HALF-OPEN allows 1 test request after the "
-                        f"recovery timeout."),
-        })
-    render_kpi_strip(items, max_cols=max(1, len(items)), key="system-circuits")
+            sub = f"{st_dict['success_count']} successful calls"
+        with col:
+            render_metric_card(
+                f"CIRCUIT · {st_dict['name'].upper()}",
+                label_val,
+                sub,
+                color_cls,
+                tooltip=(
+                    f"Threshold: {st_dict['failure_threshold']} failures · "
+                    f"Recovery: {st_dict['recovery_timeout']:.0f}s · "
+                    f"OPEN blocks calls; HALF-OPEN allows 1 test call after recovery timeout."
+                ),
+            )
 
 
-def _knob_value(v) -> str:
-    """A knob's value as the table prints it: a study's class summary in words, not a dict."""
-    if isinstance(v, dict) and {"mu", "se_mu", "tau", "k"} <= set(v):
-        return (f"μ {v['mu']:+.3f} ± {v['se_mu']:.3f} · τ {v['tau']:.3f} · k {int(v['k'])}"
-                + (f" · {v['asof']}" if v.get("asof") else ""))
-    if isinstance(v, tuple):
-        return ", ".join(str(x) for x in v)
-    return str(v)
+def _render_intelligence_center() -> None:
+    """What the convergence learner concluded — weights against their prior.
 
-
-def _knobs_table() -> pd.DataFrame:
-    """The KNOBS registry, one row per knob, as core.knobs declares it."""
-    return pd.DataFrame([{
-        "Knob": k.name, "Value": _knob_value(k.value), "Kind": k.kind, "Consumer": k.consumer,
-        "Horizon coupling": k.horizon_coupling,
-        "Reason or study": f"{k.study}@{k.date}" if k.kind == "measured" else k.reason,
-    } for k in knobs.KNOBS.values()]).set_index("Knob")
-
-
-def _roles_table() -> pd.DataFrame:
-    """The ROLES registry, one row per role, as core.roles declares it, with the chip
-    its kind carries at the role's own target (the call where it serves no one
-    role-holder) and how many registered cards (``CARDS``) show it."""
-    shown = pd.Series([role for role, _target in CARDS.values()]).value_counts()
-    return pd.DataFrame([{
-        "Role": r.key, "Kind": r.kind, "Serves": r.target or "—", "Title": r.title,
-        "Graded by": r.grade_key or "—",
-        "Chip": CHIPS[r.kind].split(" · ")[0].format(target=r.target or "call"),
-        "Cards": int(shown.get(r.key, 0)), "Consumer": r.consumer,
-    } for r in ROLES.values()]).set_index("Role")
-
-
-def render_diagnostics_tab(engine, target: str) -> None:
-    """System — the run's identity, the priors, the data's health, the two registries."""
+    Weights are learned forward from resolved outcomes, so there is no trial
+    count, no saved profile and no train-vs-val split to report: the weights
+    at any date ARE out-of-sample with respect to everything after it. What is
+    worth showing is where the learner ended up relative to its prior; whether
+    the composite it weights has paid is the Convergence row of the table
+    above.
+    """
     render_section_header(
-        "The Run",
-        "Which session the verdict is about, on which horizon and lag, from which fixed start, "
-        "and which history was valued.",
-        icon="target", accent="cyan", card="system:run",
+        "What the Convergence Learner Concluded",
+        "Dimension weights learned forward from each dimension's own signed skill — never "
+        "refitted on history, never persisted.",
+        icon="cpu", accent="violet",
     )
-    _render_run(target)
+    from convergence.intelligence import PRIOR_WEIGHTS
 
-    render_section_header(
-        "Pooled Priors",
-        "The catalogue study whose class priors every posterior is shrunk toward, read as "
-        "data; without it every grade is the instrument's own. Its results are on the Grades "
-        "page.",
-        icon="layers", accent="cyan", card="system:priors",
-    )
-    _render_priors()
-
-    render_section_header(
-        "Data Health",
-        "The newest session's cross-section, the sessions the engine did not value and why, "
-        "and the state of the cache and each external service.",
-        icon="database", accent="cyan", card="system:health",
-    )
-    _render_coverage(engine)
-    _render_caches_and_circuits()
-
-    render_section_header(
-        "The KNOBS Registry",
-        "Every constant that can move what Tattva issues, declared once (core.knobs): its "
-        "value, its kind, the role it moves, how it couples to the horizon, and why it is set "
-        "where it is.",
-        icon="cpu", accent="cyan", card="system:knobs",
-    )
-    render_table_panel(_knobs_table(), "system-knobs",
-                       context=f"the registry · {len(knobs.KNOBS)} knobs",
-                       windowed=False, index_label="Knob", max_height=520)
-    render_note("structural: fixed by an argument, never tuned · structural-inherited: an older "
-                "value kept without a study behind it, not evidence · measured: set by a "
-                "committed study, named with its run date.")
-
-    render_section_header(
-        "The Roles",
-        "What every part of the decision is for (core.roles): the role it plays, the "
-        "role-holder it serves or audits, the grade that grades it, the chip every card of it "
-        "carries, how many cards show it, and what reads it.",
-        icon="grid", accent="cyan", card="system:roles",
-    )
-    render_table_panel(_roles_table(), "system-roles",
-                       context=f"the registry · {len(ROLES)} roles · {len(CARDS)} cards",
-                       windowed=False, index_label="Role", max_height=520)
+    weights = st.session_state.get("intelligence_active_weights") or {}
+    names = [k for k in PRIOR_WEIGHTS if k in weights]
+    if not names:
+        render_empty_state(
+            "No learned weights",
+            "The learner needs enough sessions where both engines published to score its "
+            "dimensions; until then the prior weights stand.",
+            eyebrow="System",
+        )
+        return
+    learned = [float(weights[k]) for k in names]
+    prior = [float(PRIOR_WEIGHTS[k]) for k in names]
+    labels = [k.capitalize() for k in names]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=labels, y=prior, name="Prior",
+                         marker=dict(color=chart_rgba("slate", 0.45))))
+    fig.add_trace(go.Bar(x=labels, y=learned, name="Learned",
+                         marker=dict(color=chart_color("accent"))))
+    fig.update_layout(**chart_layout(height=260), barmode="group")
+    style_axes(fig, y_title="weight")
+    render_chart_panel(fig, "intel_weights_plot", units="weight today", windowed=False)
+    _moved = max((abs(l - p) for l, p in zip(learned, prior)), default=0.0)
+    _top = labels[int(np.argmax(learned))]
+    _learned = bool((st.session_state.get("intelligence_active_profile") or {}).get("learned", True))
+    render_note(f"Largest move from prior {_moved:+.3f} · heaviest dimension {_top}"
+                + ("" if _learned else " · learning skipped this run (too little overlap) — prior shown"))

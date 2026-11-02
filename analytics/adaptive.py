@@ -4,9 +4,9 @@ Tattva — the adaptive layer: constants replaced by causal online estimates.
 
 Every quantity this module produces used to be a hand-set number in
 ``core.config``: a classification cut-point ("STRONG BUY below −0.404"), a
-display tier ("model spread above 29.92 bps is red"). Between them they
-carried much of the system's behaviour, and they had two problems that turn
-out to be the same problem.
+display tier ("model spread above 29.92 bps is red"), a dimension weight
+("direction counts 0.50"). Between them they carried most of the system's
+behaviour, and they had two problems that turn out to be the same problem.
 
 **They had to be tuned.** Each one was anchored by a research study that swept
 it over the full history and read off a p75 or an argmax. That is a lot of
@@ -24,29 +24,31 @@ which is precisely what the Optuna calibration this module replaced was doing.
 
 The fix for both is one idea, and it is the idea the FVO valuation engine
 already runs on: **estimate, don't tune, and estimate one-sidedly.** A
-threshold becomes the causal empirical quantile of the signal's own past.
-Nothing is fitted to data that had not happened yet, so a value published on
-day *t* is never revised, and the same input prefix always produces the same
-output prefix — the reproducibility property the test suite asserts.
+threshold becomes the causal empirical quantile of the signal's own past. A
+weight becomes the exponentially-discounted predictive skill of the thing being
+weighted, accumulated forward. Nothing is fitted to data that had not happened
+yet, so a value published on day *t* is never revised, and the same input
+prefix always produces the same output prefix — the reproducibility property
+the test suite asserts.
 
-What this deliberately does NOT auto-derive: the horizon
-(``forecast_horizon``) is a product decision about what you intend to trade,
-not a statistical estimate; the FVO burn-in and print floor are estimability
+What this deliberately does NOT auto-derive: horizons (``forecast_horizon``,
+``precedent_horizons``) are product decisions about what you intend to trade,
+not statistical estimates; the FVO burn-in and print floor are estimability
 floors argued from first principles; and the view/discount *banks* stay
 declared, because a bank is a hypothesis space to average over, not a value to
 pick. The distinction throughout is between choosing a number and choosing a
-question. (An online skill-weighter of view banks lived here too; its
-sign-hit loss rewarded the drift side, it added no measurable IC over equal
-weights, and it went with the learners it served.)
+question.
 
-What remains is the primitive the valuation's conformal band reads
-(``engines/mula/valuation.py``). The display tiers this module also computed
-for the pages (``adaptive_tiers`` / ``tier_now``: quantile cuts that coloured
-a reading by its own history rather than by any grade) went with the
-readings they coloured.
+References
+----------
+Raftery, A. E., Kárný, M. & Ettler, P. (2010). "Online Prediction Under Model
+    Uncertainty via Dynamic Model Averaging." *Technometrics* 52(1).
+Cesa-Bianchi, N. & Lugosi, G. (2006). *Prediction, Learning, and Games.*
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 
@@ -56,9 +58,15 @@ import numpy as np
 # which pointed the dependency the wrong way — analytics is the layer engines
 # are built ON, so anything in it importing from an engine is a cycle waiting
 # to happen, and duly was.
-from analytics.causal import ExpandingRank
+from analytics.causal import EPS, ExpandingRank
 
-__all__ = ["AdaptiveThreshold"]
+__all__ = [
+    "AdaptiveThreshold",
+    "OnlineSkillWeights",
+    "adaptive_tiers",
+    "tier_now",
+    "expanding_quantile_series",
+]
 
 
 class AdaptiveThreshold:
@@ -112,3 +120,198 @@ class AdaptiveThreshold:
     @property
     def n(self) -> int:
         return self._rank.n
+
+
+class OnlineSkillWeights:
+    """Weight a bank of views by their exponentially-discounted predictive skill.
+
+    Each member proposes a signed signal; some time later the outcome arrives.
+    A member's weight is driven by the sign agreement between what it said and
+    what happened, accumulated with a forgetting factor so a view that has
+    stopped working fades instead of being averaged over forever.
+
+    Why sign agreement and not squared error: the members here are oscillators
+    on different scales (an MSF at a 8-day lookback and one at 52 days do not
+    produce comparable magnitudes), and the decision the system takes from them
+    is directional. Scoring magnitude would mostly rank the members by their
+    volatility. This is the same reason the system reports rank IC rather than
+    R² for a directional signal.
+
+    Weights are a softmax over each member's discounted MEAN agreement, scaled
+    by the square root of its effective sample size. That scaling is the whole
+    design and it is worth being explicit about, because the obvious
+    alternative is wrong: accumulating a running SUM of per-round evidence (the
+    textbook dynamic-model-averaging recursion) makes the log-weight gap grow
+    like ``mean_edge / (1 - lambda)``, which at a 252-day half-life is a factor
+    of ~364. A member hitting a thoroughly ordinary 55% of calls against
+    another's 45% would then be weighted ~e^36 higher — total collapse onto one
+    view off a difference that is not close to significant.
+
+    Scaling the mean by ``sqrt(n_eff)`` instead means the weight gap tracks the
+    *t-statistic* of the skill difference rather than the raw round count, so
+    concentration requires evidence rather than merely time. ``kappa`` sets how
+    many nats one standard error of edge is worth.
+
+    Weights are floored so no member is ever fully silenced — a bank that
+    collapses onto one view has stopped being an ensemble, and the member that
+    looks worst over one regime is often the one that carries the next.
+    """
+
+    __slots__ = ("names", "_abar", "_wsum", "_wsq", "lam", "floor", "kappa",
+                 "_n_scored")
+
+    def __init__(self, names: list[str], halflife: float = 252.0,
+                 floor: float = 0.02, kappa: float = 0.5) -> None:
+        self.names = list(names)
+        self._abar = np.zeros(len(self.names))   # discounted MEAN agreement
+        self._wsum = 0.0                          # sum of discount weights
+        self._wsq = 0.0                           # sum of squared weights
+        self.lam = math.exp(-math.log(2.0) / max(float(halflife), 1.0))
+        self.floor = float(floor)
+        self.kappa = float(kappa)
+        self._n_scored = 0
+
+    @property
+    def effective_obs(self) -> float:
+        """Kish effective sample size of the discounted evidence."""
+        return float(self._wsum ** 2 / self._wsq) if self._wsq > EPS else 0.0
+
+    def weights(self) -> np.ndarray:
+        """Current weights — a function of evidence absorbed so far only."""
+        n = len(self._abar)
+        if not n:
+            return np.array([])
+        logw = self.kappa * math.sqrt(max(self.effective_obs, 0.0)) * self._abar
+        w = np.exp(logw - logw.max())
+        w = w / max(w.sum(), EPS)
+        if self.floor > 0:
+            # Mix with uniform rather than clipping-then-renormalising: the
+            # latter pushes the clipped members back BELOW the floor when the
+            # sum is rescaled, so the floor it advertises would not hold. This
+            # form gives w_i >= floor exactly, and sums to 1 by construction.
+            k = min(self.floor * n, 1.0)
+            w = (1.0 - k) * w + k / n
+        return w
+
+    def observe(self, signals: np.ndarray, outcome: float) -> None:
+        """Absorb one scored round: what each member said, and what happened.
+
+        ``signals`` is the members' signed calls at the decision time,
+        ``outcome`` the realised signed move over the horizon. Non-finite or
+        flat entries score neutral rather than being punished — an abstaining
+        view is not a wrong view.
+        """
+        if not np.isfinite(outcome) or outcome == 0.0:
+            return
+        s = np.asarray(signals, dtype=np.float64)
+        if s.shape != self._abar.shape:
+            return
+        agree = np.sign(s) * np.sign(outcome)
+        agree = np.where(np.isfinite(agree), agree, 0.0)
+        # Discounted mean: abar <- (lam*wsum*abar + agree) / (lam*wsum + 1)
+        prev_w = self.lam * self._wsum
+        new_w = prev_w + 1.0
+        self._abar = (prev_w * self._abar + agree) / new_w
+        self._wsum = new_w
+        self._wsq = (self.lam ** 2) * self._wsq + 1.0
+        self._n_scored += 1
+
+    @property
+    def n_scored(self) -> int:
+        return self._n_scored
+
+
+def expanding_quantile_series(
+    values: np.ndarray, q: float, min_obs: int = 252,
+    fallback: float | None = None,
+) -> np.ndarray:
+    """Batch causal expanding quantile: out[t] = quantile(values[:t], q).
+
+    Note the exclusive slice — the threshold at *t* is built from values
+    STRICTLY before *t*, so a point is never compared against a distribution it
+    is itself a member of. Rows before ``min_obs`` take ``fallback`` (or NaN).
+
+    This is the batch form of :class:`AdaptiveThreshold` and it is implemented
+    by literally running that class, so the two agree by construction rather
+    than by inspection. A pandas ``.expanding().quantile()`` would be faster
+    but uses linear interpolation between order statistics where
+    ``ExpandingRank`` uses nearest-rank; the two disagree by ~1e-2 on a unit-
+    variance signal, which is enough to move a classification near a cut-point.
+    One definition of "the p90 of the past" is worth more than the speed.
+    """
+    v = np.asarray(values, dtype=np.float64)
+    n = len(v)
+    out = np.full(n, np.nan if fallback is None else float(fallback))
+    if n == 0:
+        return out
+    fb = np.nan if fallback is None else float(fallback)
+    thr = AdaptiveThreshold(min_obs=min_obs)
+    for t in range(n):
+        out[t] = thr.quantile(q, fallback=fb)
+        thr.update(v[t])
+    return out
+
+
+def adaptive_tiers(
+    values: np.ndarray,
+    priors: dict[str, float],
+    quantiles: dict[str, float] | None = None,
+    min_obs: int = 252,
+) -> dict[str, np.ndarray]:
+    """Per-row tier levels on ``|values|``, each from that row's own past.
+
+    ``priors`` maps a tier name to the constant that used to BE that tier; the
+    same keys come back mapped to arrays. ``quantiles`` says which quantile of
+    the absolute signal each tier represents — defaulting to the p90/p75/p50
+    convention the hand-set constants were anchored to, so an instrument with
+    a distribution like the pooled one lands in the same place the constant
+    did, and one with a different distribution does not.
+
+    This is the batch primitive behind every classification the system
+    publishes. Because each row's level is built from strictly earlier rows,
+    re-running on more data cannot move a label that was already published.
+    """
+    q = {"strong": 0.90, "moderate": 0.75, "weak": 0.50}
+    if quantiles:
+        q.update(quantiles)
+    a = np.abs(np.asarray(values, dtype=np.float64))
+    out = {
+        name: expanding_quantile_series(a, q.get(name, 0.75), min_obs,
+                                        fallback=float(prior))
+        for name, prior in priors.items()
+    }
+    # Enforce the tier ordering. Quantiles of one sample are monotone in q by
+    # construction, but a row where one tier fell back to its prior and another
+    # did not can invert — and an inverted pair is not a degraded
+    # classification, it is an incoherent one (a reading simultaneously above
+    # "strong" and below "weak"). Ordered high→low, each tier held at or below
+    # the one above it.
+    ordered = sorted(out, key=lambda k: -q.get(k, 0.75))
+    for hi, lo in zip(ordered, ordered[1:]):
+        out[lo] = np.minimum(out[lo], out[hi])
+    return out
+
+
+def tier_now(
+    values: np.ndarray,
+    prior: float,
+    q: float = 0.90,
+    min_obs: int = 252,
+) -> float:
+    """The tier level as of the LAST row — built from everything before it.
+
+    For display code that colours a single current reading. Falls back to
+    ``prior`` while history is short. Kept separate from
+    :func:`adaptive_tiers` because a card needs one number, not a column, and
+    routing it through the array form would invite someone to index ``[-1]``
+    of a series that included the very value being classified.
+    """
+    a = np.abs(np.asarray(values, dtype=np.float64))
+    a = a[np.isfinite(a)]
+    if len(a) < min_obs:
+        return float(prior)
+    thr = AdaptiveThreshold(min_obs=min_obs)
+    for v in a[:-1]:          # strictly prior to the value being classified
+        thr.update(v)
+    # quantile() already refuses a degenerate (non-positive) estimate.
+    return float(thr.quantile(q, fallback=float(prior)))

@@ -3,8 +3,9 @@
 मूल — "root". Prices the target against the level the global macro
 cross-section implies: a recursive cointegrating regression of log price on
 the integrated factors and asset-class blocks of ~200 instruments. Its gap is
-read three ways — the oscillator (the claim), the gap's persistence, and the
-error-correction read of whether PRICE closes it (``ecm.py``).
+read four ways — the oscillator (the claim), the gap's persistence, the
+error-correction read of whether PRICE closes it (``ecm.py``), and the
+agreement of independent slices of the world on its sign.
 
 Public surface:
     MulaEngine        — the engine (valuation + error-correction read)

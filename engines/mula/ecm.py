@@ -23,10 +23,8 @@ is going anywhere. This module asks the price-side question directly.
    differenced ones). Published:
 
      MulaKappa     κ̂ = -b, per session, log units. Positive ⇒ price reverts.
-     MRProb        P(κ̂ > 0) under the coefficient posterior — the evidence,
-                   not the point estimate, that price responds at all. The
-                   reversion sizer's reading (z = 2·MRProb − 1), graded like
-                   any sizer and ×1.00 while unskilled.
+     MulaRevProb   P(κ̂ > 0) under the coefficient posterior — the evidence,
+                   not the point estimate, that price responds at all.
      MulaHalfLife  ln2 / -ln(1-κ̂): how long price alone would take to close
                    half the gap, if fair value stood still. NaN when κ̂ ≤ 0.
 
@@ -38,11 +36,7 @@ is going anywhere. This module asks the price-side question directly.
 
    — MulaDriftPct, in percent, signed like the move itself (negative when the
    asset is rich and price reverts). MulaSdPct is the h-session predictive SD
-   it should be read against. It is the GAP-IMPLIED move only: the ECM's
-   intercept ``a`` (the drift, h·a over the horizon) is deliberately left
-   out, so it is published and graded as 'the gap-implied h-session move
-   (excludes drift)', evidence about the reversion sizer, never as the
-   expected move.
+   it should be read against.
 
    The previous implementation published ``-b · z_{t-1}`` with the geometric
    sum taken over ``b`` itself (≈ -0.007, so the sum was ≈ 1): the opposite
@@ -58,23 +52,17 @@ is going anywhere. This module asks the price-side question directly.
        VALUATION-led : {1, z_{t-1}}
        MOMENTUM-led  : {1, r_{t-1}}          (r = one-session log return)
        FULL          : {1, z_{t-1}, Δz_{t-1}, r_{t-1}}
-   The pooled one-step predictive is what MulaSdPct scales to h sessions.
-   Each family is scored by its MIXTURE predictive density (the same
-   ``_mix_ll`` the level regression's two views are scored by), not by the
-   mean of its members' densities. (The pool weights themselves used to be
-   published as a 'valuation-led weight'; no part of the call read them, and
-   they are no longer published.)
+   WValuation + WFull — the weight on every design that lets the gap move
+   price — is the honest answer to "is valuation informative today?": learned
+   forward, never persisted, never refitted on history. Each family is scored
+   by its MIXTURE predictive density (the same ``_mix_ll`` the level
+   regression's two views are scored by), not by the mean of its members'
+   densities.
 
 Each family is a discounted-DLM bank over a grid of memories, so coefficients
 are time-varying with data-selected adaptation and every one-step predictive
 is Student-t. All regressors are dated t-1; everything published at t uses
 data through t and nothing later.
-
-Only TRUSTED sessions are absorbed (``step``). A provisional session — today's,
-still filling — is never learned from: ``read`` publishes its value from the
-state as of the last absorbed session, with its own gap used only to project
-the move. The live κ̂ and MRProb are therefore estimated on the same population
-the graded history was.
 """
 
 from __future__ import annotations
@@ -116,7 +104,9 @@ _POOL_ALPHA = 0.99
 WARMUP = 126
 
 #: Published columns, in order.
-COLUMNS: tuple[str, ...] = ("MRProb", "MulaKappa", "MulaHalfLife", "MulaDriftPct", "MulaSdPct")
+COLUMNS: tuple[str, ...] = ("MulaKappa", "MulaRevProb", "MulaHalfLife",
+                            "MulaDriftPct", "MulaSdPct",
+                            "WValuation", "WMomentum", "WFull")
 
 
 def _softmax_pool(logw: np.ndarray) -> np.ndarray:
@@ -144,7 +134,7 @@ def gap_closure_sum(phi_z: float, horizon: int) -> float:
 class MulaLayer:
     """Causal ECM + expert-pooling read on an existing equilibrium gap."""
 
-    def __init__(self, horizon: int, grid: tuple = _ECM_GRID) -> None:
+    def __init__(self, horizon: int = 10, grid: tuple = _ECM_GRID) -> None:
         self.h = max(int(horizon), 1)
         g = tuple(float(x) for x in grid)
         self.val = DynamicModelAverage(k=2, grid=g)    # {1, z_lag}
@@ -220,37 +210,7 @@ class MulaLayer:
         if self.n < WARMUP:
             self.skip()
             return
-        self._publish(preds, vars_, w, sz, sp, z_now, phi_z)
 
-    def read(self, z_lag: float, dz_lag: float, r_lag: float,
-             z_now: float, phi_z: float) -> None:
-        """Publish a session WITHOUT absorbing it — the provisional read.
-
-        Same arguments as :meth:`step` less the outcome: the one-step
-        predictive is taken from the state as of the last absorbed session, the
-        pool weights and κ̂ are that state's, and ``z_now`` only sets where the
-        h-session projection starts. Nothing is updated, so a forming session
-        can never become part of the history the read is estimated on.
-        """
-        if (not all(np.isfinite(v) for v in (z_lag, r_lag))
-                or self._sd_p.n < _SCALE_WARMUP or self.n < WARMUP):
-            self.skip()
-            return
-        sz = max(self._sd_z.mean, _SCALE_FLOOR)
-        sr = max(self._sd_r.mean, _SCALE_FLOOR)
-        sp = max(self._sd_p.mean, _SCALE_FLOOR)
-        dzs = (dz_lag / sz) if np.isfinite(dz_lag) else 0.0
-        preds, vars_ = np.empty(3), np.empty(3)
-        for i, (fam, f) in enumerate((
-                (self.val, np.array([1.0, z_lag / sz])),
-                (self.mom, np.array([1.0, r_lag / sr])),
-                (self.full, np.array([1.0, z_lag / sz, dzs, r_lag / sr])))):
-            preds[i], vars_[i] = fam.forecast(f)
-        self._publish(preds, vars_, _softmax_pool(self.ll), sz, sp, z_now, phi_z)
-
-    def _publish(self, preds: np.ndarray, vars_: np.ndarray, w: np.ndarray,
-                 sz: float, sp: float, z_now: float, phi_z: float) -> None:
-        """Append one session's read from the layer's current coefficients."""
         # ── the price-side response, in log-price units ──────────────────
         b_std = float(self.val.coef[1])
         b_var = float(self.val.coef_var[1])
@@ -276,10 +236,13 @@ class MulaLayer:
         sd_h_pct = math.sqrt(max(var1, 1e-18)) * sp * math.sqrt(self.h) * 100.0
 
         self.out["MulaKappa"].append(kappa)
-        self.out["MRProb"].append(rev_prob)
+        self.out["MulaRevProb"].append(rev_prob)
         self.out["MulaHalfLife"].append(half_life)
         self.out["MulaDriftPct"].append(drift_pct)
         self.out["MulaSdPct"].append(sd_h_pct)
+        self.out["WValuation"].append(float(w[0]))
+        self.out["WMomentum"].append(float(w[1]))
+        self.out["WFull"].append(float(w[2]))
 
     def _absorb_scales(self, z_lag: float, r_lag: float, dp_now: float) -> None:
         self._sd_z.update(abs(z_lag))

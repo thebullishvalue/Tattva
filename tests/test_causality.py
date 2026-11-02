@@ -1,31 +1,19 @@
-"""The engine never looks ahead, and neither does the call built on it — asserted.
+"""The engine never looks ahead, and it is asserted.
 
 Every published value is a function of data available at its own date, so
 fitting on data[:T] and on data[:T−k] must agree EXACTLY on every shared date.
 A component that consulted the future cannot pass this; a component that
 quietly stopped producing anything cannot either (the all-NaN check).
-
-The call (call_ts: the composer at every session, with its as-of grades) is
-held to the same rule on every session whose outcome had resolved by T.
 """
-from functools import lru_cache
-
 import numpy as np
 import pandas as pd
 
-from core.call import CALL_COLUMNS
 from core.config import InstrumentConfig
-from core.instruments import instrument
-from core.knobs import knob
-from core.semantics import breadth_lean, valuation_state
 from engines.mula import MulaEngine
-from engines.mula.base import PUBLISHED_COLUMNS
-from pipeline.assemble import assemble
 
-#: Every published column the truncation test holds to "never rewritten":
-#: all of Mūla's frame (engines.mula.base.PUBLISHED_COLUMNS) but the two text
-#: and flag columns it compares separately.
-COLS = tuple(c for c in PUBLISHED_COLUMNS if c not in ("WithheldReason", "Provisional"))
+COLS = ("FairValue", "FVO", "ModelSpread", "MRProb", "Confidence", "XSConsistency",
+        "MulaKappa", "MulaDriftPct", "MulaSdPct", "WValuation", "ConvictionBounded",
+        "OversoldBreadth")
 
 
 def _panel(T=1100, n=48, k=3, seed=11):
@@ -42,24 +30,18 @@ def _panel(T=1100, n=48, k=3, seed=11):
     return tgt, expl
 
 
-@lru_cache(maxsize=None)
-def _fitted(cut: int) -> MulaEngine:
-    """The engine fitted on the synthetic panel less its last ``cut`` sessions."""
-    tgt, expl = _panel()
-    if cut:
-        tgt, expl = tgt.iloc[:-cut], expl.iloc[:-cut]
+def _fit(tgt, expl):
     eng = MulaEngine()
     eng.fit(tgt, expl, feature_names=list(expl.columns), config=InstrumentConfig())
-    return eng
+    return eng.ts_data
 
 
 def test_truncation_never_rewrites_history():
-    full = _fitted(0).ts_data
-    part = _fitted(200).ts_data
+    tgt, expl = _panel()
+    full = _fit(tgt, expl)
+    cut = 200
+    part = _fit(tgt.iloc[:-cut], expl.iloc[:-cut])
     n = len(part)
-    assert list(full.columns) == list(PUBLISHED_COLUMNS)
-    assert (full["WithheldReason"].iloc[:n].to_numpy() == part["WithheldReason"].to_numpy()).all()
-    assert (full["Provisional"].iloc[:n].to_numpy() == part["Provisional"].to_numpy()).all()
     for col in COLS:
         a = full[col].to_numpy(dtype=float)[:n]
         b = part[col].to_numpy(dtype=float)
@@ -70,38 +52,10 @@ def test_truncation_never_rewrites_history():
 
 
 def test_latest_reading_is_never_a_coerced_zero():
-    eng = _fitted(0)
+    tgt, expl = _panel()
+    eng = MulaEngine()
+    eng.fit(tgt, expl, feature_names=list(expl.columns), config=InstrumentConfig())
     sig = eng.get_current_signal()
-    assert np.isfinite(sig["fvo"]) and sig["asof"] == eng.asof
-    assert valuation_state(sig["fvo"]) in ("VERY CHEAP", "CHEAP", "FAIR", "RICH", "VERY RICH")
-
-
-def _call_ts(cut: int) -> pd.DataFrame:
-    """call_ts on the engine fitted without the last ``cut`` sessions, with a
-    synthetic Swayam read (some sessions carried) on the same dates."""
-    tgt, _ = _panel()
-    dates = tgt.index[:len(tgt) - cut]
-    rng = np.random.default_rng(5)
-    lean = np.clip(rng.normal(0, 0.4, len(tgt)), -1, 1)
-    os_, ob_ = np.clip(100 * lean, 0, None), np.clip(-100 * lean, 0, None)
-    sw = pd.DataFrame({"Oversold_Pct": os_, "Overbought_Pct": ob_,
-                       "Lean": [breadth_lean(a, b) for a, b in zip(os_, ob_)],
-                       "_Native": rng.uniform(size=len(tgt)) > 0.05}, index=tgt.index).loc[dates]
-    eng = _fitted(cut)
-    fvo_ts = eng.ts_data.copy()
-    fvo_ts.index = dates
-    return assemble(fvo_ts, sw, instrument=instrument("Gold"), cfg=InstrumentConfig(),
-                    asof=eng.asof, today=dates[-1], priors=None).call_ts
-
-
-def test_the_call_never_rewrites_a_resolved_session():
-    full, part = _call_ts(0), _call_ts(200)
-    h, lag = InstrumentConfig().forecast_horizon, knob("EXECUTION_LAG")
-    resolved = part.index[:len(part) - (lag + h)]            # outcome known by the cut
-    assert (part.loc[resolved, "d"] != 0).any() and np.isfinite(part["claim_t"]).any()
-    for col in CALL_COLUMNS:
-        a, b = full.loc[resolved, col], part.loc[resolved, col]
-        if pd.api.types.is_float_dtype(a):
-            assert np.array_equal(a.to_numpy(), b.to_numpy(), equal_nan=True), col
-        else:
-            assert all(x == y or (pd.isna(x) and pd.isna(y)) for x, y in zip(a, b)), col
+    assert np.isfinite(sig["fvo"])
+    assert sig["valuation_state"] in ("VERY CHEAP", "CHEAP", "FAIR", "RICH", "VERY RICH")
+    assert sig["regime"] == sig["valuation_state"]

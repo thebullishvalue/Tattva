@@ -1811,6 +1811,20 @@
     color: var(--ink) !important;
     transition: border-color var(--fast) var(--ease) !important;
 }
+/* BaseWeb's wrapper draws its OWN border and fill around the input, from
+   Streamlit's static native theme — with that theme fixed dark (one [theme]
+   section), the wrapper painted a graphite box around the input on Paper. The
+   wrapper becomes transparent and borderless so the input's own token border is
+   the only one, and the placeholder takes the quaternary ink in both appearances
+   (the same rule Nishkarsh and Nivesa carry). */
+.stTextInput [data-baseweb="input"], .stNumberInput [data-baseweb="input"],
+.stTextInput [data-baseweb="base-input"], .stNumberInput [data-baseweb="base-input"] {
+    background: transparent !important;
+    border-color: transparent !important;
+}
+.stTextInput input::placeholder, .stNumberInput input::placeholder {
+    color: var(--ink-quaternary) !important; opacity: 1;
+}
 .stSelectbox [data-baseweb="select"] > div:hover,
 .stTextInput input:hover, .stNumberInput input:hover {
     border-color: var(--ink-quaternary) !important;

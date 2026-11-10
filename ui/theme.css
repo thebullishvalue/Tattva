@@ -2487,3 +2487,9 @@
     .hero-signal, .metric-card .value, .metric-card h2,
     .command-bar .cb-instrument .sym, .command-bar .cb-quote .px { color: #000; }
 }
+
+/* ── Native widgets painted from tokens, not Streamlit's theme ──────────── */
+/* The tab strip's overflow fade is Streamlit's own `.stTabs::after`, a gradient
+   into the NATIVE theme's background — near-black on Paper while the native
+   layer is dark. Painted from our page token in both appearances. */
+.stTabs::after { background-image: linear-gradient(to right, transparent, var(--bg)) !important; }

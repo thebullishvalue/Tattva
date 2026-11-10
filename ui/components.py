@@ -84,8 +84,14 @@ def get_icon(name: str, size: int = 18, stroke_width: float | None = None) -> st
 
     # Strip whatever the literal declared, so the result cannot inherit a
     # per-icon weight or terminal style.
+    # Only on the outer <svg> tag: <rect> carries its own width/height, and
+    # stripping those drew the cpu / grid / briefcase icons blank or dotted.
+    head, sep, body = base_svg.partition(">")
     for attr in ("width", "height", "stroke-width", "stroke-linecap", "stroke-linejoin"):
-        base_svg = re.sub(rf'\s+{attr}="[^"]*"', "", base_svg)
+        head = re.sub(rf'\s+{attr}="[^"]*"', "", head)
+    for attr in ("stroke-width", "stroke-linecap", "stroke-linejoin"):
+        body = re.sub(rf'\s+{attr}="[^"]*"', "", body)
+    base_svg = head + sep + body
 
     sw = ICON_STROKE if stroke_width is None else min(float(stroke_width), 1.75)
     return base_svg.replace(
@@ -1578,6 +1584,7 @@ def render_data_table(
 
     n_rows = len(view)
     _HEADER_H = 30                      # sticky header row, matches the CSS above
+    _pad_v = max(0.0, (row_height - 17.5) / 2)   # 16.5px line box + 1px row rule
     content_h = _HEADER_H + n_rows * row_height + 4
     iframe_h = min(content_h, max_height)
 
@@ -1623,7 +1630,11 @@ def render_data_table(
                 transition:background 120ms cubic-bezier(0.2,0,0,1); }}
     tbody tr:last-child {{ border-bottom:none; }}
     tbody tr:hover {{ background:{t['accent_hover']}; }}
-    tbody td {{ padding:0.4rem 0.75rem; color:{t['ink_primary']}; font-size:0.6875rem;
+    /* Vertical padding is derived from row_height so a row really is
+       row_height tall (11px x 1.5 line + 1px rule + 2 x pad) — a fixed 0.4rem
+       pad rendered ~30px rows against a 27px budget and clipped the last row
+       of every short table. */
+    tbody td {{ padding:{_pad_v}px 0.75rem; color:{t['ink_primary']}; font-size:0.6875rem;
                 line-height:1.5; vertical-align:middle; white-space:nowrap; }}
     tbody td.num {{ text-align:right; }}
     tbody td.lbl {{ font-weight:600; color:{t['ink_primary']}; }}
@@ -1634,7 +1645,10 @@ def render_data_table(
     <tbody>{''.join(body_rows)}</tbody>
     </table></div></body></html>"""
 
-    _components_html(table_html, height=iframe_h, scrolling=False)
+    # +8: the panel pads the table's element container by --s2 (8px) under its
+    # header (theme.css); the container's height is the one given here, so the
+    # padding must be added to it or it comes out of the table.
+    _components_html(table_html, height=iframe_h + 8, scrolling=False)
 
 
 def render_warning_box(title: str, content: str) -> None:

@@ -9,6 +9,23 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [2.8.1] — 2026-11-10 — *Layout fixes*
+
+### Fixed
+- **iPad portrait: a blank strip when the rail is collapsed.** At 1024px and below, the
+  narrow-rail floor (200px) also held the collapsed sidebar's slot in the layout. It now applies
+  only while the rail is open.
+- **Icons drawn from `<rect>`** (cpu, grid, briefcase — e.g. "Model Quality", "What the
+  Convergence Learner Concluded") rendered blank or dotted: icon normalisation stripped
+  width/height from inner elements, not only the outer `<svg>`.
+- **Rows of columns stopped 16px short** of the panels around them (KPI strips, card rows):
+  Streamlit's column basis relies on flex-grow, which the design system turns off; each
+  unwrapped row now gets the exact basis for its column count.
+- **Tables lost their last row and their bottom 8px.** Cell padding rendered ~30px rows against
+  the 27px budget the iframe is sized by, and the gap under the panel header was a margin the
+  container did not account for. Padding now derives from the row height, and the gap is
+  container padding the iframe height includes.
+
 ## [2.8.0] — 2026-10-17 — *One graded call · the council audit*
 
 A five-seat review (Mūla methodology, the signal chain, the data layer, UI and

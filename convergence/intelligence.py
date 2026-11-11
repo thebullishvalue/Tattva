@@ -410,33 +410,41 @@ def series_edge(
 # ════════════════════════════════════════════════════════════════════════
 
 
-def call_outcomes(fvo: pd.Series, price: pd.Series, horizon: int,
-                  lag: int = EXECUTION_LAG) -> pd.DataFrame:
+def claim_outcomes(direction: pd.Series, published: pd.Series, price: pd.Series,
+                   horizon: int, lag: int = EXECUTION_LAG) -> pd.DataFrame:
     """One row per CLAIM session whose forward window has closed.
 
-    ``direction`` (+1 buy, −1 sell); ``fwd`` — the h-session log return entered
-    ``lag`` sessions later; ``y = direction × fwd``; and the benchmark the claim
-    has to beat, taken over EVERY published session of the same target:
-    ``base`` — how often a position in that direction won on any day — and
-    ``ex = direction × (fwd − mean fwd)``, the return in excess of simply
-    holding that direction all the time.
+    ``direction`` is +1 (buy), −1 (sell) or 0 (no claim) per session;
+    ``published`` marks the sessions on which a claim could have been made.
+    Columns: ``direction``; ``fwd`` — the h-session log return entered ``lag``
+    sessions later; ``y = direction × fwd``; and the benchmark the claim has to
+    beat, taken over EVERY published session of the same target: ``base`` — how
+    often a position in that direction won on any day — and ``ex = direction ×
+    (fwd − mean fwd)``, the return in excess of holding that direction always.
 
     The benchmark is the point. On an asset that drifts up, a buy claim wins
     more than half the time whatever it is conditioned on, so a raw hit rate or
     a raw mean return grades the drift, not the call.
     """
-    f = _datetime_index(pd.to_numeric(pd.Series(fvo), errors="coerce").astype(float))
-    fwd = _forward_log_return(_datetime_index(pd.Series(price)), horizon, lag).reindex(f.index)
-    published = f.notna() & fwd.notna()
-    mu = float(fwd[published].mean()) if published.any() else float("nan")
-    up = float((fwd[published] > 0).mean()) if published.any() else float("nan")
-    d = f.map(claim_direction)
-    out = pd.DataFrame({"direction": d, "fwd": fwd})
-    out = out[(out["direction"] != 0) & out["fwd"].notna()].copy()
+    d = _datetime_index(pd.to_numeric(pd.Series(direction), errors="coerce").astype(float))
+    pub = _datetime_index(pd.Series(published).astype(bool)).reindex(d.index, fill_value=False)
+    fwd = _forward_log_return(_datetime_index(pd.Series(price)), horizon, lag).reindex(d.index)
+    ok = pub & fwd.notna()
+    mu = float(fwd[ok].mean()) if ok.any() else float("nan")
+    up = float((fwd[ok] > 0).mean()) if ok.any() else float("nan")
+    out = pd.DataFrame({"direction": np.sign(d.fillna(0.0)), "fwd": fwd})
+    out = out[ok & (out["direction"] != 0)].copy()
     out["y"] = out["direction"] * out["fwd"]
     out["ex"] = out["direction"] * (out["fwd"] - mu)
     out["base"] = np.where(out["direction"] > 0, up, 1.0 - up)
     return out
+
+
+def call_outcomes(fvo: pd.Series, price: pd.Series, horizon: int,
+                  lag: int = EXECUTION_LAG) -> pd.DataFrame:
+    """:func:`claim_outcomes` for the shipped rule: contrarian past the claim threshold."""
+    f = pd.to_numeric(pd.Series(fvo), errors="coerce").astype(float)
+    return claim_outcomes(f.map(claim_direction), f.notna(), price, horizon, lag)
 
 
 _EMPTY_SIDE = {"n_claims": 0, "n_independent": 0, "hit": float("nan"), "base": float("nan"),

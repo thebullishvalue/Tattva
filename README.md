@@ -243,7 +243,6 @@ convergence/            cross-validator, online weights + series_edge, consensus
 ui/                     theme, components (incl. the conviction chain), one module per page
 tests/                  offline assertions: causality, signs, ECM arithmetic, edge
                         recovery, the conviction chain's rules
-vault/                  archives of the pre-August-2026 tree (the git history starts later)
 ```
 
 ---

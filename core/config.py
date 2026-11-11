@@ -1,17 +1,11 @@
 """
-Tattva — Configuration constants, thresholds, column mappings, and shared defaults.
-तत्त्व (Tattva) — "Principle / Essence"
+Tattva — configuration: the macro universe, the target catalogue, structural
+constants and warm-up priors.
 
-CORE — macro universe, target catalogue, structural knobs and warm-up priors.
-
-The engine-tuning constants below are the DEFAULTS of the per-instrument config
-registry: `InstrumentConfig` (routing + every Mūla / Swayam / DDM /
-convergence knob) → `CLASS_CONFIG_DEFAULTS` (per asset class) → `INSTRUMENT_CONFIGS`
-(one explicit entry per catalogue target). The five catalogue classes (commodity,
-fx, india_index, us_index, etf) are tuned PER INSTRUMENT via `PER_INSTRUMENT_TUNING`
-/ `_PER_INSTRUMENT_OVERRIDES`; India/US stocks are tuned at ASSET level via
-`STOCK_CONFIGS`. `get_instrument_config(target)` is the single read path (no silent
-global fallback). See the InstrumentConfig section lower in this file.
+`InstrumentConfig` holds every per-target setting. Catalogue targets take their
+asset class's default (`CLASS_CONFIG_DEFAULTS`) plus the few values in
+`INSTRUMENT_OVERRIDES`; free-form stocks take their market's (`STOCK_CONFIGS`).
+`get_instrument_config(target)` is the single read path.
 """
 
 # ─── Version / Product ───────────────────────────────────────────────────────
@@ -87,19 +81,13 @@ def fetch_window(today=None):
 
 
 
-# Evaluation horizons. FORECAST_HORIZON is no longer a label horizon the engine
-# is trained on (nothing is): it is the holding period the convergence layer,
-# the precedent analogs and the Intelligence calibrator score against, and the
-# window the UI projects the current mispricing over. Data stays DAILY.
+# The one horizon every grade is scored at and the UI projects over (sessions).
+# The engine is fitted to no label, so this is a scoring choice only.
 FORECAST_HORIZON = 10       # scoring / display horizon (trading days)
-# Forward-return horizons the convergence calibration frame carries by default
-# (convergence.intelligence._build_calibration_frame). Every published grade —
-# the walk-forward edge of every engine — is scored at FORECAST_HORIZON.
 #: A call dated t is acted on at the close of t+1. The panel row for t holds
 #: closes from markets that shut after the target did (New York after Mumbai),
 #: so the target's own close on t is not a price the call could have traded.
 EXECUTION_LAG = 1
-HOLD_HORIZONS = (5, 10)
 
 # Trailing window for the PRECEDENT analog matcher's state features (momentum,
 # realized vol, and — at 3x this — the rolling Hurst) in analytics.analogs.
@@ -118,8 +106,8 @@ RAW_YIELD_PREDICTORS = frozenset({
     "US 13-Week T-Bill Yield", "US 5-Year Treasury Yield",
     "US 10-Year Treasury Yield", "US 30-Year Treasury Yield"})
 
-# Precedent-tab analog term-structure horizons (trading days), FIXED and decoupled
-# from HOLD_HORIZONS. 1d is a normal member (weak/noisy edge, disclosed by the
+# Precedent-tab analog term-structure horizons (trading days), fixed. 1d is a
+# normal member (weak/noisy edge, disclosed by the
 # Analog-Skill chart's per-horizon IC); 60d is the long/regime end (edge fades past
 # ~20d). The hero's precedent second-opinion reads at FORECAST_HORIZON (10d).
 PRECEDENT_HORIZONS = (1, 3, 5, 10, 20, 60)
@@ -151,14 +139,6 @@ DDM_LONG_RUN_VAR = 100.0
 # ─── Swayam Breadth Defaults ─────────────────────────────────────────────────
 # The per-series kernel's structural knobs. These are shared by every member of
 # the Swayam view bank; the member's own timescale comes from swayam_lengths.
-#
-# SWAYAM_MSF_LENGTH / SWAYAM_ROC_LEN are gone: they parameterised the single
-# basket-mode read, and the Swayam members each carry their own length. Their
-# tuning history is instructive about why this whole layer moved to online
-# estimation — three validating universes returned contradictory class winners
-# (3, 40, 18, 12) on a flat sign-flipping surface, and the standing value was
-# "held at 20" because no reconciliation rule existed. A bank that weights all
-# of those by realised skill needs no such rule.
 SWAYAM_REGIME_SENSITIVITY = 8.0  # swayam 2026-07-21 (|IC| 0.073 @8.0)
 SWAYAM_BASE_WEIGHT = 0.0         # MSF share of the FIXED half of the MSF/MMR
                                  # blend (kernel: 0.5*bw + 0.5*adaptive).
@@ -169,18 +149,6 @@ SWAYAM_MMR_NUM_VARS = 4          # swayam 2026-07-21 class-level best
 SWAYAM_OVERSOLD = -5
 SWAYAM_OVERBOUGHT = 5
 
-# ─── Convergence Layer Defaults ──────────────────────────────────────────────
-
-# PRIOR dimension weights — where the online learner starts (and what stands
-# when the overlap is too short to learn from). Direction-heavy: whether the two
-# engines point the same way is the dimension with a meaning independent of
-# scale.
-
-# The weighted composite's drift-diffusion filter (convergence.conviction_model).
-# ddm 2026-07-20: leak 0.01. GUARD: sweep leak WITH drift co-scaled
-# (drift = leak × gain 1.20), never alone.
-
-# Divergence detection
 DIV_LOOKBACK = 20
 DIV_PERSISTENCE_THRESHOLD = 5
 
@@ -711,7 +679,7 @@ def swayam_macro_columns(target: str, macro_cols: list[str]) -> list[str]:
 # unregistered target); free-form stocks are configured per ASSET CLASS
 # (STOCK_CONFIGS), registered at resolution time. Field defaults equal the former
 # global constants, so the registry is behaviour-preserving until a config diverges.
-from dataclasses import dataclass, replace as _dc_replace, fields as _dc_fields  # noqa: E402
+from dataclasses import dataclass, replace as _dc_replace  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -762,37 +730,19 @@ class InstrumentConfig:
 
     # ── Scoring / display horizons ──────────────────────────────────────────
     forecast_horizon: int = FORECAST_HORIZON
-    hold_horizons: tuple[int, ...] = HOLD_HORIZONS
     analog_mom_window: int = ANALOG_MOM_WINDOW   # precedent state-feature window
 
     # ── Estimability floors: Mūla valuation engine ──────────────────────────
-    # Default to the global constants; a per-instrument / asset-class override
-    # (via _PER_INSTRUMENT_OVERRIDES / STOCK_CONFIGS) retunes them for one
-    # target. Note what is NOT here: the engine is recursive, so it has no
-    # training window, refit cadence, ensemble roster or regularisation path
-    # to tune. What remains are estimability floors (how much history before
-    # publishing, how many prints before an instrument may join the
-    # cross-section) and the coefficient-memory grid.
+    # The engine is recursive, so it has no training window, refit cadence or
+    # regularisation path. What remains are estimability floors (history before
+    # publishing, prints before an instrument may join) and the memory grid.
     fvo_burn_in: int = FVO_BURN_IN
     fvo_min_prints: int = FVO_MIN_PRINTS
     fvo_valuation_deltas: tuple[float, ...] = FVO_VALUATION_DELTAS
     fvo_lookback_windows: tuple[int, ...] = LOOKBACK_WINDOWS
 
-    # ── Convergence: the weighted composite's drift-diffusion filter ────────
-
-    # ── Convergence dimension weights: PRIOR for the online learner ────────
-    # Passed as `prior` to convergence.intelligence.apply_online_weights, which
-    # moves them by each dimension's own discounted signed skill. A starting
-    # belief, not a fitted answer.
-
     # ── Precedent analog term structure ─────────────────────────────────────
     precedent_horizons: tuple[int, ...] = PRECEDENT_HORIZONS
-
-    # ── Analog matcher blend (analytics.analogs) ────────────────────────────
-    # (The analog blend weights lived here. They selected between Mahalanobis,
-    # trajectory-cosine and recency scoring, and had shipped at 1/0/0 since the
-    # analog re-tune — two of the three terms multiplied by zero on every call.
-    # The matcher is now kernel-weighted Mahalanobis with no blend to choose.)
 
     # ── Warm-up priors for the adaptive thresholds ─────────────────────────
     # Each is the p90 ("strong") / p75 ("moderate") / p50 ("weak") of its own
@@ -807,7 +757,6 @@ class InstrumentConfig:
     # Swayam average signal (±10) — p75, the one cut-point both the Swayam and
     # the Convergence page colour it with.
     ui_swayam_avg_threshold: float = 2.87
-    # Engine agreement ratio — p90 / p75.
     # Model spread (SD of the fair-value level), basis points — p10 / p90. The
     # spread now measures the fair value's own uncertainty, not the residual
     # noise around it, and runs ~17-77 bps across instruments (2026-10-17), so
@@ -848,11 +797,6 @@ _CATEGORY_TO_CLASS: dict[str, str] = {
     "India Indices": "india_index",
     "US Indices":    "us_index"}
 
-# ── PER-INSTRUMENT vs ASSET-LEVEL tuning ─────────────────────────────────────
-# The 5 catalogue classes are tuned PER INSTRUMENT (each target carries its own
-# knobs on its class default); the India/US STOCK classes stay ASSET-LEVEL
-# (STOCK_CONFIGS) since free-form symbols can't be pre-tuned. Invariant: the
-# per-instrument classes are exactly the catalogue (non-stock) classes.
 def asset_class(target: str) -> str | None:
     """The asset class a target is graded with. A stock borrows its market's
     index class — one stock's history cannot license a call on its own."""
@@ -864,83 +808,29 @@ def asset_class(target: str) -> str | None:
     return None
 
 
-PER_INSTRUMENT_CLASSES: tuple[str, ...] = tuple(dict.fromkeys(_CATEGORY_TO_CLASS.values()))
-ASSET_LEVEL_CLASSES: tuple[str, ...] = ("stock_india", "stock_us")
-assert set(PER_INSTRUMENT_CLASSES).isdisjoint(ASSET_LEVEL_CLASSES)
-
-# Fields that MAY be set per instrument = every InstrumentConfig knob EXCEPT the
-# routing/identity fields (those come from the routing maps, not the tuner).
-_ROUTING_FIELDS: frozenset[str] = frozenset({"excluded_predictors"})
-_TUNABLE_FIELDS: frozenset[str] = frozenset(f.name for f in _dc_fields(InstrumentConfig)) - _ROUTING_FIELDS
-
-# Explicit per-instrument tuning SLOT per catalogue target (auto-seeded, so it
-# can't drift). Empty dict = inherits the class default; the slot marks the wiring target.
-PER_INSTRUMENT_TUNING: dict[str, dict] = {
-    _nm: {}
-    for _cat, _cls in _CATEGORY_TO_CLASS.items()
-    if _cls in PER_INSTRUMENT_CLASSES
-    for _nm in TARGET_CATEGORIES.get(_cat, [])
+#: The few values that are genuinely one instrument's own. Everything else
+#: is its asset class's default.
+INSTRUMENT_OVERRIDES: dict[str, dict] = {
+    # Display tier for Swayam's average signal: the target's own p75, used
+    # until its causal estimate takes over.
+    "Gold": {"ui_swayam_avg_threshold": 3.6887},
+    "Jeera": {"ui_swayam_avg_threshold": 2.1131},
 }
 
-# Per-instrument overrides, PRUNED to only those that clear a REAL statistical bar
-# (2026-07-21 suite). The studies' own gates (breadth margin>=0.03) are a fraction
-# of one IC standard error (SE ~= 1/sqrt(n-3) ~= 0.09 at n~130), so they rubber-stamp
-# noise. Re-gated here at ~1 SE, everything dropped inheriting the (coherent)
-# class default:
-#   - swayam_lengths: both candidate spans beat their default by only ~0.03 (< bar) -> revert
-#     to the class Swayam grid (the target keeps its breadth signal, just not a bespoke span).
-#   - analog_w_*: dropped (the analog study's own verdict is that the class default 1/0/0 stands).
-#   - ui_swayam_avg_threshold: KEPT (Gold/Jeera) — a data-anchored DISPLAY calibration
-#     (the target's own p75, gated >=25% divergence + n>=250), not an edge claim.
-#
-# The per-instrument ENGINE tunings that used to live here were all Aarambh
-# walk-forward knobs (refit cadence / train window / ensemble roster / ridge
-# alphas / huber epsilon / PCA components). The Mūla engine that replaced
-# it has none of them — it is recursive, so there is no window to size and
-# no ensemble to select — and a tuning measured on a retired model is not
-# evidence about the current one, so they were removed rather than remapped.
-# The Mūla knobs (fvo_burn_in / fvo_min_prints / fvo_valuation_deltas) are
-# estimability floors and a memory grid, not free parameters, and stay at their
-# class defaults until a study measures otherwise.
-_PER_INSTRUMENT_OVERRIDES: dict[str, dict] = {
-    # -- Commodities --
-    'Gold': {'ui_swayam_avg_threshold': 3.6887},
-    'Jeera': {'ui_swayam_avg_threshold': 2.1131},
-    # -- Currency (FX) --
-    'USD/INR': {},
-    # -- India Indices --
-    'Nifty Pharma': {},
-    # -- US Indices --
-    'S&P 500': {},
-    'Nasdaq 100': {}}
-_bad_fields = {k for _ov in _PER_INSTRUMENT_OVERRIDES.values() for k in _ov if k not in _TUNABLE_FIELDS}
-assert not _bad_fields, (
-    f"_PER_INSTRUMENT_OVERRIDES sets non-tunable/unknown fields {sorted(_bad_fields)} "
-    f"(routing fields come from the routing maps; valid tuning fields: {sorted(_TUNABLE_FIELDS)})")
-_bad_names = [n for n in _PER_INSTRUMENT_OVERRIDES if n not in PER_INSTRUMENT_TUNING]
-assert not _bad_names, (
-    f"_PER_INSTRUMENT_OVERRIDES targets {_bad_names} are not per-instrument-class "
-    "catalogue targets (stocks are tuned at asset-class level via STOCK_CONFIGS)")
-for _nm, _ov in _PER_INSTRUMENT_OVERRIDES.items():
-    PER_INSTRUMENT_TUNING[_nm].update(_ov)
-
-# Build one explicit InstrumentConfig per named target: class-default tuning +
-# that instrument's own leakage exclusions (from
-# the maps above) + its per-instrument tuning overrides (empty until wired).
-# Every India index gets its own entry copying the Nifty 50 baseline; Nifty 50
-# and Nifty 50 - PE differ only where their routing/tuning differ.
+# One explicit InstrumentConfig per catalogue target: its class default, its
+# own leakage exclusions and its overrides.
 INSTRUMENT_CONFIGS: dict[str, InstrumentConfig] = {}
 for _cat, _names in TARGET_CATEGORIES.items():
     _cls = _CATEGORY_TO_CLASS.get(_cat)
     if _cls is None:
-        continue   # free-form stock categories — configured per-symbol at runtime
-    _base = CLASS_CONFIG_DEFAULTS[_cls]
+        continue   # free-form stock categories — configured per symbol at runtime
     for _nm in _names:
         INSTRUMENT_CONFIGS[_nm] = _dc_replace(
-            _base,
+            CLASS_CONFIG_DEFAULTS[_cls],
             excluded_predictors=tuple(TARGET_EXCLUDED_PREDICTORS.get(_nm, ())),
-            **PER_INSTRUMENT_TUNING.get(_nm, {}),   # per-instrument knob overrides
+            **INSTRUMENT_OVERRIDES.get(_nm, {}),
         )
+assert set(INSTRUMENT_OVERRIDES) <= set(INSTRUMENT_CONFIGS), "override for an unknown target"
 
 # Completeness guard ("defining them is a must"): every non-stock catalogue
 # target must have resolved to an explicit config at import time.

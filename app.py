@@ -49,15 +49,8 @@ import pandas as pd
 import streamlit as st
 
 # ── Warning suppression ──────────────────────────────────────────────────────
-# A blanket `category=RuntimeWarning` filter used to sit here — it silenced
-# every RuntimeWarning process-wide, including any GENUINE numeric issue
-# (overflow, invalid divide, degenerate log/sqrt) anywhere in the math stack,
-# not just the known-noisy sources it was meant to cover (audit finding C6).
-# The one legitimate source found by auditing (nanmean's "Mean of empty
-# slice" on the engine's own warm-up rows) is now scoped locally at its call
-# site (engines/mula/base.py._compute_breadth_metrics) instead. FutureWarning
-# stays broadly suppressed — it's pandas/numpy API-deprecation noise, not a
-# correctness signal, so it doesn't carry the same risk of masking a real bug.
+# FutureWarning is pandas/numpy deprecation noise. RuntimeWarning is NOT
+# suppressed globally: a genuine numeric problem must stay visible.
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*YF.download.*")
 warnings.filterwarnings("ignore", message=".*auto_adjust.*")
@@ -121,16 +114,9 @@ from core.config import (ALL_TARGETS, TARGET_CATEGORIES, is_stock_target, DIV_LO
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
-# The full result of an analysis is the set of session-state keys below. We
-# snapshot them per cache_key so revisiting a previously-computed config (e.g.
-# the user switches Gold → Silver → Gold) restores instantly instead of
-# recomputing the whole 5-phase pipeline. Bounded (LRU) to cap memory.
-#
-# THE RULE: every per-target value a page reads is either one of these keys or
-# derived from one. `mula_summary` used to sit outside the bundle as a parallel
-# copy, so a cached switch-back showed the PREVIOUS target's error-correction
-# read on the hero — the ECM gate, and so the conviction, belonged to the
-# wrong instrument. It is now read off the bundled engine.
+# A run's result is the session keys below, snapshotted per cache_key so a
+# target visited earlier restores without recomputing (bounded LRU). Every
+# per-target value a page reads is one of these keys or derived from one.
 _BUNDLE_KEYS = (
     "engine", "fvo_ts", "swayam_daily", "swayam_view_dfs", "swayam_view_weights",
     "swayam_n_eff", "swayam_native_last",
@@ -141,10 +127,8 @@ _BUNDLE_KEYS = (
 # session that browses a handful of targets without recomputing.
 _RESULTS_CACHE_MAX = 6
 
-#: Every session key a run produces or caches — the ONE list Start over and
-#: Refresh clear. They used to keep two hand-maintained lists that had already
-#: drifted (Refresh cleared the Swayam caches, Reset did not, so a Reset an
-#: hour later paired fresh Mūla data with stale Swayam frames).
+#: Every session key a run produces or caches — the one list Start over and
+#: Refresh clear.
 _SESSION_RESULT_KEYS = _BUNDLE_KEYS + (
     "engine_cache", "results_cache", "_analog_skill_cache",
 )
@@ -158,37 +142,12 @@ def _clear_results() -> None:
 
 
 def _ensure_stock_target_column(df: pd.DataFrame, active_target: str) -> pd.DataFrame:
-    """Inject a target's Close into the model matrix when the batch has not.
+    """Join a free-form stock target's Close to a LOCAL copy of the model matrix.
 
-    The macro batch fetches exactly the columns in GLOBAL_MACRO_MAP +
-    MACRO_SYMBOLS_YF (+ the index levels merged into it). A target whose
-    ticker is in one of those maps therefore arrives for free — which is true
-    of every commodity and FX target that predates this, because each is also
-    a PREDICTOR under the same name (Gold, Copper, Dollar Index …). A target
-    that is not in those maps has no column at all, and the guard downstream
-    reports it as a failed source fetch.
-
-    Catalogue targets outside the macro maps — Aluminium, the crypto
-    bank — are handled UPSTREAM, by ``data.fetcher._fetch_catalogue_targets``,
-    so their column is already present by the time this runs. That is
-    deliberate: the shared matrix is read by the app, by the research
-    preflight and by each tuning study independently, and injecting per
-    consumer is how the suite ended up seeing "36/45 targets" while the app
-    saw all 45. One injection, upstream, for everyone.
-
-    This helper therefore stays narrow, covering only the free-form STOCK
-    targets that are deliberately kept OUT of the batch for cache coherence
-    (a per-target ticker set would break the batch's (start, end) key). If a
-    catalogue target's column is missing here, that is a real fetch failure
-    and the guard downstream should say so — not be papered over by a second
-    silent fetch.
-
-    Aligned to the matrix's DATE spine, ffilled, leading NaNs left for the
-    per-target dropna downstream. Joined to a LOCAL copy only: it used to be
-    written back into st.session_state['data'], after which every later
-    target in the session — Gold included — carried the stock as a predictor
-    and every one of its published fair values moved. The series fetch is
-    cached, so re-joining on each rerun costs nothing.
+    Catalogue targets arrive with the fetch. A typed stock is deliberately kept
+    out of the shared frame — written back, it would become a predictor of
+    every later target in the session — so it is joined here per run, aligned
+    to the DATE spine and forward-filled. The series fetch is cached.
     """
     if active_target in df.columns or not is_stock_target(active_target):
         return df
@@ -225,11 +184,8 @@ def _render_header(frame=None) -> None:
         render_ticker(frame)
 
 
-#: The three systems, as the cold-start screen describes them. Data, not
-#: markup — the landing page renders them through one template, so the three
-#: panels cannot drift apart in structure the way three hand-written HTML
-#: blocks did (they already had: two said "Ensemble/Signal", one said
-#: "Fusion", and the label column was a <span> in one and a <div> in another).
+#: The three systems as the landing page describes them: data, rendered
+#: through one template.
 _SYSTEM_PANELS = (
     ("mula", "System 01", "Mūla", "The world's valuation",
      "Prices the target against the whole traded macro cross-section with a dynamic "
@@ -256,22 +212,7 @@ _SYSTEM_PANELS = (
 
 
 def _render_landing_page() -> None:
-    """Cold start — a description of the product, built from the product's own parts.
-
-    Every block here now uses the same components the analysis pages use: a
-    section header for each division, `render_kpi_strip` for the coverage
-    numbers, and `panel()` for each system. The previous version was built
-    from four compositions that existed nowhere else in the app — a bespoke
-    `.fact-row` of oversized numerals where every other count in the product
-    is a metric card, `.system-card` with a 2px coloured top bar where every
-    other container is a 1px hairline panel, a floating `.outcome-grid` with
-    no container at all, and no section headers, which made the landing page
-    the only page not on the section-rhythm contract. It read as a different
-    product's marketing page bolted to the front of this one.
-
-    The claim still leads, because a reader who has not run anything needs to
-    know what the thing IS before they are shown what it covers.
-    """
+    """Cold start: what the product is, built from the components the pages use."""
     from core.config import TARGET_CATEGORIES, CATALOGUE_TARGETS
 
     _n_cat, _n_tgt = len(TARGET_CATEGORIES), len(CATALOGUE_TARGETS)
@@ -337,14 +278,8 @@ def _render_landing_page() -> None:
                         "model fitted to returns, matched on the engines' own reading."),
         ("The record", "Every series behind the call, joined by date and exportable."),
     )
-    # ONE markdown block, not four panels. These four cards are static text, so
-    # they gain nothing from a Streamlit container and lose something real to
-    # it: on 1.52 the anonymous row Streamlit wraps markdown in sizes to 31px
-    # around 47px of copy and will not grow, so each panel came out ~15px
-    # short and clipped its own last line at `overflow: hidden` — and clipped
-    # by a different amount per card, which is why the four were uneven. A
-    # single grid of plain divs has no wrapper to collapse, and CSS grid gives
-    # the uniform two-up layout the panels were only approximating.
+    # One grid of plain divs: static text gains nothing from a Streamlit
+    # container, and its markdown wrapper clips copy taller than one line.
     st.markdown(
         '<div class="outcome-grid">'
         + "".join(
@@ -358,12 +293,8 @@ def _render_landing_page() -> None:
 
 
 def _recent_divergences(window: int) -> int:
-    """Divergence events within the last ``window`` SCORED sessions.
-
-    Anchored on the newest scored session, not on the newest event: the count
-    used to run 1.5×window calendar days back from the latest EVENT, so a
-    burst two years ago was reported as "N events in the last 20 sessions".
-    """
+    """Divergence events within the last ``window`` scored sessions, counted
+    back from the newest scored session (not from the newest event)."""
     events = st.session_state.get("divergence_events")
     cdf = st.session_state.get("convergence_df")
     if events is None or not len(events) or cdf is None or cdf.empty:
@@ -432,57 +363,27 @@ def _render_model_passport_sidebar() -> None:
     render_rail_readout(rows)
 
 
-#: The DURABLE record of the appearance choice — a plain session key, never a
-#: widget key.
-#:
-#: This distinction is the whole fix for the theme flipping back on its own.
-#: Streamlit garbage-collects the state of any widget that was NOT instantiated
-#: during a run. The appearance control lives at the bottom of the rail, so
-#: every run that returns or reruns before reaching it — clicking Run Analysis
-#: (which calls st.rerun() from inside the button handler), switching target,
-#: Reset, Refresh — discarded `theme_mode` entirely. The next run then found no
-#: value and fell back to Slate. That is why Paper survived idle reruns but
-#: died on exactly the actions that matter, and why it looked "entirely buggy"
-#: rather than simply broken.
-#:
-#: A plain key is never collected, so it survives every one of those paths.
+#: The durable record of the appearance choice — a plain session key, never a
+#: widget key. Streamlit discards the state of a widget that a run does not
+#: reach, and the appearance control sits at the foot of the rail, below
+#: several early returns and reruns.
 _THEME_CHOICE = "theme_choice"
 
 
-#: The two appearances. Both are reading surfaces — Paper is the light one you
-#: read a result on and print from, Slate the dark one you work on.
-#:
-#: PAPER LEADS, and the order is the default: `theme_choice()` falls back to
-#: APPEARANCES[0] for any unset or unrecognised value, so first-in-tuple IS
-#: first-run. Kept as one fact rather than a separate DEFAULT_ constant, so the
-#: toggle's left-to-right order and the default can never disagree.
+#: The two appearances. The first is the default: `theme_choice()` falls back
+#: to APPEARANCES[0] for any unset or unrecognised value.
 APPEARANCES = ("Paper", "Slate")
 
 
 def theme_choice() -> str:
-    """The appearance the user last chose, always one of ``APPEARANCES``.
-
-    A value that is not in the list is treated as unset. That matters across a
-    rename: a session opened before this list changed still holds the old
-    string in the durable key, and handing an unknown option to the segmented
-    control as its default is an error rather than a fallback.
-    """
+    """The appearance the user last chose, always one of ``APPEARANCES``."""
     choice = st.session_state.get(_THEME_CHOICE)
     return choice if choice in APPEARANCES else APPEARANCES[0]
 
 
 def _render_appearance_control() -> None:
-    """The theme switch — LAST control in the rail, deliberately.
-
-    It was previously the first control under the brand mark, which gave the
-    least consequential switch in the application the most valuable position
-    in it. Slate (dark) is the working theme; Paper (light) is for reading
-    a result and for print.
-
-    Called from exactly one of the two rail passes per rerun — the cold-start
-    branch returns before the second pass exists, so the key is instantiated
-    once either way.
-    """
+    """The theme switch — the last control in the rail. Called from exactly
+    one of the two rail passes per rerun, so its key is instantiated once."""
     _box = st.container(key="appearance")
     with _box:
         _render_appearance_body()
@@ -529,72 +430,28 @@ def main():
         page_icon="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzNENkZFOCIgc3Ryb2tlLXdpZHRoPSIyIi8+PHBhdGggZD0iTTggMTRsMy01IDIgMyAzLTQiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzNENkZFOCIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4=",
         layout="wide", initial_sidebar_state="expanded",
     )
-    # ─── Resolve the theme BEFORE anything is styled ──────────────────────
-    # This must read the appearance control's WIDGET key, not the derived
-    # `theme` key, and it must run here — first.
-    #
-    # The bug it fixes: `theme` is written by _render_appearance_control(),
-    # which runs deep in the sidebar, i.e. AFTER this line. On the rerun that
-    # followed a click, inject_css() therefore still saw the PREVIOUS theme
-    # while every chart — which resolves its palette at render time, further
-    # down the script — already saw the new one. The result was a page whose
-    # chrome and whose plots disagreed about which theme was active: exactly
-    # "some elements show up, some do not". The theme was always one rerun
-    # behind, and within that rerun it was applied inconsistently.
-    #
-    # Read the DURABLE choice, not the widget key: the widget's state is
-    # discarded by Streamlit on any run that does not reach it (see
-    # _THEME_CHOICE). Deriving `theme` here, first, makes the whole script —
-    # CSS, charts, tables, iframes — agree on one value for the whole run.
+    # Resolve the theme before anything is styled, from the durable choice, so
+    # CSS, charts and tables agree on one value for the whole run.
     st.session_state["theme"] = "light" if theme_choice() == "Paper" else "dark"
     inject_css(theme=st.session_state["theme"])
 
-    # Replay dynamic stock-target registration on every rerun. register_stock_target
-    # mutates module-level core.config dicts (ALL_TARGETS etc.) which survive
-    # Streamlit reruns WITHIN a process but are never persisted — only
-    # st.session_state survives a rerun as the durable record, so a freeform
-    # symbol resolved earlier this session (e.g. "RELIANCE (NSE)") must be
-    # re-registered before anything below resolves active_target against
-    # ALL_TARGETS/STOCK_TARGET_MARKETS. Idempotent — safe every rerun.
+    # Replay stock-target registration: it mutates module-level config, which
+    # survives reruns within a process but is rebuilt on restart. Idempotent.
     for _dname, _dmeta in st.session_state.get("dynamic_stock_targets", {}).items():
         register_stock_target(_dname, _dmeta["ticker"], _dmeta["market"])
 
-    # Single main-area progress slot, created up front (outside the sidebar) so the
-    # SAME themed progress bar drives everything from the moment "Run Analysis" is
-    # clicked — the fetch, the data-prep spine, the engines, convergence — instead of
-    # a sidebar spinner that then hands off to a separate bar with a gap between them.
-    # Empty (invisible) until the first progress_bar() call; cleared when a run ends.
+    # One main-area progress slot drives the fetch and every engine phase.
     progress_container = st.empty()
 
     # ─── The control rail ──────────────────────────────────────────────────
-    # Everything GLOBAL lives here — which instrument, what to do with the
-    # session, how the model is behaving, how the app looks. Everything LOCAL
-    # to a page (the chart window) lives in that page's toolbar strip. A
-    # control's position is the only reliable statement of its scope, so the
-    # two are never mixed.
-    #
-    # Rail order is by frequency of use: Instrument (every visit) → Session
-    # (occasionally) → Model (read-only status) → Appearance (almost never).
-    # The theme switch used to be first, directly under the brand.
-    #
-    # st.navigation (called once the pipeline below has run) pins its page-nav
-    # rail to the TOP of the sidebar by design — that's Streamlit's own
-    # behavior, not call order — so this content renders below it.
-    # ──────────────────────────────────────────────────────────────────────
+    # Global controls live here; controls that reframe a chart live in that
+    # chart's panel. Order: Instrument → Record → Session → Appearance.
     with st.sidebar:
-        # The mark, always at the very top of the rail. Streamlit pins its
-        # page-nav to the top of the sidebar and nothing rendered from Python
-        # can precede it in the DOM — so the brand is emitted here (in the
-        # pass that always runs, cold start included) and lifted above the nav
-        # by CSS: `.nav-brand` is absolutely positioned against the sidebar
-        # content box, which reserves room for it with a padding-top. That is
-        # why it no longer sits wedged between the nav and the controls.
+        # The mark is emitted here and lifted above Streamlit's page nav by CSS.
         render_nav_brand()
         st.markdown('<div class="sidebar-title">Instrument</div>', unsafe_allow_html=True)
 
-        # Two-level selection: Asset Class → Target. Keeps the growing target
-        # roster (commodities, FX, India & US indices, sector-ETF universe)
-        # logically grouped instead of one long flat list.
+        # Two-level selection: Asset Class → Target.
         all_names = list(ALL_TARGETS.keys())
         prev_commodity = st.session_state.get("active_target", all_names[0])
         if prev_commodity not in all_names:
@@ -626,11 +483,6 @@ def main():
         if st.session_state["target_category"] not in _categories:
             st.session_state["target_category"] = prev_cat
 
-        # Widget labels are the real <label> elements now, not markdown
-        # pretending to be one: the rail's group headers (INSTRUMENT /
-        # SESSION / MODEL) name the SECTION, and each control names itself.
-        # Screen readers get a proper accessible name out of it for free —
-        # a collapsed label plus a floating div above it gives them nothing.
         sel_cat = st.selectbox("Asset Class", _categories, key="target_category")
 
         if sel_cat in FREEFORM_STOCK_CATEGORIES:
@@ -667,18 +519,6 @@ def main():
                     prev_commodity if prev_commodity in cat_targets else cat_targets[0]
                 )
             selected_commodity = st.selectbox("Target", cat_targets, key="target_select")
-        # (Two wrapped prose hints used to sit here — "Swayam · self-referential
-        # view bank (own OHLCV)" and, further down, "231 macro instruments ·
-        # full cross-section (1 excluded as self-replicating)". Between them
-        # they put five lines of grey sentence fragments directly under the
-        # control they described, which is what made the rail read as texty.
-        # The same facts are now key/value rows in the Source readout below —
-        # scannable, aligned, and a third of the height.)
-
-        # (No engine selector: Mūla IS the valuation engine and Swayam is the
-        # breadth engine — there is nothing to choose between. The import
-        # guard above is the only fallback, and it is silent.)
-
         df = None
         has_data = "data" in st.session_state and "run_analysis" in st.session_state
 
@@ -690,14 +530,8 @@ def main():
             if has_data:
                 df = st.session_state["data"]
         elif not has_data:
-            # Initial load. The fetch pulls the entire macro universe once and
-            # is target-agnostic — the chosen commodity only selects Mūla's
-            # target column and Swayam's basket.
+            # Initial load: one target-agnostic fetch of the whole universe.
             if st.button("Run Analysis", type="primary", width="stretch"):
-                # No spinner — drive the main-area progress bar from the very first
-                # click. The fetch is one blocking call, so we show the stage before it
-                # (3%) and after it (15%); the analysis picks the bar up from there on
-                # the rerun, so the experience reads as one continuous progress bar.
                 progress_bar(progress_container, 3, "Fetching Market Data",
                              "yfinance · global macro universe · daily history")
                 df, error = fetch_commodity_dataset(*fetch_window())
@@ -730,15 +564,8 @@ def main():
         with st.sidebar:
             _render_appearance_control()
         _render_header()
-        # A session that HAD a run and no longer has its data is a different
-        # state from a cold start, and it must not be shown as one. It happens
-        # when the server drops session_state under memory pressure — routine
-        # on Streamlit Community Cloud, where the results cache holds up to six
-        # full pipeline results. The symptom was an app that "went back to the
-        # landing page with the rail still looking loaded, and clicking did
-        # nothing": the rail read `run_analysis` and drew itself as live, while
-        # the page had no frame to render and every control pointed at state
-        # that was gone. Say so, and offer the one action that fixes it.
+        # A session that had a run and lost its data (the host reclaims memory)
+        # is not a cold start: say so, and clear the flag that drew the rail as live.
         if st.session_state.get("run_analysis") and "data" not in st.session_state:
             render_warning_box(
                 title="Session data expired",
@@ -774,11 +601,6 @@ def main():
                 "Start over", type="secondary", width="stretch",
                 help="Clear this session's results and return to the start screen. "
                      "Data fetched within the last hour is reused on the next run.")
-            # (The second button was labelled "Reset" and promised "re-run both
-            # engines on the data already in session — no network fetch". It
-            # dropped the data and returned to the landing page. Re-running
-            # deterministic engines on identical data would reproduce the same
-            # numbers anyway, so the honest control is the one it actually was.)
             if _do_restart:
                 _clear_results()
                 for _k in ("data", "run_analysis"):

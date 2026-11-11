@@ -89,9 +89,13 @@ class ConsoleOutput:
     def __init__(self) -> None:
         self._section_depth = 0
         self._phase_timers: dict[str, datetime] = {}
+        #: False silences the run trace (studies and tests run many targets).
+        self.enabled = True
 
     def _write(self, message: str = "", end: str = "\n") -> None:
         """Write directly to stdout with UTF-8 fallback."""
+        if not self.enabled:
+            return
         text = f"{message}{end}"
         try:
             sys.stdout.write(text)

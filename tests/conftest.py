@@ -16,3 +16,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 os.environ.setdefault("NUMBA_CACHE_DIR", os.path.join(os.path.expanduser("~"), ".cache", "tattva", "numba"))
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+from core.logger_config import console  # noqa: E402
+
+console.enabled = False

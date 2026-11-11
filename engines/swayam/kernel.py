@@ -41,6 +41,7 @@ from analytics.regime import run_regime_loop
 # caller here ever used); import them so there is exactly one implementation.
 from analytics.utils import sigmoid as _sigmoid, zscore_clipped as _zscore_clipped, calculate_atr as _calculate_atr
 from analytics.adaptive import OnlineSkillWeights
+from core.config import EXECUTION_LAG
 
 
 # ─── Market Strength Factor ──────────────────────────────────────────────────
@@ -525,6 +526,7 @@ def view_skill_weights(
     halflife: float = 252.0,
     floor: float = 0.02,
     shrink: float | None = None,
+    lag: int = EXECUTION_LAG,
 ) -> pd.DataFrame:
     """Causal per-date weight for each view, from its own realised skill.
 
@@ -577,7 +579,9 @@ def view_skill_weights(
         return pd.DataFrame(1.0, index=idx, columns=names)
 
     h = max(1, int(horizon))
-    fwd = (close.shift(-h) / close - 1.0).to_numpy(dtype=np.float64)
+    lag = max(0, int(lag))
+    # Entered ``lag`` sessions after the call, held h: resolved at s + lag + h.
+    fwd = (close.shift(-(h + lag)) / close.shift(-lag) - 1.0).to_numpy(dtype=np.float64)
     S = sig.to_numpy(dtype=np.float64)
 
     # THE CALL IS THE BULLISH LEAN, -osc — not the oscillator itself.
@@ -596,7 +600,7 @@ def view_skill_weights(
     n = len(names)
     W = np.empty((len(idx), n), dtype=np.float64)
     for t in range(len(idx)):
-        s = t - h
+        s = t - h - lag
         if s >= 0:
             skill.observe(-S[s], fwd[s])  # resolved at t; never before
         W[t] = skill.weights() * n        # rows sum to n, preserving count scale

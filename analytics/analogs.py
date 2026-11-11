@@ -29,6 +29,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2
 
+from core.config import EXECUTION_LAG
+
 
 # (Arthagati's blend of Mahalanobis, trajectory-cosine and recency scoring was
 # re-tuned for Tattva on 2026-06-20 — 13 targets, non-overlapping OOS IC — and
@@ -442,7 +444,8 @@ def find_similar_periods(
         return []
 
     n = len(feat)
-    purge = int(max(hold_horizons)) if hold_horizons else 20
+    lag = int(EXECUTION_LAG)
+    purge = (int(max(hold_horizons)) if hold_horizons else 20) + lag
     # Exclude the tail: those rows have no realized forward path yet. The
     # frame keeps its RangeIndex labels, so `historical.index` remains the
     # TEMPORAL row position — the forward-return lookups and the Theiler gap
@@ -481,9 +484,9 @@ def find_similar_periods(
         fwd: dict[int, float | None] = {}
         for hh in hold_horizons:
             hh = int(hh)
-            tgt = pos + hh
-            if tgt < len(price_all) and price_all[pos] > 0 and np.isfinite(price_all[tgt]):
-                fwd[hh] = float((price_all[tgt] / price_all[pos] - 1.0) * 100.0)
+            ent, tgt = pos + lag, pos + lag + hh     # entered at the next close
+            if tgt < len(price_all) and price_all[ent] > 0 and np.isfinite(price_all[tgt]):
+                fwd[hh] = float((price_all[tgt] / price_all[ent] - 1.0) * 100.0)
             else:
                 fwd[hh] = None
         d = row["Date"]
@@ -622,6 +625,7 @@ def analog_prediction_series(
         return pd.DataFrame(columns=["Date", "Predicted", "PositivePct", "Realized"])
 
     H = int(hold_horizon)
+    lag = int(EXECUTION_LAG)
     step = int(step) if step else H
     gap = int(gap) if gap else max(int(mom_window), H, 1)
     n = len(feat)
@@ -643,7 +647,7 @@ def analog_prediction_series(
     for t in as_of_grid:
         if not published[t]:
             continue                       # nothing was published for this state
-        pool_end = t + 1 - H               # outcomes completed by t (p + H <= t)
+        pool_end = t + 1 - H - lag         # outcomes completed by t (p + lag + H <= t)
         if pool_end < 30:
             continue
         pool_pos = np.flatnonzero(valid_row[:pool_end])
@@ -659,10 +663,13 @@ def analog_prediction_series(
         ok = (price[pos] > 0) & (w > 0)
         if not ok.any():
             continue
-        fwd = (price[pos[ok] + H] / price[pos[ok]] - 1.0) * 100.0   # p + H <= t < n
+        ok &= price[np.minimum(pos + lag, n - 1)] > 0
+        if not ok.any():
+            continue
+        fwd = (price[pos[ok] + lag + H] / price[pos[ok] + lag] - 1.0) * 100.0
         wk = w[ok]
-        realized = ((price[t + H] / price[t] - 1) * 100.0
-                    if (t + H < n and price[t] > 0) else np.nan)
+        realized = ((price[t + lag + H] / price[t + lag] - 1) * 100.0
+                    if (t + lag + H < n and price[t + lag] > 0) else np.nan)
         rows.append({
             "Date": pd.Timestamp(dates[t]) if not isinstance(dates[t], (int, np.integer)) else dates[t],
             "Predicted": _weighted_quantile(fwd, wk, 0.50),

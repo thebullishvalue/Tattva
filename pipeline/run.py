@@ -297,6 +297,11 @@ def grade(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame,
     try:
         fvo = pd.to_numeric(fvo_ts["FVO"], errors="coerce")
         edges["mula"] = intelligence.series_edge(fvo.map(valuation_lean).where(fvo.notna()), price, h)
+        edges["call"] = intelligence.call_record(fvo, price, h)
+        c = edges["call"]
+        if c["n_claims"]:
+            console.item("call as issued", f"{c['n_claims']} claims · hit {c['hit']:.1f}% vs base "
+                         f"{c['base']:.1f}% · excess {c['excess_bps']:+.0f} ± {c['se_bps']:.0f} bps per claim")
         if not swayam_daily.empty:
             sw = (swayam_daily[swayam_daily["_Native"].astype(bool)]
                   if "_Native" in swayam_daily.columns else swayam_daily)
@@ -308,6 +313,8 @@ def grade(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame,
                 pd.Series(-convergence_df["convergence_score"].to_numpy(dtype=float) / 100.0,
                           index=pd.to_datetime(convergence_df.index, errors="coerce")), price, h)
         for k, e in edges.items():
+            if k == "call":
+                continue
             console.item(f"{k} edge", (f"IC {e['ic']:+.3f} ± {e['se']:.3f} · {e['n']} calls · "
                                        f"{e['positive_blocks']}/{e['scored_blocks']} periods +")
                          if e and e.get("ic") is not None and np.isfinite(e["ic"]) else "not graded")

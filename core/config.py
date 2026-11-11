@@ -96,6 +96,10 @@ FORECAST_HORIZON = 10       # scoring / display horizon (trading days)
 # Forward-return horizons the convergence calibration frame carries by default
 # (convergence.intelligence._build_calibration_frame). Every published grade —
 # the walk-forward edge of every engine — is scored at FORECAST_HORIZON.
+#: A call dated t is acted on at the close of t+1. The panel row for t holds
+#: closes from markets that shut after the target did (New York after Mumbai),
+#: so the target's own close on t is not a price the call could have traded.
+EXECUTION_LAG = 1
 HOLD_HORIZONS = (5, 10)
 
 # Trailing window for the PRECEDENT analog matcher's state features (momentum,
@@ -883,6 +887,17 @@ _CATEGORY_TO_CLASS: dict[str, str] = {
 # knobs on its class default); the India/US STOCK classes stay ASSET-LEVEL
 # (STOCK_CONFIGS) since free-form symbols can't be pre-tuned. Invariant: the
 # per-instrument classes are exactly the catalogue (non-stock) classes.
+def asset_class(target: str) -> str | None:
+    """The asset class a target is graded with. A stock borrows its market's
+    index class — one stock's history cannot license a call on its own."""
+    if target in STOCK_TARGET_MARKETS:
+        return "india_index" if STOCK_TARGET_MARKETS[target] == "india" else "us_index"
+    for cat, names in TARGET_CATEGORIES.items():
+        if target in names:
+            return _CATEGORY_TO_CLASS.get(cat)
+    return None
+
+
 PER_INSTRUMENT_CLASSES: tuple[str, ...] = tuple(dict.fromkeys(_CATEGORY_TO_CLASS.values()))
 ASSET_LEVEL_CLASSES: tuple[str, ...] = ("stock_india", "stock_us")
 assert set(PER_INSTRUMENT_CLASSES).isdisjoint(ASSET_LEVEL_CLASSES)

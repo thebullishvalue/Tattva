@@ -54,7 +54,8 @@ from scipy.stats import rankdata
 
 from analytics.adaptive import OnlineSkillWeights
 from convergence.cross_validator import DIMENSIONS, PRIOR_WEIGHTS, normalise_weights
-from core.config import HOLD_HORIZONS
+from core.config import EXECUTION_LAG, HOLD_HORIZONS
+from core.semantics import claim_direction
 
 log = logging.getLogger(__name__)
 
@@ -64,21 +65,20 @@ __all__ = [
     "online_dimension_weights",
     "apply_online_weights",
     "series_edge",
+    "call_record",
 ]
 
 
-def _forward_log_return(price: pd.Series, horizon: int) -> pd.Series:
-    """h-SESSION forward log return on the price's own calendar.
+def _forward_log_return(price: pd.Series, horizon: int, lag: int = EXECUTION_LAG) -> pd.Series:
+    """Log return over h sessions entered ``lag`` sessions after the row's date.
 
-    Computed on the price series' own index, before any alignment, so ``h``
-    always means h trading sessions of the target — never "h rows of whatever
-    frame it is later joined to", which is longer wherever that frame has gaps
-    (e.g. dates with no Swayam row).
+    ``log P(t+lag+h) − log P(t+lag)``, on the price series' own calendar and
+    before any alignment, so ``h`` always means h sessions of the target.
     """
     p = pd.to_numeric(price, errors="coerce").astype(float)
     p = p[~p.index.duplicated(keep="last")].sort_index()
     lp = np.log(p.where(p > 0))
-    return lp.shift(-int(horizon)) - lp
+    return lp.shift(-(int(lag) + int(horizon))) - lp.shift(-int(lag))
 
 
 def _datetime_index(obj: pd.Series | pd.DataFrame) -> pd.Series | pd.DataFrame:
@@ -180,6 +180,7 @@ def online_dimension_weights(
     halflife: float = 252.0,
     floor: float = 0.05,
     warmup: int = LEARNER_WARMUP,
+    lag: int = EXECUTION_LAG,
 ) -> pd.DataFrame:
     """Causal per-date weights for the four convergence dimensions.
 
@@ -218,7 +219,7 @@ def online_dimension_weights(
     h = max(1, int(horizon))
     W = np.empty((len(frame), len(DIMENSIONS)), dtype=np.float64)
     for t in range(len(frame)):
-        s = t - h
+        s = t - h - int(lag)
         if s >= 0 and np.isfinite(fwd[s]):
             skill.observe(lean[s], fwd[s])     # resolved at t; never before
         W[t] = p0 if skill.n_scored < warmup else skill.weights()
@@ -322,12 +323,14 @@ def series_edge(
     price: pd.Series,
     horizon: int,
     n_blocks: int = 6,
+    lag: int = EXECUTION_LAG,
 ) -> dict:
     """Out-of-sample directional skill of a bullish-positive lean.
 
     ``lean`` is dated *t* and uses only data available at *t* (every lean the
-    system publishes is causal); it is scored against ``log P(t+h) − log P(t)``
-    computed on ``price``'s own session calendar. Rows where either is missing
+    system publishes is causal); it is scored against the h-session return
+    entered ``lag`` sessions later, ``log P(t+lag+h) − log P(t+lag)``, computed
+    on ``price``'s own session calendar. Rows where either is missing
     are dropped. Nothing is fitted here, so every number is out-of-sample with
     respect to everything after the date it was published.
 
@@ -360,7 +363,7 @@ def series_edge(
         return empty
 
     lean_s = _datetime_index(pd.to_numeric(pd.Series(lean), errors="coerce").astype(float))
-    fwd = _forward_log_return(_datetime_index(pd.Series(price)), h)
+    fwd = _forward_log_return(_datetime_index(pd.Series(price)), h, lag)
     df = pd.DataFrame({"lean": lean_s, "fwd": fwd.reindex(lean_s.index)}).dropna()
     if len(df) < 5 * h:
         out = dict(empty)
@@ -400,3 +403,103 @@ def series_edge(
         "scored_blocks": int(len(scored)), "n_blocks": int(len(blocks)),
         "blocks": blocks,
     }
+
+
+# ════════════════════════════════════════════════════════════════════════
+# The call record — the call as it is issued, not the lean behind it
+# ════════════════════════════════════════════════════════════════════════
+
+
+def call_outcomes(fvo: pd.Series, price: pd.Series, horizon: int,
+                  lag: int = EXECUTION_LAG) -> pd.DataFrame:
+    """One row per CLAIM session whose forward window has closed.
+
+    ``direction`` (+1 buy, −1 sell); ``fwd`` — the h-session log return entered
+    ``lag`` sessions later; ``y = direction × fwd``; and the benchmark the claim
+    has to beat, taken over EVERY published session of the same target:
+    ``base`` — how often a position in that direction won on any day — and
+    ``ex = direction × (fwd − mean fwd)``, the return in excess of simply
+    holding that direction all the time.
+
+    The benchmark is the point. On an asset that drifts up, a buy claim wins
+    more than half the time whatever it is conditioned on, so a raw hit rate or
+    a raw mean return grades the drift, not the call.
+    """
+    f = _datetime_index(pd.to_numeric(pd.Series(fvo), errors="coerce").astype(float))
+    fwd = _forward_log_return(_datetime_index(pd.Series(price)), horizon, lag).reindex(f.index)
+    published = f.notna() & fwd.notna()
+    mu = float(fwd[published].mean()) if published.any() else float("nan")
+    up = float((fwd[published] > 0).mean()) if published.any() else float("nan")
+    d = f.map(claim_direction)
+    out = pd.DataFrame({"direction": d, "fwd": fwd})
+    out = out[(out["direction"] != 0) & out["fwd"].notna()].copy()
+    out["y"] = out["direction"] * out["fwd"]
+    out["ex"] = out["direction"] * (out["fwd"] - mu)
+    out["base"] = np.where(out["direction"] > 0, up, 1.0 - up)
+    return out
+
+
+_EMPTY_SIDE = {"n_claims": 0, "n_independent": 0, "hit": float("nan"), "base": float("nan"),
+               "mean_bps": float("nan"), "excess_bps": float("nan"), "se_bps": float("nan"),
+               "t": float("nan")}
+
+
+def _side(out: pd.DataFrame, h: int) -> dict:
+    n = int(len(out))
+    if n == 0:
+        return dict(_EMPTY_SIDE)
+    ex = out["ex"].to_numpy(dtype=np.float64)
+    n_ind = max(n // h, 1)
+    se = float(np.std(ex, ddof=1) / np.sqrt(n_ind)) if n > 1 else float("nan")
+    mean_ex = float(np.mean(ex))
+    return {"n_claims": n, "n_independent": int(n // h),
+            "hit": float((out["y"] > 0).mean() * 100.0),
+            "base": float(out["base"].mean() * 100.0),
+            "mean_bps": float(out["y"].mean() * 1e4),
+            "excess_bps": mean_ex * 1e4, "se_bps": se * 1e4,
+            "t": float(mean_ex / se) if se and np.isfinite(se) and se > 0 else float("nan")}
+
+
+def summarise_outcomes(out: pd.DataFrame, horizon: int, n_blocks: int = 6) -> dict:
+    """The record of a set of claim outcomes (see :func:`call_outcomes`).
+
+    ``hit`` is the share of claims that made money and ``base`` what the same
+    directions would have hit on any day. ``mean_bps`` is the raw mean signed
+    return per claim; ``excess_bps`` ± ``se_bps`` is that return in excess of
+    always holding the direction, and ``t`` is the excess over its SE. The SE
+    counts one independent observation per h claims, because claims on
+    adjacent sessions share almost all of their forward window.
+    """
+    h = max(1, int(horizon))
+    rec = _side(out, h)
+    rec["horizon"] = h
+    rec["long"] = _side(out[out["direction"] > 0], h)
+    rec["short"] = _side(out[out["direction"] < 0], h)
+    blocks = []
+    if len(out):
+        for part in np.array_split(np.arange(len(out)), max(1, int(n_blocks))):
+            if len(part):
+                b = _side(out.iloc[part], h)
+                blocks.append({"start": out.index[part[0]], "end": out.index[part[-1]],
+                               "n": b["n_claims"], "hit": b["hit"], "base": b["base"],
+                               "excess_bps": b["excess_bps"]})
+    rec["blocks"] = blocks
+    scored = [b for b in blocks if b["n"] >= MIN_BLOCK_OBS * h]
+    rec["positive_blocks"] = int(sum(1 for b in scored if b["excess_bps"] > 0))
+    rec["scored_blocks"] = int(len(scored))
+    return rec
+
+
+def call_record(fvo: pd.Series, price: pd.Series, horizon: int,
+                lag: int = EXECUTION_LAG, n_blocks: int = 6) -> dict:
+    """What the call has been worth, graded exactly as it is issued.
+
+    A claim is a session where ``|FVO|`` is past the claim threshold; it is
+    entered at the close ``lag`` sessions later and held ``horizon`` sessions.
+    This is the number the verdict is licensed by. :func:`series_edge` grades
+    the continuous lean on every row, which is a different question: a lean
+    can rank well and its thresholded call still lose to the drift.
+    """
+    rec = summarise_outcomes(call_outcomes(fvo, price, horizon, lag), horizon, n_blocks)
+    rec["lag"] = int(lag)
+    return rec

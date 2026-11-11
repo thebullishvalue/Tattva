@@ -21,6 +21,8 @@ from convergence.divergence_detector import CrossSystemDivergenceDetector
 from convergence.normalization import consensus_series
 from core.config import MIN_DATA_POINTS, STOCK_TARGET_MARKETS, swayam_macro_columns
 from core.logger_config import console
+from data.calendars import resolve_exchange
+from data.fetcher import total_return_index
 from core.semantics import breadth_lean, claim_direction, valuation_lean
 from engines.mula import MulaEngine
 from engines.mula.blocks import block_membership
@@ -265,7 +267,8 @@ def run_convergence(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.
 def grade(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame) -> dict:
     """Every engine's lean against the h-session forward return."""
     h = prep.config.forecast_horizon
-    price = pd.to_numeric(fvo_ts["Price"], errors="coerce")
+    price = pd.to_numeric(fvo_ts["GradePrice" if "GradePrice" in fvo_ts.columns else "Price"],
+                          errors="coerce")
     edges: dict = {}
     try:
         fvo = pd.to_numeric(fvo_ts["FVO"], errors="coerce")
@@ -349,6 +352,13 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
     console.end_phase("MŪLA ENGINE")
     _p(40, "Mūla Engine Complete", f"{sig.get('valuation_state', '')} · {_fmt(sig.get('fvo'), '+.2f')}σ")
 
+    # A target that trades seven days a week is read on the model calendar by
+    # both engines, so "ten sessions" is the same ten for each.
+    if ohlcv is not None and not ohlcv.empty and resolve_exchange(prep.report.get("ticker")) == "CRYPTO":
+        _ix = pd.DatetimeIndex(ohlcv.index)
+        _ix = (_ix.tz_localize(None) if _ix.tz is not None else _ix).normalize()
+        ohlcv = ohlcv[_ix.isin(prep.calendar)]
+
     console.start_phase("SWAYAM ENGINE", 2, 4)
     _p(42, "Running Swayam Engine", "self-referential view bank")
     drivers = swayam_driver_frame(df, prep.target) if df is not None else pd.DataFrame()
@@ -363,6 +373,14 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
     fvo_ts["Date"] = prep.calendar
     fvo_ts = fvo_ts.set_index("Date")
     fvo_ts = fvo_ts[~fvo_ts.index.duplicated(keep="last")]
+    # What forward returns are graded on: the total return where the target
+    # pays dividends, the traded price otherwise. Valuation keeps the close.
+    tr = total_return_index(ohlcv)
+    if tr is not None:
+        tr = tr.reindex(fvo_ts.index).ffill()
+        if tr.notna().sum() >= 0.9 * len(fvo_ts):
+            fvo_ts["GradePrice"] = tr
+            console.item("Grading price", "total return (traded close + dividends, built forward)")
     conv = run_convergence(prep, fvo_ts, swayam_daily)
     _p(93, "Grading Every Engine", f"Non-overlapping {prep.config.forecast_horizon}d")
     edges = grade(prep, fvo_ts, swayam_daily)

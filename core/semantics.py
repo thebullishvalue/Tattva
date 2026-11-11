@@ -29,12 +29,15 @@ from __future__ import annotations
 
 import math
 
+#: FVO is the gap divided by its own typical size. It is NOT a z-score with a
+#: normal tail: measured across the catalogue its SD is 1.0–1.3 and |FVO| ≥ 2
+#: occurs on roughly one day in ten. Read these as multiples of a typical gap;
+#: the pages print the gap's percentile of its own history beside it.
+#:
 #: |FVO| below this is inside the normal day-to-day noise of price around fair
-#: value: no directional claim is made. The hero's mispricing gate starts to
-#: open here.
+#: value: no directional claim is made.
 CLAIM_SIGMA = 0.5
-#: |FVO| at or beyond this is a deep mispricing — the gate is fully open and
-#: the state reads VERY CHEAP / VERY RICH.
+#: |FVO| at or beyond this reads VERY CHEAP / VERY RICH.
 DEEP_SIGMA = 2.0
 
 #: Mūla valuation states, cheapest first.

@@ -187,6 +187,7 @@ def _yfinance_batch_download(
         end=end_yf,
         progress=False,
         auto_adjust=False,
+        actions=True,           # Dividends / Stock Splits columns, for total_return_index
         group_by="ticker",
     )
 
@@ -305,6 +306,37 @@ def probe_symbol(
             ohlcv_cache.put(sym_key, start_yf, end_yf, value=result)
     s = _close_series(result.get(ticker))
     return (s, "ok") if s is not None else (None, "not_found")
+
+
+def total_return_index(ohlcv: pd.DataFrame | None) -> pd.Series | None:
+    """A total-return level built FORWARD from the traded close and cash dividends.
+
+    ``TR_t = TR_{t-1} × (Close_t + Dividend_t) / Close_{t-1}``, anchored at the
+    first close. It is for grading a target's forward returns: on the traded
+    close an ex-dividend day is scored as a loss the holder did not take.
+
+    Forward, not back-adjusted. The vendor's adjusted close rescales the whole
+    past on every distribution, which would rewrite published history; here a
+    new dividend changes the index from its own date onward and nothing before
+    it. Returns ``None`` when the frame carries no dividend (an index, a
+    future, FX, crypto) — the traded close is then the total return.
+    """
+    if ohlcv is None or getattr(ohlcv, "empty", True) or "Close" not in ohlcv.columns:
+        return None
+    if "Dividends" not in ohlcv.columns:
+        return None
+    close = pd.to_numeric(ohlcv["Close"], errors="coerce")
+    div = pd.to_numeric(ohlcv["Dividends"], errors="coerce").fillna(0.0)
+    ok = close.notna() & (close > 0)
+    close, div = close[ok], div[ok]
+    if len(close) < 2 or not (div > 0).any():
+        return None
+    growth = ((close + div) / close.shift(1)).fillna(1.0)
+    tr = float(close.iloc[0]) * growth.cumprod()
+    if getattr(tr.index, "tz", None) is not None:
+        tr.index = tr.index.tz_localize(None)
+    tr.index = pd.DatetimeIndex(tr.index).normalize()
+    return tr[~tr.index.duplicated(keep="last")].sort_index().rename("TotalReturn")
 
 
 def _close_series(odf: pd.DataFrame | None) -> pd.Series | None:

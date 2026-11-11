@@ -61,3 +61,20 @@ def test_scan_reports_each_target_and_survives_a_bad_one(registered, monkeypatch
     assert np.isfinite(good["fvo"]) and good["state"] and pd.isna(good["error"])
     assert good["claims"] >= 0 and not good["licensed"]      # a synthetic target has no class record
     assert isinstance(bad["error"], str) and pd.isna(bad["fvo"])
+
+
+def test_total_return_is_built_forward_and_never_rewrites_the_past():
+    from data.fetcher import total_return_index
+    idx = pd.bdate_range("2024-01-01", periods=6)
+    close = pd.Series([100.0, 101.0, 99.0, 100.0, 102.0, 101.0], index=idx)
+    div = pd.Series([0.0, 0.0, 2.0, 0.0, 0.0, 0.0], index=idx)       # ex-dividend on day 3
+    tr = total_return_index(pd.DataFrame({"Close": close, "Dividends": div}))
+    assert tr.iloc[0] == 100.0 and tr.iloc[1] == 101.0               # the traded close until a dividend
+    assert np.isclose(tr.iloc[2], 101.0 * (99.0 + 2.0) / 101.0)      # the drop is not a loss
+    assert np.isclose(tr.iloc[-1] / tr.iloc[2], 101.0 / 99.0)        # afterwards it moves with price
+    later = div.copy()
+    later.iloc[-1] = 1.5                                             # a new dividend on the last row
+    tr2 = total_return_index(pd.DataFrame({"Close": close, "Dividends": later}))
+    assert np.array_equal(tr.iloc[:-1].to_numpy(), tr2.iloc[:-1].to_numpy())
+    assert total_return_index(pd.DataFrame({"Close": close})) is None            # no dividend data
+    assert total_return_index(pd.DataFrame({"Close": close, "Dividends": div * 0})) is None

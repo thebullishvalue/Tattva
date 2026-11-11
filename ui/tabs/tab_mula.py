@@ -35,6 +35,7 @@ from ui.theme import (chart_layout, style_axes,
                       chart_color, chart_rgba, grid_rgba)
 from ui.components import (
     render_kpi_strip,
+    ordinal_percentile,
     render_metric_card,
     render_interpretation_card,
     render_section_header,
@@ -173,9 +174,12 @@ def _render_read(signal: dict, ts: pd.DataFrame, edge: dict | None, horizon: int
     dsd = _num(signal, "drift_sd_pct")
     ic = (edge or {}).get("ic")
 
+    _pctile = ordinal_percentile(_num(signal, "gap_percentile"))
+    _pctile = f" · {_pctile} of its own history" if _pctile else ""
     render_kpi_strip([
         {"label": "Valuation", "value": state if fvo is not None else "—",
-         "subtext": (f"{fvo:+.2f}σ · {abs(pct):.1f}% {'below' if pct < 0 else 'above'} fair value"
+         "subtext": (f"{fvo:+.2f} typical gaps{_pctile} · {abs(pct):.1f}% "
+                     f"{'below' if pct < 0 else 'above'} fair value"
                      if fvo is not None else "no published valuation"),
          "color_class": _state_tone(state), "tooltip": TOOLTIPS["valuation"]},
         {"label": "Fair Value", "value": f"{fv:,.2f}" if fv is not None else "—",

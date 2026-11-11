@@ -956,6 +956,15 @@ def _f(d: dict | None, key: str, default=None):
     return v if np.isfinite(v) else default
 
 
+def ordinal_percentile(p: float | None) -> str:
+    """``"91st percentile"`` for a share in [0, 1]; ``""`` when missing."""
+    if p is None or not np.isfinite(p):
+        return ""
+    n = int(round(float(p) * 100))
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix} percentile"
+
+
 def _tone(value: float) -> str:
     return "supports" if value >= 0.75 else "against" if value < 0.35 else "neutral"
 
@@ -1179,7 +1188,8 @@ def build_hero_verdict(
         "signal_class": ("buy" if signal == "BUY" else "sell" if signal == "SELL" else "hold"),
         "direction": direction,
         "valuation": {"fvo": fvo, "pct": pct, "verb": verb, "side": side,
-                      "state": (mula or {}).get("valuation_state")},
+                      "state": (mula or {}).get("valuation_state"),
+                      "percentile": _f(mula, "gap_percentile")},
         "licensed": licensed,
         "record": shown,
         "headline": headline,

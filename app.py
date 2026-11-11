@@ -74,6 +74,7 @@ from ui.tabs.tab_convergence import render_convergence_tab
 from ui.components import (
     render_header,
     build_hero_verdict,
+    ordinal_percentile,
     render_hero_card,
     render_control_hint,
     render_ticker,
@@ -806,6 +807,8 @@ def main():
         _agree = float(_ag.mean()) if len(_ag) >= 10 else None
         _val = verdict["valuation"]
         _fvo_v = _val.get("fvo")
+        _pct_txt = ordinal_percentile(_val.get("percentile"))
+        _pct_txt = f"{_pct_txt} · " if _pct_txt else ""
         _trust = verdict["trust"]
         _own = (_edges.get("call") or {})
         _has_rec = _trust.get("hit") is not None and _trust.get("base") is not None
@@ -816,7 +819,7 @@ def main():
              "color_class": ("success" if verdict["signal_class"] == "buy"
                              else "danger" if verdict["signal_class"] == "sell" else "neutral")},
             {"label": "Valuation", "value": (_val.get("state") or "—").title() if _fvo_v is not None else "—",
-             "subtext": (f"{_fvo_v:+.2f} · {abs(_val['pct']):.1f}% {_val['side']} fair value"
+             "subtext": (f"{_fvo_v:+.2f} typical gaps · {_pct_txt}{abs(_val['pct']):.1f}% {_val['side']}"
                          if _fvo_v is not None else "no published valuation"),
              "color_class": ("success" if _fvo_v is not None and _fvo_v <= -0.5
                              else "danger" if _fvo_v is not None and _fvo_v >= 0.5 else "neutral")},

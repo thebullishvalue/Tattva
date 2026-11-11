@@ -22,6 +22,11 @@ __all__ = ["EPOCH", "fetch_window", "PrepError", "PreparedPanel", "prepare", "co
 
 DATE_COL = "DATE"
 
+#: A target must have changed price on at least this share of its last
+#: LIVENESS_WINDOW sessions to be valued.
+LIVENESS_WINDOW = 252
+LIVENESS_FLOOR = 0.50
+
 
 class PrepError(Exception):
     """Data preparation could not produce a usable panel.
@@ -110,23 +115,37 @@ def prepare(df: pd.DataFrame, target: str) -> PreparedPanel:
     report["sessions_dropped"] = max(0, rows_pre - len(data))
 
     data[[target] + features] = data[[target] + features].ffill()
-    # A predictor still carrying a NaN inside the most recent MIN_DATA_POINTS
-    # target sessions cannot support the window without backfilling.
-    win = min(MIN_DATA_POINTS, len(data)) if len(data) else 0
+    data = data.dropna(subset=[target]).reset_index(drop=True)
+    # The panel is ragged on purpose. A predictor that lists later keeps its
+    # leading NaNs and joins the cross-section when its own print count allows
+    # (the engine admits per instrument), so no predictor's listing date can
+    # shorten the target's history. Only one that could never be admitted is
+    # dropped here.
     before = list(features)
-    features = [f for f in features if win and data[f].tail(win).notna().all()]
+    features = [f for f in features if int(data[f].notna().sum()) >= cfg.fvo_min_prints]
     report["feats_dropped"] = [f for f in before if f not in features]
-    data = data.dropna(subset=[target] + features).reset_index(drop=True)
     report["rows_final"] = len(data)
     report["feats_kept"] = len(features)
+
+    # A target whose own price has stopped updating cannot be valued: every
+    # row is a carried quote.
+    tail = data[target].tail(LIVENESS_WINDOW)
+    live = float((tail.diff().abs() > 0).mean()) if len(tail) > 1 else 0.0
+    report["live_share"] = live
+    if live < LIVENESS_FLOOR:
+        raise PrepError(
+            "Target feed not live",
+            f"{target}: {tail.nunique()} distinct prices in the last {len(tail)} sessions "
+            f"({live:.0%} of sessions changed).",
+            f"'{target}' price feed is not live: {tail.nunique()} distinct prices in the last "
+            f"{len(tail)} sessions. It cannot be valued.", report)
 
     if len(data) < MIN_DATA_POINTS:
         raise PrepError(
             "Insufficient data spine",
             f"{target}: {len(data)} usable {exch} sessions after cleaning, need ≥{MIN_DATA_POINTS}. "
             f"Fetched {report['rows_initial']} rows → {report['rows_session']} after session spine → "
-            f"{len(data)} after dropna ({len(features)} features kept, "
-            f"{len(report['feats_dropped'])} dropped for short history).",
+            f"{len(data)} with a target price.",
             f"Need {MIN_DATA_POINTS}+ data points — '{target}' yielded only {len(data)} usable "
             f"{exch} trading sessions after cleaning. Try a target with more history.", report)
     if not features:
@@ -156,7 +175,20 @@ def prepare(df: pd.DataFrame, target: str) -> PreparedPanel:
     panel = data[features].astype(float)
     panel.index = cal
     return PreparedPanel(target=target, calendar=cal, price=price, panel=panel,
-                         features=features, config=cfg, report=report)
+                         features=features, config=cfg, report=report,
+                         printed=_print_mask(df, cal, features))
+
+
+def _print_mask(df: pd.DataFrame, cal: pd.DatetimeIndex, features: list[str]) -> pd.DataFrame | None:
+    """The fetch's own print mask on this panel, or None to let the engine infer it."""
+    from data.fetcher import unpack_mask
+    dates = pd.DatetimeIndex(pd.to_datetime(df[DATE_COL], errors="coerce"))
+    mask = unpack_mask((df.attrs or {}).get("printed"), dates)
+    if mask is None or not set(features).issubset(mask.columns):
+        return None
+    mask = mask[~mask.index.isna()]
+    mask = mask[~mask.index.duplicated(keep="last")]
+    return mask.reindex(index=cal, columns=features, fill_value=False)
 
 
 def log_report(report: dict, stage: str = "complete") -> None:
@@ -170,7 +202,7 @@ def log_report(report: dict, stage: str = "complete") -> None:
     console.item("Rows · after session spine",
                  f"{report.get('rows_session', '?')}  ({report.get('sessions_dropped', '?')} non-session rows removed)")
     console.item("Instruments · requested", report.get("feats_requested", "?"))
-    console.item("Instruments · dropped (short history)",
+    console.item("Instruments · dropped (too few prints to ever join)",
                  f"{len(dropped)}" + (f" → {', '.join(dropped[:6])}{'…' if len(dropped) > 6 else ''}"
                                       if dropped else ""))
     if report.get("yield_cols_dropped"):

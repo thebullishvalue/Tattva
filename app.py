@@ -109,6 +109,7 @@ from data.universe import resolve_stock_symbol
 
 # ── Pipeline ─────────────────────────────────────────────────────────────────
 from engines.mula import FairValueEngine
+from core.config import EPOCH
 from pipeline.prep import PrepError, config_for, fetch_window, log_report, prepare
 from pipeline.freshness import freshness
 from pipeline.run import run_prepared
@@ -169,7 +170,7 @@ def _ensure_stock_target_column(df: pd.DataFrame, active_target: str) -> pd.Data
     that is not in those maps has no column at all, and the guard downstream
     reports it as a failed source fetch.
 
-    Catalogue targets outside the macro maps — Aluminium, Zinc, the crypto
+    Catalogue targets outside the macro maps — Aluminium, the crypto
     bank — are handled UPSTREAM, by ``data.fetcher._fetch_catalogue_targets``,
     so their column is already present by the time this runs. That is
     deliberate: the shared matrix is read by the app, by the research
@@ -299,7 +300,7 @@ def _render_landing_page() -> None:
             {"label": "Catalogue Targets", "value": str(_n_tgt),
              "subtext": "Every one runnable on free data; each carries its own "
                         "configuration, defaulting to its asset class's"},
-            {"label": "Daily History Per Run", "value": "~9y",
+            {"label": "Daily History", "value": f"Since {EPOCH[:4]}",
              "subtext": "Every published value uses only data available on its own "
                         "date, so re-running extends the record instead of rewriting it"},
         ],

@@ -126,6 +126,46 @@ def _download_classified(**kwargs) -> pd.DataFrame:
     raise ValueError("Empty yfinance response")
 
 
+# ─── The print mask ─────────────────────────────────────────────────────────
+# Which cells are genuine prints, as opposed to values carried forward. The
+# vendor's own NaN pattern is the exact answer, and it is gone once a frame is
+# forward-filled, so it is captured before that and travels in ``attrs`` —
+# packed to bytes, because pandas deep-copies ``attrs`` on most operations and
+# a bytes object costs nothing to copy.
+
+def pack_mask(mask: pd.DataFrame) -> dict:
+    v = mask.to_numpy(dtype=bool)
+    return {"columns": tuple(str(c) for c in mask.columns), "shape": v.shape,
+            "bits": np.packbits(v, axis=None).tobytes()}
+
+
+def unpack_mask(packed: dict | None, index) -> pd.DataFrame | None:
+    """The mask as a bool frame on ``index``; None if absent or misaligned."""
+    if not packed:
+        return None
+    try:
+        rows, cols = packed["shape"]
+        if rows != len(index):
+            return None
+        bits = np.unpackbits(np.frombuffer(packed["bits"], dtype=np.uint8))[: rows * cols]
+        return pd.DataFrame(bits.reshape(rows, cols).astype(bool), index=index,
+                            columns=list(packed["columns"]))
+    except Exception:  # noqa: BLE001 - a malformed mask means "infer instead"
+        return None
+
+
+def infer_prints(values: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
+    """Prints inferred from where a forward-filled series changes value.
+
+    The fallback for data that arrived already filled (a snapshot-rebuilt
+    column). A carried quote is bit-identical to the one before it, so a change
+    is a print, and so is the first finite value.
+    """
+    finite = values.notna()
+    changed = finite & (values != values.shift(1))
+    return changed
+
+
 # ─── OHLCV (yfinance) ────────────────────────────────────────────────────────
 
 @RetryWithBackoff(max_retries=2, initial_delay=1.5, backoff_factor=2.0)
@@ -509,10 +549,17 @@ def _fetch_macro_live_uncached(start_str: str, end_str: str) -> pd.DataFrame:
     combined = combined.sort_index()
 
     if not combined.empty:
+        printed = combined.notna()
         combined = combined.ffill()
         # yfinance rate-limits a few tickers per batch; refill those columns from the
         # last good snapshot so a partial response never drops a target (e.g. Gold=GC=F).
         combined = _backfill_missing_columns(combined, tickers)
+        # A column rebuilt from a snapshot arrived already filled: infer its prints.
+        printed = printed.reindex(columns=combined.columns, fill_value=False)
+        rebuilt = [c for c in combined.columns if not printed[c].any()]
+        if rebuilt:
+            printed[rebuilt] = infer_prints(combined[rebuilt])
+        combined.attrs["printed"] = pack_mask(printed)
     return combined
 
 
@@ -639,6 +686,7 @@ def fetch_commodity_dataset(
                                from a prior snapshot this fetch (a rebuilt column
                                is a DIFFERENT series, not just a staler one)
       * ``panel_columns`` / ``panel_fingerprint`` — the composition digest
+      * ``printed``          — the packed print mask (``unpack_mask``), row-aligned
 
     Returns ``(df, None)`` on success or ``(None, error_message)`` on failure.
     """
@@ -656,6 +704,11 @@ def fetch_commodity_dataset(
         return None, "Macro/commodity symbols missing from yfinance response."
 
     renamed = macro_df[present].rename(columns=ticker_to_name)
+    _mask = unpack_mask(macro_df.attrs.get("printed"), macro_df.index)
+    if _mask is not None:
+        _mask = _mask.reindex(columns=present, fill_value=False).rename(columns=ticker_to_name)
+    else:
+        _mask = infer_prints(renamed)
     _backfilled = {ticker_to_name.get(t, t): d for t, d in _backfilled.items()}
 
     # Drop columns yfinance returned empty / near-empty: failed or delisted
@@ -683,6 +736,7 @@ def fetch_commodity_dataset(
     # dropped it). Equities/commodities don't trade weekends, so these rows are pure
     # artifacts — remove them so the latest row is always a real trading day.
     df = df[df.index.dayofweek < 5]
+    _mask = _mask.reindex(index=df.index, columns=df.columns, fill_value=False)
 
     # Inject exogenous (non-yfinance) target columns — e.g. Jeera (NCDEX cumin)
     # from a published Google Sheet. Each is reindexed onto the macro (US-
@@ -698,7 +752,8 @@ def fetch_commodity_dataset(
     # ff-filled — i.e. the very thing the partial-session gate flags. So the spine
     # stays; true per-market alignment would need exchange calendars (future work).
     for _name, _series in _fetch_exogenous_targets(df.index, force=force).items():
-        df[_name] = _series
+        df[_name] = _series.ffill()
+        _mask[_name] = _series.notna()
 
     # Catalogue targets that are yfinance symbols but NOT members of the macro
     # universe. A target arrives above only if it is also a PREDICTOR — true of
@@ -711,7 +766,8 @@ def fetch_commodity_dataset(
     # ran that target perfectly well through its own per-target injection.
     for _name, _series in _fetch_catalogue_targets(
             df.index, df.columns, start_date, end_date, force=force).items():
-        df[_name] = _series
+        df[_name] = _series.ffill()
+        _mask[_name] = _series.notna()
 
     # ── Panel fingerprint ────────────────────────────────────────────────
     # The published history is a function of the panel's COMPOSITION, not just
@@ -737,6 +793,9 @@ def fetch_commodity_dataset(
         "stale_backfills": {k: v for k, v in _backfilled.items() if k in df.columns},
         "panel_columns": _columns,
         "panel_fingerprint": _fingerprint,
+        # Row-aligned with this frame (same order, DATE column excluded).
+        "printed": pack_mask(_mask.reindex(columns=[c for c in df.columns if c != "DATE"],
+                                           fill_value=False)),
     }
     return df, None
 
@@ -828,7 +887,7 @@ def _fetch_catalogue_targets(
         ser = o["Close"]
         ser.index = pd.DatetimeIndex(ser.index).normalize()
         ser = ser[~ser.index.duplicated(keep="last")]
-        out[_name] = ser.reindex(index).ffill()
+        out[_name] = ser.reindex(index)     # unfilled: the caller reads the print mask off it
     return out
 
 
@@ -844,7 +903,7 @@ def _fetch_exogenous_targets(index: pd.Index, force: bool = False) -> dict[str, 
         try:
             s = fetch_sheet_series(_name, index.min(), index.max(), force=force)
             if s is not None and not s.empty:
-                out[_name] = s.reindex(index).ffill()
+                out[_name] = s.reindex(index)   # unfilled, as above
         except Exception as e:  # noqa: BLE001
             log.warning("Exogenous %s fetch skipped: %s", _name, e)
     return out

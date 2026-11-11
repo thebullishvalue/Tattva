@@ -71,6 +71,9 @@ FVO_MIN_PRINTS = 250
 FVO_VALUATION_DELTAS = (0.999, 0.9995, 0.9999, 1.0)
 
 OU_PROJECTION_DAYS = 90
+#: Reciprocals and re-denominations of an instrument already in the panel are
+#: not listed (INR/USD beside USD/INR, the X/INR crosses, UDN beside UUP): a
+#: duplicated instrument is counted twice by the factor model.
 MIN_DATA_POINTS = 1500
 
 #: First date of every fetch. Fixed, so the estimators' origin never moves
@@ -243,7 +246,6 @@ GLOBAL_MACRO_MAP = {
     "International Treasury (ex-US)":    "IGOV",
     "International Treasury SPDR":       "BWX",
     "International Corporate Bonds":     "IBND",
-    "Eurozone Government Bond":          "IEGA.L",
     "Eurozone Corporate Bond (IG)":      "IEAC.L",
     "Germany Govt Bonds (Bunds/Long)":   "IBGL.L",
     "Germany Short-Term (Schatz)":       "SDEU.L",
@@ -321,7 +323,6 @@ GLOBAL_MACRO_MAP = {
     "US Dollar Bullish (UUP)":           "UUP",
     "TIPS (Inflation-Protected, SCHP)":  "SCHP",
     # ── FX Complex (currency factor — beyond UUP/DXY) ──────────────────────
-    "US Dollar Bearish (UDN)":           "UDN",
     "USD Bullish Broad (USDU)":          "USDU",
     "Euro (FXE)":                        "FXE",
     "Japanese Yen (FXY)":                "FXY",
@@ -378,25 +379,11 @@ MACRO_SYMBOLS_YF = {
     # Major FX
     "Dollar Index": "DX-Y.NYB",
     "USD/INR": "INR=X",
-    "EUR/INR": "EURINR=X",
-    "GBP/INR": "GBPINR=X",
-    "JPY/INR": "JPYINR=X",
-    "AUD/INR": "AUDINR=X",
-    "NZD/INR": "NZDINR=X",
-    "CAD/INR": "CADINR=X",
-    "CHF/INR": "CHFINR=X",
-    "CNY/INR": "CNYINR=X",
-    "SGD/INR": "SGDINR=X",
-    "HKD/INR": "HKDINR=X",
-    "INR/USD": "INRUSD=X",
     "USD/BDT": "BDT=X",
     "USD/CNY": "CNY=X",
     "USD/CNH": "CNH=X",
-    "CNY/USD": "CNYUSD=X",
     "USD/JPY": "JPY=X",
-    "JPY/USD": "JPYUSD=X",
     "USD/KRW": "KRW=X",
-    "KRW/USD": "KRWUSD=X",
     "EUR/USD": "EURUSD=X",
     "GBP/USD": "GBPUSD=X",
     "USD/SEK": "USDSEK=X",
@@ -468,7 +455,6 @@ COMMODITY_TARGETS = {
     # Base metals. Both are LME contracts quoted in USD/tonne and print on the
     # same weekday calendar as the rest of the commodity complex.
     "Aluminium": "ALI=F",
-    "Zinc": "ZNC=F",
     # Crypto trades 7 days a week — 366 daily bars a year against ~252 for a
     # future — while every macro predictor prints on weekdays only. The shared
     # matrix is a weekday spine (data/fetcher.py drops weekend rows when it
@@ -518,28 +504,21 @@ TARGET_EXCLUDED_PREDICTORS = {
     # the regression explain either metal with a basket containing it — the
     # same reason it is excluded for copper.
     "Aluminium": ["Base Metals (DBB)"],
-    "Zinc": ["Base Metals (DBB)"],
-    # EVERY INR-leg cross is a replica of USD/INR: INR/USD is its exact reciprocal,
-    # and X/INR = X/USD × USD/INR all carry the target's own currency leg. Excluding
-    # the whole set (computed so future additions are covered automatically) keeps
-    # the fair-value residual honest. Dollar Index is kept — a driver, not a replica.
-    "USD/INR": [n for n in MACRO_SYMBOLS_YF
-                if (n.endswith("/INR") or n == "INR/USD") and n != "USD/INR"],
     # The Dollar Index IS a fixed basket of six crosses, so most of the FX
     # complex reconstructs it arithmetically rather than explaining it:
     # EUR 57.6%, JPY 13.6%, GBP 11.9%, CAD 9.1%, SEK 4.2%, CHF 3.6%. Left in,
     # a handful of predictors rebuild the target to ~96% by weight and the
     # "mispricing" that remains is rounding — an OOS R2 near 1.0 that means
     # nothing. Excluded here: the index column itself, the three USD-index
-    # ETFs that track it (UUP long, UDN its exact inverse, USDU a broad USD
+    # ETFs that track it (UUP, and USDU, a broad USD
     # basket), and the component legs. Non-component FX stays — AUD, the INR
     # legs and the EM crosses are drivers of the dollar, not pieces of it.
     "Dollar Index": [
         "Dollar Index",
-        "US Dollar Bullish (UUP)", "US Dollar Bearish (UDN)",
+        "US Dollar Bullish (UUP)",
         "USD Bullish Broad (USDU)",
         "Euro (FXE)", "EUR/USD",
-        "Japanese Yen (FXY)", "USD/JPY", "JPY/USD",
+        "Japanese Yen (FXY)", "USD/JPY",
         "British Pound (FXB)", "GBP/USD",
         "Canadian Dollar (FXC)",
         "Swiss Franc (FXF)", "USD/CHF",
@@ -604,7 +583,7 @@ ALL_TARGETS = {**COMMODITY_TARGETS, **INDEX_TARGETS_MAP}
 
 # Sidebar grouping — ordered category → target names.
 TARGET_CATEGORIES: dict[str, list[str]] = {
-    "Commodities": ["Gold", "Silver", "Copper", "Aluminium", "Zinc",
+    "Commodities": ["Gold", "Silver", "Copper", "Aluminium",
                     "Brent Crude", "Cotton", "Jeera"],
     "Currency (FX)": ["USD/INR", "Dollar Index"],
     "Crypto": ["Bitcoin", "Ethereum", "Solana", "XRP", "BNB", "Cardano",

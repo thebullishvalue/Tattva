@@ -176,17 +176,10 @@ SWAYAM_OVERBOUGHT = 5
 # when the overlap is too short to learn from). Direction-heavy: whether the two
 # engines point the same way is the dimension with a meaning independent of
 # scale.
-CONV_WEIGHT_DIRECTION = 0.50
-CONV_WEIGHT_BREADTH = 0.20
-CONV_WEIGHT_MAGNITUDE = 0.20
-CONV_WEIGHT_REGIME = 0.10
 
 # The weighted composite's drift-diffusion filter (convergence.conviction_model).
 # ddm 2026-07-20: leak 0.01. GUARD: sweep leak WITH drift co-scaled
 # (drift = leak × gain 1.20), never alone.
-CONV_DDM_LEAK_RATE = 0.01
-CONV_DDM_DRIFT_SCALE = 0.012
-CONV_DDM_LONG_RUN_VAR = 50.0
 
 # Divergence detection
 DIV_LOOKBACK = 20
@@ -787,18 +780,11 @@ class InstrumentConfig:
     fvo_lookback_windows: tuple[int, ...] = LOOKBACK_WINDOWS
 
     # ── Convergence: the weighted composite's drift-diffusion filter ────────
-    ddm_leak: float = CONV_DDM_LEAK_RATE
-    ddm_drift: float = CONV_DDM_DRIFT_SCALE
-    ddm_lrv: float = CONV_DDM_LONG_RUN_VAR
 
     # ── Convergence dimension weights: PRIOR for the online learner ────────
     # Passed as `prior` to convergence.intelligence.apply_online_weights, which
     # moves them by each dimension's own discounted signed skill. A starting
     # belief, not a fitted answer.
-    conv_weight_direction: float = CONV_WEIGHT_DIRECTION
-    conv_weight_breadth: float = CONV_WEIGHT_BREADTH
-    conv_weight_magnitude: float = CONV_WEIGHT_MAGNITUDE
-    conv_weight_regime: float = CONV_WEIGHT_REGIME
 
     # ── Precedent analog term structure ─────────────────────────────────────
     precedent_horizons: tuple[int, ...] = PRECEDENT_HORIZONS
@@ -823,8 +809,6 @@ class InstrumentConfig:
     # the Convergence page colour it with.
     ui_swayam_avg_threshold: float = 2.87
     # Engine agreement ratio — p90 / p75.
-    ui_agreement_strong: float = 0.89
-    ui_agreement_moderate: float = 0.799
     # Model spread (SD of the fair-value level), basis points — p10 / p90. The
     # spread now measures the fair value's own uncertainty, not the residual
     # noise around it, and runs ~17-77 bps across instruments (2026-10-17), so
@@ -836,24 +820,7 @@ class InstrumentConfig:
     # with one shared warm-up prior each. Seven other display fields went with
     # the cards and markers that read them.)
 
-    def weights_seed(self) -> dict[str, float]:
-        """Prior dimension weights — the CrossValidator's first pass and the learner's start."""
-        return {
-            "w_direction": self.conv_weight_direction,
-            "w_breadth": self.conv_weight_breadth,
-            "w_magnitude": self.conv_weight_magnitude,
-            "w_regime": self.conv_weight_regime}
 
-
-
-# Per-asset-class DEFAULT tuning. Each class is a NAMED constant so an entire class
-# can be retuned in one place (e.g. give all commodities a different Swayam grid)
-# without editing every member. The India-index default IS the Nifty 50 baseline —
-# the other India indices copy it (per spec). Values below are the `per_asset`
-# 2026-07-21 class-level bests for the classes it owns (us_index/etf MSF, stock Swayam
-# grids). commodity/fx inherit the global defaults; the self-mode STOCK grids are
-# PINNED to per_asset's stock recommendation so they do NOT drift with the global
-# SWAYAM_* globals (which the `swayam` study tunes on commodities).
 CLASS_CONFIG_DEFAULTS: dict[str, InstrumentConfig] = {
     "commodity":   InstrumentConfig(),
     "fx":          InstrumentConfig(),

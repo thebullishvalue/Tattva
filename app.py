@@ -93,7 +93,6 @@ from ui.components import (
     render_notice_rail,
     render_rail_readout,
     window_cutoff,
-    edge_periods,
 )
 from ui.tabs.tab_mula import render_mula_tab
 from ui.tabs.tab_swayam import render_swayam_tab
@@ -136,7 +135,6 @@ _BUNDLE_KEYS = (
     "engine", "fvo_ts", "swayam_daily", "swayam_view_dfs", "swayam_view_weights",
     "swayam_n_eff", "swayam_native_last",
     "convergence_df", "divergence_events", "hero_series",
-    "intelligence_active_weights", "intelligence_active_profile",
     "edges", "precedent_summary", "analogs", "precedent_skill",
 )
 # Keep the last N configs. Each entry is a full pipeline result; 6 covers a
@@ -248,12 +246,12 @@ _SYSTEM_PANELS = (
       ("Breadth", "Net oversold share of views"),
       ("Regime", "HMM \u00b7 GARCH \u00b7 CUSUM"))),
     ("convergence", "System 03", "Convergence", "Agreement, measured",
-     "Scores the two systems against each other across direction, breadth, magnitude and "
-     "regime, with weights learned forward from each dimension's signed skill — and grades "
-     "the result the way every engine is graded.",
-     (("Fusion", "Mūla \u00d7 Swayam"),
-      ("Weights", "Learned online, causal"),
-      ("Graded", "Walk-forward IC"))),
+     "Sets the two readings side by side, session by session: whether they lean the same "
+     "way, the consensus of the two on a common scale, and the sessions on which they "
+     "part company.",
+     (("Compared", "Mūla \u00d7 Swayam leans"),
+      ("Consensus", "Zero-anchored, causal"),
+      ("Divergences", "Named, per session"))),
 )
 
 
@@ -399,14 +397,9 @@ def _compute_hero_verdict(signal: dict, target: str, horizon: int) -> dict:
         _last = _sw.iloc[-1]
         swayam_breadth = {"oversold_pct": float(_last.get("Oversold_Pct", 0.0)),
                           "overbought_pct": float(_last.get("Overbought_Pct", 0.0))}
-    _cdf = st.session_state.get("convergence_df")
-    agreement = (float(_cdf["agreement_ratio"].dropna().iloc[-1])
-                 if _cdf is not None and not _cdf.empty and "agreement_ratio" in _cdf.columns
-                 and _cdf["agreement_ratio"].notna().any() else None)
     return build_hero_verdict(
         mula=signal,
         swayam_breadth=swayam_breadth,
-        agreement=agreement,
         call=(st.session_state.get("edges") or {}).get("call"),
         class_record=class_record(target),
         precedent=st.session_state.get("precedent_summary"),
@@ -419,27 +412,23 @@ def _compute_hero_verdict(signal: dict, target: str, horizon: int) -> dict:
 
 
 def _render_model_passport_sidebar() -> None:
-    """Rail readout — what the run reached, not a control.
-
-    Two facts worth a glance from any page: the dimension weights the
-    convergence learner arrived at, and what Mūla's call has been worth out of
-    sample. Nothing is persisted between runs, so there is no profile to load,
-    compare or reset — only the state this run reached.
-    """
-    st.markdown('<div class="sidebar-title">Model</div>', unsafe_allow_html=True)
-    w = st.session_state.get("intelligence_active_weights") or {}
-    edge = (st.session_state.get("edges") or {}).get("mula") or {}
-    if not w and not edge:
+    """Rail readout — what the run measured, not a control."""
+    st.markdown('<div class="sidebar-title">Record</div>', unsafe_allow_html=True)
+    edges = st.session_state.get("edges") or {}
+    call, lean = edges.get("call") or {}, edges.get("mula") or {}
+    if not call and not lean:
         render_control_hint("Run an analysis to populate.")
         return
-    rows = [(f"{k.capitalize()} weight", f"{v:.2f}", "accent")
-            for k, v in sorted(w.items(), key=lambda kv: -kv[1])]
-    ic = edge.get("ic")
+    rows = []
+    if call.get("n_claims"):
+        rows.append(("Claims graded", f"{call['n_claims']:,}", ""))
+        rows.append(("Hit rate", f"{call['hit']:.1f}%", "accent"))
+        rows.append(("Any-day base", f"{call['base']:.1f}%", ""))
+        if np.isfinite(call.get("t", np.nan)):
+            rows.append(("Excess t", f"{call['t']:+.2f}", "long" if call["t"] > 0 else "short"))
+    ic = lean.get("ic")
     if ic is not None and np.isfinite(ic):
-        rows.append(("Mūla edge (IC)", f"{ic:+.3f}", "long" if ic > 0 else "short"))
-        _pos, nb = edge_periods(edge)
-        if nb:
-            rows.append(("Periods +", f"{_pos}/{nb}", ""))
+        rows.append(("Lean IC", f"{ic:+.3f}", ""))
     render_rail_readout(rows)
 
 
@@ -990,9 +979,9 @@ def main():
         if _swd is not None and not _swd.empty and {"Oversold_Pct", "Overbought_Pct"} <= set(_swd.columns):
             _os, _ob = float(_swd["Oversold_Pct"].iloc[-1]), float(_swd["Overbought_Pct"].iloc[-1])
         _cdf = st.session_state.get("convergence_df")
-        _agree = (float(_cdf["agreement_ratio"].dropna().iloc[-1])
-                  if _cdf is not None and not _cdf.empty and "agreement_ratio" in _cdf.columns
-                  and _cdf["agreement_ratio"].notna().any() else None)
+        _ag = (_cdf["agree"].dropna().tail(60) if _cdf is not None and not _cdf.empty
+               and "agree" in _cdf.columns else pd.Series(dtype=float))
+        _agree = float(_ag.mean()) if len(_ag) >= 10 else None
         _val = verdict["valuation"]
         _fvo_v = _val.get("fvo")
         _trust = verdict["trust"]
@@ -1025,7 +1014,8 @@ def main():
              "color_class": ("success" if _os is not None and _os - _ob > 10
                              else "danger" if _os is not None and _os - _ob < -10 else "neutral")},
             {"label": "Engine Agreement", "value": f"{_agree:.0%}" if _agree is not None else "—",
-             "subtext": "Mūla × Swayam, four dimensions", "color_class": "neutral"},
+             "subtext": (f"same sign, last {len(_ag)} sessions both leaned" if _agree is not None
+                         else "too few sessions on which both lean"), "color_class": "neutral"},
         ], max_cols=6)
         render_section_header(
             "The Read",
@@ -1049,7 +1039,7 @@ def main():
     def _page_convergence() -> None:
         _top_bar(windowed=True)
         _safe_render("Convergence", lambda: render_convergence_tab(
-            ts_filtered, edge=_edges.get("composite"), horizon=FWD_HORIZON))
+            ts_filtered, horizon=FWD_HORIZON))
 
     def _page_precedent() -> None:
         _top_bar()

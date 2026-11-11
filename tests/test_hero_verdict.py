@@ -15,7 +15,7 @@ SKILL = dict(edge=4.0, n=60, hit=58.0, base=54.0)
 
 def _v(**kw):
     args = dict(mula=MULA, swayam_breadth={"oversold_pct": 60, "overbought_pct": 10},
-                agreement=0.7, call=CALL, class_record=RECORD, precedent=PREC,
+                call=CALL, class_record=RECORD, precedent=PREC,
                 precedent_skill=SKILL, n_divergences=0, horizon_days=10, div_window=20)
     args.update(kw)
     return build_hero_verdict(**args)

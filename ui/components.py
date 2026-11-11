@@ -976,7 +976,6 @@ def build_hero_verdict(
     *,
     mula: dict,
     swayam_breadth: dict | None,
-    agreement: float | None,
     call: dict | None,
     class_record: dict | None,
     precedent: dict | None,
@@ -1075,14 +1074,12 @@ def build_hero_verdict(
         ob_ = float(swayam_breadth.get("overbought_pct", 0.0) or 0.0)
         net = (os_ - ob_) / 100.0
         aligned = net * dir_ if dir_ else abs(net)
-        agree_txt = (f" Across direction, breadth, magnitude and regime the engines agree "
-                     f"{agreement:.0%}." if agreement is not None and np.isfinite(agreement) else "")
         _add("convergence", _gate(aligned, -0.3, 0.4),
              ("nothing to confirm" if dir_ == 0 else
               "Swayam confirms" if aligned > 0.1 else
               "Swayam contradicts" if aligned < -0.1 else "Swayam split"),
              f"Swayam net breadth {net:+.0%} ({os_:.0f}% of views oversold, "
-             f"{ob_:.0f}% overbought).{agree_txt}")
+             f"{ob_:.0f}% overbought).")
     else:
         _add("convergence", 0.5, "no Swayam read",
              "Swayam produced no breadth for this target's latest session.")

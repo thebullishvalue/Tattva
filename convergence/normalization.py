@@ -56,7 +56,6 @@ log = logging.getLogger(__name__)
 # it is only a starting point, and the causal estimate takes over after 252
 # rows either way.
 CONSENSUS_PRIOR: dict[str, float] = {"strong": 0.404, "moderate": 0.279}
-COMPOSITE_PRIOR: dict[str, float] = {"strong": 0.159, "moderate": 0.092}
 
 #: Rows of an input's own history before its scale is trusted. Before this the
 #: normalized value is NaN rather than a ratio to a two-point RMS.
@@ -106,20 +105,6 @@ def causal_tiers(values, prior: dict[str, float], scale: float = 1.0,
          "moderate": float(prior["moderate"]) * scale},
         quantiles={"strong": 0.90, "moderate": 0.75}, min_obs=min_obs)
     return tiers["strong"], tiers["moderate"]
-
-
-def classify_convergence_score(score_pm100: float, strong: float | None = None,
-                               moderate: float | None = None) -> str:
-    """Tier word for the weighted composite ``convergence_score`` (±100).
-
-    ``strong`` / ``moderate`` on the ±100 scale; omitted, the composite's own
-    warm-up priors. Prefer passing the per-date levels from
-    :func:`causal_tiers` (``scale=100``) — that is what makes a label agree
-    with the marker drawn for the same date.
-    """
-    s = COMPOSITE_PRIOR["strong"] * 100.0 if strong is None else strong
-    m = COMPOSITE_PRIOR["moderate"] * 100.0 if moderate is None else moderate
-    return lean_label(score_pm100, s, m)
 
 
 def _swayam_signal_column(df: pd.DataFrame) -> str | None:

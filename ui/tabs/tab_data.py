@@ -71,8 +71,7 @@ def build_record(ts: pd.DataFrame) -> pd.DataFrame:
 
     cv = _by_date(st.session_state.get("convergence_df"))
     if not cv.empty:
-        for src, name in (("agreement_ratio", "Agreement"),
-                          ("convergence_score", "Weighted composite")):
+        for src, name in (("mula_lean", "Mūla lean"), ("swayam_lean", "Swayam lean")):
             if src in cv.columns:
                 out[name] = cv[src].reindex(out.index)
     cons = st.session_state.get("hero_series")
@@ -100,7 +99,7 @@ def render_data_tab(ts_filtered, ts, active_target):
         "The Record",
         f"Every published series for {active_target}, one row per session, in the units the "
         f"pages show them in. Readings keep their native sign — positive = stretched up (gap, "
-        f"oscillator, Swayam signal, consensus, composite) — except Swayam net breadth, which "
+        f"oscillator, Swayam signal, consensus) — except Swayam net breadth, which "
         f"is oversold minus overbought and so reads positive when the views lean bullish.",
         icon="database", accent="cyan",
     )

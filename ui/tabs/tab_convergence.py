@@ -32,30 +32,27 @@ from analytics.adaptive import tier_now
 from core.config import DIV_LOOKBACK, UI_CHART_HEIGHT_STACKED, UI_CHART_HEIGHT_MEDIUM
 from core.config import get_instrument_config, InstrumentConfig
 from core.semantics import CLAIM_SIGMA, valuation_state
-from convergence.normalization import consensus_series, lean_label
+from convergence.normalization import consensus_series
 from ui.theme import chart_layout, style_axes, chart_color, chart_rgba, grid_rgba, panel_bg
 from ui.components import (render_kpi_strip, render_section_header, render_empty_state,
                            render_info_box, render_chart_panel, render_table_panel,
-                           render_edge_panel, render_note)
+                           render_note)
+
+#: Sessions the agreement share is taken over.
+AGREE_WINDOW = 60
 
 TOOLTIPS = {
     "agreement": (
-        "Today's weighted agreement between Mūla and Swayam across four dimensions — "
-        "direction, breadth, magnitude and regime — with the weights the learner has "
-        "earned for each. Two causal transforms of ONE price agree more often than chance "
-        "by construction, so read it against this instrument's own history (the tier), "
-        "not against 50%."
+        "Of the recent sessions on which BOTH engines leaned — Mūla past its claim "
+        "threshold, Swayam's net breadth past ±10 points — the share on which they leaned "
+        "the same way. Two readings of one price agree more often than chance by "
+        "construction, so this is a description, not a grade."
     ),
     "consensus": (
         "The average of the two engines' readings, each scaled by its own history without "
         "re-centring, so zero still means 'no reading': Mūla's oscillator and Swayam's "
         "average signal. Negative = both lean stretched down (bullish under the contrarian "
         "read). Classified at this instrument's own p90 / p75."
-    ),
-    "composite": (
-        "The convergence learner's construction: agreement strength, weighted by each "
-        "dimension's learned signed skill, pointed in the direction the two engines lean. "
-        "±100; negative = bullish agreement. This is the series its walk-forward edge grades."
     ),
 }
 
@@ -138,36 +135,28 @@ def _render_consensus_chart(cs: pd.DataFrame, sw_tier: float) -> None:
     render_chart_panel(fig, "convergence_overlay", units="consensus · Mūla σ · Swayam signal", window=True)
 
 
-def _render_composite_chart(cdf: pd.DataFrame) -> None:
-    """The learner's weighted composite with its drift-diffusion filter, and agreement."""
-    d = list(cdf.index)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.62, 0.38],
-                        vertical_spacing=0.07)
-    if {"ddm_upper", "ddm_lower"} <= set(cdf.columns):
-        fig.add_trace(go.Scatter(x=d, y=cdf["ddm_upper"], mode="lines", line=dict(width=0),
-                                 showlegend=False, hoverinfo="skip"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=d, y=cdf["ddm_lower"], mode="lines", line=dict(width=0),
-                                 fill="tonexty", fillcolor=chart_rgba("slate", 0.07),
-                                 showlegend=False, hoverinfo="skip"), row=1, col=1)
-    sc = pd.to_numeric(cdf["convergence_score"], errors="coerce")
-    fig.add_trace(go.Scatter(x=d, y=sc, mode="lines", name="Weighted composite",
-                             line=dict(color=chart_rgba("accent", 0.45), width=1),
-                             hovertemplate="%{y:+.1f}<extra>Composite</extra>"), row=1, col=1)
-    if "ddm_smoothed" in cdf.columns:
-        fig.add_trace(go.Scatter(x=d, y=cdf["ddm_smoothed"], mode="lines", name="Drift-diffusion filtered",
-                                 line=dict(color=chart_color("accent"), width=1.6),
-                                 customdata=cdf.get("ddm_label"),
-                                 hovertemplate="%{y:+.1f} · %{customdata}<extra>Filtered</extra>"),
-                      row=1, col=1)
-    fig.add_hline(y=0, line_color=grid_rgba(0.08), line_width=0.5, row=1, col=1)
-    ag = pd.to_numeric(cdf["agreement_ratio"], errors="coerce")
-    fig.add_trace(go.Scatter(x=d, y=ag, mode="lines", name="Agreement",
-                             line=dict(color=chart_color("slate"), width=1.2),
-                             hovertemplate="%{y:.0%}<extra>Agreement</extra>"), row=2, col=1)
-    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM + 100))
-    style_axes(fig, y_title="Composite (±100)", row=1, col=1)
-    style_axes(fig, y_title="Agreement", y_range=[0, 1], row=2, col=1)
-    render_chart_panel(fig, "convergence_composite", units="composite · agreement")
+def _render_lean_scatter(cdf: pd.DataFrame) -> None:
+    """Mūla's lean against Swayam's, one point per session in the window."""
+    fig = go.Figure()
+    x = cdf["mula_lean"].to_numpy(dtype=float)
+    y = cdf["swayam_lean"].to_numpy(dtype=float)
+    same = np.sign(x) == np.sign(y)
+    for mask, name, colour in ((same, "Same way", "emerald"), (~same, "Opposite", "rose")):
+        fig.add_trace(go.Scatter(
+            x=x[mask], y=y[mask], mode="markers", name=name,
+            marker=dict(size=5, color=chart_rgba(colour, 0.55), line=dict(width=0)),
+            customdata=[d.strftime("%d %b %Y") for d in cdf.index[mask]],
+            hovertemplate="Mūla %{x:+.2f} · Swayam %{y:+.2f}<br>%{customdata}<extra></extra>"))
+    if len(cdf):
+        fig.add_trace(go.Scatter(
+            x=[x[-1]], y=[y[-1]], mode="markers", name="Latest",
+            marker=dict(size=11, color=chart_color("accent"), line=dict(width=1.5, color=panel_bg())),
+            hovertemplate="Latest · Mūla %{x:+.2f} · Swayam %{y:+.2f}<extra></extra>"))
+    fig.add_hline(y=0, line_color=grid_rgba(0.10), line_width=0.6)
+    fig.add_vline(x=0, line_color=grid_rgba(0.10), line_width=0.6)
+    fig.update_layout(**chart_layout(height=UI_CHART_HEIGHT_MEDIUM))
+    style_axes(fig, x_title="Mūla lean (bullish +)", y_title="Swayam lean (bullish +)")
+    render_chart_panel(fig, "convergence_scatter", units="leans, bullish-positive, −1 … +1")
 
 
 def _render_divergences(window: int) -> None:
@@ -201,8 +190,8 @@ def _render_divergences(window: int) -> None:
     )
 
 
-def render_convergence_tab(ts_filtered=None, edge: dict | None = None, horizon: int = 10):
-    """Convergence — agreement between the engines, measured and graded."""
+def render_convergence_tab(ts_filtered=None, horizon: int = 10):   # noqa: ARG001
+    """Convergence — the two engines side by side."""
     cdf = st.session_state.get("convergence_df")
     fvo_ts = st.session_state.get("fvo_ts")
     swayam_daily = st.session_state.get("swayam_daily")
@@ -226,36 +215,33 @@ def render_convergence_tab(ts_filtered=None, edge: dict | None = None, horizon: 
     first = _window_index(ts_filtered)
 
     # ── 1 · The answer ────────────────────────────────────────────────────
-    last = cdf.iloc[-1]
-    agree = float(last.get("agreement_ratio", np.nan))
-    ag_hist = pd.to_numeric(cdf["agreement_ratio"], errors="coerce").to_numpy(dtype=float)
-    ag_p90 = tier_now(ag_hist, _icfg.ui_agreement_strong, q=0.90)
-    ag_p75 = tier_now(ag_hist, _icfg.ui_agreement_moderate, q=0.75)
+    both = cdf["agree"].dropna()
+    recent = both.tail(AGREE_WINDOW)
+    agree = float(recent.mean()) if len(recent) >= 10 else float("nan")
+    agree_all = float(both.mean()) if len(both) else float("nan")
     cons_v = float(cs["Consensus"].iloc[-1]) if not cs.empty else None
     cons_lbl = str(cs["Label"].iloc[-1]) if not cs.empty else "—"
     m_fvo = float(cs["RawA"].iloc[-1]) if not cs.empty else None
     s_avg = float(cs["RawN"].iloc[-1]) if not cs.empty else None
-    comp = float(last.get("convergence_score", np.nan))
-    comp_lbl = str(last.get("ddm_label", "")) or lean_label(comp, 15.9, 9.2)
-    ic = (edge or {}).get("ic")
     _sw_tier = tier_now(pd.to_numeric(swayam_daily.get("Avg_Signal"), errors="coerce").to_numpy(dtype=float)
                         if swayam_daily is not None and "Avg_Signal" in swayam_daily.columns else np.array([]),
                         _icfg.ui_swayam_avg_threshold, q=0.75)
 
-    summary = (f"Mūla reads the instrument {valuation_state(m_fvo).lower()} ({m_fvo:+.2f}σ) and Swayam's "
-               f"views average {s_avg:+.2f}; the consensus leans {cons_lbl.lower()}, and the engines "
-               f"agree {agree:.0%} across four dimensions." if cons_v is not None and np.isfinite(agree)
-               else "The engines share too little history for a consensus yet.")
+    summary = (f"Mūla reads the instrument {valuation_state(m_fvo).lower()} ({m_fvo:+.2f}) and Swayam's "
+               f"views average {s_avg:+.2f}; the consensus leans {cons_lbl.lower()}."
+               + (f" On the last {len(recent)} sessions both leaned, they leaned the same way {agree:.0%} "
+                  f"of the time." if np.isfinite(agree) else "")
+               if cons_v is not None else "The engines share too little history for a consensus yet.")
     render_section_header("Convergence — Do the Engines Agree?", summary, icon="target")
     render_kpi_strip([
         {"label": "Agreement", "value": f"{agree:.0%}" if np.isfinite(agree) else "—",
-         "subtext": f"own p75 {ag_p75:.0%} · p90 {ag_p90:.0%}",
-         "color_class": "success" if np.isfinite(agree) and agree >= ag_p90 else "neutral",
-         "tooltip": TOOLTIPS["agreement"]},
+         "subtext": (f"full history {agree_all:.0%}" if np.isfinite(agree_all)
+                     else "too few sessions on which both lean"),
+         "color_class": "neutral", "tooltip": TOOLTIPS["agreement"]},
         {"label": "Consensus", "value": f"{cons_v:+.2f}" if cons_v is not None else "—",
          "subtext": cons_lbl.title() if cons_v is not None else "not enough overlap",
          "color_class": _lean_tone(cons_lbl), "tooltip": TOOLTIPS["consensus"]},
-        {"label": "Mūla Reads", "value": f"{m_fvo:+.2f}σ" if m_fvo is not None else "—",
+        {"label": "Mūla Reads", "value": f"{m_fvo:+.2f}" if m_fvo is not None else "—",
          "subtext": valuation_state(m_fvo).title() if m_fvo is not None else "—",
          "color_class": ("success" if m_fvo is not None and m_fvo <= -CLAIM_SIGMA else
                          "danger" if m_fvo is not None and m_fvo >= CLAIM_SIGMA else "neutral")},
@@ -263,15 +249,7 @@ def render_convergence_tab(ts_filtered=None, edge: dict | None = None, horizon: 
          "subtext": f"average signal · tier ±{_sw_tier:.2f}",
          "color_class": ("success" if s_avg is not None and s_avg < -_sw_tier else
                          "danger" if s_avg is not None and s_avg > _sw_tier else "neutral")},
-        {"label": "Weighted Composite", "value": f"{comp:+.1f}" if np.isfinite(comp) else "—",
-         "subtext": comp_lbl.title(), "color_class": _lean_tone(comp_lbl),
-         "tooltip": TOOLTIPS["composite"]},
-        {"label": "Walk-Forward IC", "value": f"{ic:+.3f}" if ic is not None else "—",
-         "subtext": f"composite, non-overlapping {horizon}d" if ic is not None else "not yet graded",
-         "color_class": ("success" if ic is not None and ic >= 0.05 else
-                         "warning" if ic is not None and ic > 0 else
-                         "danger" if ic is not None else "neutral")},
-    ], max_cols=6, key="conv-read")
+    ], max_cols=4, key="conv-read")
 
     # Breadth carried forward: the Swayam tail can end before the model spine.
     _nn_last = st.session_state.get("swayam_native_last")
@@ -288,7 +266,7 @@ def render_convergence_tab(ts_filtered=None, edge: dict | None = None, horizon: 
     render_section_header(
         "Consensus — The Two Readings, Averaged",
         "Top: the consensus, each marker classified at the tier knowable on its own date. "
-        f"Below: Mūla's oscillator (shaded ±{CLAIM_SIGMA:g}σ = no claim) and Swayam's average "
+        f"Below: Mūla's oscillator (shaded ±{CLAIM_SIGMA:g} = no claim) and Swayam's average "
         "signal. Negative = stretched down.",
         icon="layers", accent="cyan",
     )
@@ -303,26 +281,20 @@ def render_convergence_tab(ts_filtered=None, edge: dict | None = None, horizon: 
         view = cs[cs.index >= first] if first is not None else cs
         _render_consensus_chart(view if len(view) else cs, _sw_tier)
 
-    # ── 3 · What the learner built ───────────────────────────────────────
+    # ── 3 · The two leans against each other ─────────────────────────────
     render_section_header(
-        "Weighted Composite — What the Learner Built",
-        "Agreement strength weighted by each dimension's learned signed skill, pointed the way "
-        "the engines lean, and its drift-diffusion filter. Below: agreement over time.",
+        "Lean Against Lean",
+        "Each session in the window: Mūla's valuation lean across, Swayam's breadth lean up. "
+        "Points in the upper-right and lower-left are sessions the engines leaned the same way.",
         icon="cpu", accent="accent",
     )
     cview = cdf[cdf.index >= first] if first is not None else cdf
-    _render_composite_chart(cview if len(cview) else cdf)
+    _render_lean_scatter(cview if len(cview) else cdf)
+    render_note("Agreement between the engines is described here, not graded: neither engine's "
+                "lean has a measured edge on its own (System page), and their agreement is not "
+                "an input to the verdict beyond Swayam's row in the evidence.")
 
-    # ── 4 · Has agreement been worth anything? ───────────────────────────
-    render_section_header(
-        "Walk-Forward Edge",
-        f"When the composite leaned one way, did the instrument move that way over the next "
-        f"{horizon} sessions? Graded exactly as Mūla's call and Swayam's breadth are.",
-        icon="trending", accent="accent",
-    )
-    render_edge_panel(edge, "composite", what="the weighted composite")
-
-    # ── 5 · Where they disagreed ──────────────────────────────────────────
+    # ── 4 · Where they disagreed ──────────────────────────────────────────
     render_section_header(
         "Divergences",
         "Sessions where the engines pointed opposite ways, or one read strongly while the other "

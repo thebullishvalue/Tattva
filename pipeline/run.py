@@ -17,14 +17,11 @@ import pandas as pd
 
 from analytics.analogs import analog_skill_by_horizon, find_similar_periods, summarize_forward
 from convergence import intelligence
-from convergence.conviction_model import CompositeDDM
-from convergence.cross_validator import CrossValidator
 from convergence.divergence_detector import CrossSystemDivergenceDetector
-from convergence.normalization import (classify_convergence_score,
-                                       compute_normalized_convergence, consensus_series)
+from convergence.normalization import consensus_series
 from core.config import MIN_DATA_POINTS, STOCK_TARGET_MARKETS, swayam_macro_columns
 from core.logger_config import console
-from core.semantics import breadth_lean, valuation_lean
+from core.semantics import breadth_lean, claim_direction, valuation_lean
 from engines.mula import MulaEngine
 from engines.mula.blocks import block_membership
 from engines.swayam import (aggregate_views, build_swayam_frames,
@@ -34,6 +31,10 @@ from engines.swayam.kernel import view_skill_weights
 from .prep import DATE_COL, PreparedPanel, prepare
 
 Progress = Callable[[int, str, str], None]
+
+#: Net view breadth inside this band is no lean (e.g. 0% oversold vs 0%
+#: overbought, the commonest day).
+SWAYAM_LEAN_DEAD = 0.10
 
 #: Per-view columns the Swayam page's drill-down reads; the rest is dropped
 #: once aggregation has used it.
@@ -58,8 +59,6 @@ class RunResult:
     convergence_df: pd.DataFrame
     divergence_events: pd.DataFrame
     hero_series: pd.Series | None
-    intelligence_active_weights: dict
-    intelligence_active_profile: dict
     edges: dict
     precedent_summary: dict | None
     analogs: list = field(default_factory=list)
@@ -217,80 +216,53 @@ def _onto_calendar(daily: pd.DataFrame, cal: pd.DatetimeIndex) -> tuple[pd.DataF
 
 # ── Phase: convergence, grades ──────────────────────────────────────────────
 
-def run_convergence(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame,
-                    progress: Progress | None = None) -> dict:
-    cfg, h = prep.config, prep.config.forecast_horizon
-    validator = CrossValidator(active_weights=cfg.weights_seed())
+def run_convergence(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame) -> dict:
+    """The two engines side by side, session by session.
+
+    ``convergence_df`` has one row per session on which Mūla published and
+    Swayam has a row: both leans (bullish-positive), whether Swayam's row was
+    observed or carried forward, and ``agree`` — 1 when both lean the same way,
+    0 when they oppose, NaN when either makes no claim. Divergence events and
+    the normalised consensus are built from the same join.
+    """
+    empty = {"convergence_df": pd.DataFrame(), "events": CrossSystemDivergenceDetector().get_events(),
+             "hero_series": None}
+    if swayam_daily is None or swayam_daily.empty or "FVO" not in fvo_ts.columns:
+        return empty
+    sw = swayam_daily[~swayam_daily.index.duplicated(keep="last")]
+    fvo = pd.to_numeric(fvo_ts["FVO"], errors="coerce")
+    j = pd.DataFrame({"fvo": fvo}).join(
+        sw[[c for c in ("Oversold_Pct", "Overbought_Pct", "Avg_Signal", "_Native") if c in sw.columns]],
+        how="inner")
+    j = j[j["fvo"].notna() & j["Oversold_Pct"].notna()]
+    if j.empty:
+        return empty
+    j["mula_lean"] = j["fvo"].map(valuation_lean)
+    j["swayam_lean"] = [breadth_lean(a, b) for a, b in zip(j["Oversold_Pct"], j["Overbought_Pct"])]
+    j["swayam_native"] = j["_Native"].astype(bool) if "_Native" in j.columns else True
+    m_dir = j["fvo"].map(claim_direction)
+    s_dir = np.sign(j["swayam_lean"].where(j["swayam_lean"].abs() >= SWAYAM_LEAN_DEAD, 0.0))
+    j["agree"] = np.where((m_dir == 0) | (s_dir == 0), np.nan, (m_dir == s_dir).astype(float))
+
     detector = CrossSystemDivergenceDetector()
-
-    sw_by_date = {}
-    if not swayam_daily.empty:
-        for idx, row in swayam_daily[~swayam_daily.index.duplicated(keep="last")].iterrows():
-            sw_by_date[str(pd.Timestamp(idx).date())] = row
-
-    overlap = native_overlap = 0
-    total = len(fvo_ts.index)
-    for i, ts_idx in enumerate(fvo_ts.index):
-        row_a = fvo_ts.loc[ts_idx]
-        date_str = str(pd.Timestamp(ts_idx).date())
-        mula_in = {"fvo": row_a.get("FVO", np.nan),
-                   "oversold_breadth": row_a.get("OversoldBreadth", 0.0),
-                   "overbought_breadth": row_a.get("OverboughtBreadth", 0.0),
-                   "regime": str(row_a.get("Regime", ""))}
-        sw_in = None
-        row_n = sw_by_date.get(date_str)
-        if row_n is not None:
-            sw_in = {"oversold_pct": float(row_n.get("Oversold_Pct", 0.0)),
-                     "overbought_pct": float(row_n.get("Overbought_Pct", 0.0)),
-                     "avg_unified_osc": float(row_n.get("Avg_Signal", 0.0)),
-                     "regime_bull_pct": float(row_n.get("Regime_Bull_Pct", 0.0)),
-                     "regime_bear_pct": float(row_n.get("Regime_Bear_Pct", 0.0)),
-                     "native": bool(row_n.get("_Native", True))}
-        if validator.compute_convergence(mula_in, sw_in, date_str) is not None:
-            overlap += 1
-            native_overlap += int(sw_in["native"])
-        detector.detect(mula_in, sw_in, date_str)
-        if progress is not None and ((i + 1) % 200 == 0 or i == total - 1):
-            progress(int(76 + (i + 1) / total * 6), "Computing Convergence", f"{i + 1}/{total} sessions")
-    cdf = validator.get_convergence_series()
-    console.item("Scored sessions", f"{overlap} ({native_overlap} with a native Swayam row)")
-
-    weight_hist = pd.DataFrame()
-    if native_overlap >= intelligence.LEARNER_WARMUP and not cdf.empty:
-        try:
-            cdf, weight_hist = intelligence.apply_online_weights(
-                cdf, fvo_ts, horizon=h, target_col="Price", prior=cfg.weights_seed())
-        except Exception as e:                       # noqa: BLE001 - prior weights stand
-            console.warning(f"Online weighting failed: {type(e).__name__}: {e} — prior weights stand")
-    prior_w = {k.removeprefix("w_"): float(v) for k, v in cfg.weights_seed().items()}
-    tot = sum(prior_w.values()) or 1.0
-    prior_w = {k: v / tot for k, v in prior_w.items()}
-    active_w = ({k: float(v) for k, v in weight_hist.iloc[-1].items()}
-                if not weight_hist.empty else prior_w)
-
-    if not cdf.empty:
-        ddm = CompositeDDM(leak_rate=cfg.ddm_leak, drift_scale=cfg.ddm_drift,
-                           long_run_var=cfg.ddm_lrv).fit_series(cdf["convergence_score"])
-        for c in ("smoothed", "upper", "lower", "label"):
-            cdf[f"ddm_{c}"] = ddm[c].to_numpy()
-        last = cdf.iloc[-1]
-        console.item("Weighted composite", f"{last['convergence_score']:+.1f} "
-                     f"({classify_convergence_score(last['convergence_score'])})")
-
-    consensus = consensus_series(fvo_ts, swayam_daily)
-    now = compute_normalized_convergence(fvo_ts, swayam_daily)
-    if now:
-        console.item("Consensus", f"{now['value']:+.2f} ({now['label']})")
+    for row in j.itertuples():
+        detector.detect({"fvo": row.fvo},
+                        {"oversold_pct": row.Oversold_Pct, "overbought_pct": row.Overbought_Pct,
+                         "avg_unified_osc": getattr(row, "Avg_Signal", 0.0)},
+                        str(pd.Timestamp(row.Index).date()))
     events = detector.get_events()
+    both = j["agree"].dropna()
+    console.item("Sessions with both engines", f"{len(j)} ({int(j['swayam_native'].sum())} with a native Swayam row)")
+    if len(both):
+        console.item("Sign agreement", f"{both.mean():.0%} of the {len(both)} sessions on which both lean")
     console.item("Divergence events", len(events))
-    return {"convergence_df": cdf, "events": events, "active_weights": active_w,
-            "learned": not weight_hist.empty,
-            "hero_series": (consensus["Consensus"].rename("Consensus")
-                            if not consensus.empty else None)}
+    consensus = consensus_series(fvo_ts, swayam_daily)
+    return {"convergence_df": j[["fvo", "mula_lean", "swayam_lean", "swayam_native", "agree"]],
+            "events": events,
+            "hero_series": (consensus["Consensus"].rename("Consensus") if not consensus.empty else None)}
 
 
-def grade(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame,
-          convergence_df: pd.DataFrame) -> dict:
+def grade(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame) -> dict:
     """Every engine's lean against the h-session forward return."""
     h = prep.config.forecast_horizon
     price = pd.to_numeric(fvo_ts["Price"], errors="coerce")
@@ -309,10 +281,6 @@ def grade(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame,
             edges["swayam"] = intelligence.series_edge(
                 pd.Series([breadth_lean(a, b) for a, b in zip(sw["Oversold_Pct"], sw["Overbought_Pct"])],
                           index=sw.index), price, h)
-        if not convergence_df.empty:
-            edges["composite"] = intelligence.series_edge(
-                pd.Series(-convergence_df["convergence_score"].to_numpy(dtype=float) / 100.0,
-                          index=pd.to_datetime(convergence_df.index, errors="coerce")), price, h)
         for k, e in edges.items():
             if k == "call":
                 continue
@@ -395,9 +363,9 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
     fvo_ts["Date"] = prep.calendar
     fvo_ts = fvo_ts.set_index("Date")
     fvo_ts = fvo_ts[~fvo_ts.index.duplicated(keep="last")]
-    conv = run_convergence(prep, fvo_ts, swayam_daily, progress)
+    conv = run_convergence(prep, fvo_ts, swayam_daily)
     _p(93, "Grading Every Engine", f"Non-overlapping {prep.config.forecast_horizon}d")
-    edges = grade(prep, fvo_ts, swayam_daily, conv["convergence_df"])
+    edges = grade(prep, fvo_ts, swayam_daily)
     console.end_phase("CONVERGENCE")
 
     console.start_phase("PRECEDENT", 4, 4)
@@ -414,8 +382,6 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
         swayam_native_last=native_last,
         convergence_df=conv["convergence_df"], divergence_events=conv["events"],
         hero_series=conv["hero_series"],
-        intelligence_active_weights=conv["active_weights"],
-        intelligence_active_profile={"weights": conv["active_weights"], "learned": conv["learned"]},
         edges=edges, precedent_summary=summary, analogs=analogs, precedent_skill=skill,
     )
 

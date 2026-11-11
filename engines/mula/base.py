@@ -179,6 +179,7 @@ class MulaEngine:
         feature_names: list[str] | None = None,
         progress_callback: Callable | None = None,
         config: "object | None" = None,
+        today: "pd.Timestamp | None" = None,
     ) -> "FairValueEngine":
         """Run the full valuation pipeline.
 
@@ -204,6 +205,9 @@ class MulaEngine:
             override the global-constant defaults for THIS fit. Any field it
             lacks falls back to the global default.
         """
+        # "Now", for deciding whether the newest row is still forming. Passed
+        # in so a fit is a function of its arguments; None means the wall clock.
+        self._today = pd.Timestamp.today() if today is None else pd.Timestamp(today)
         if config is not None:
             self.burn_in = int(getattr(config, "fvo_burn_in", self.burn_in))
             self.min_prints = int(getattr(config, "fvo_min_prints", self.min_prints))
@@ -744,7 +748,7 @@ class MulaEngine:
             if len(forming) and _ix is not None and len(_ix) == len(forming):
                 try:
                     _last = pd.Timestamp(_ix[-1]).normalize()
-                    forming[-1] = _last >= pd.Timestamp.today().normalize()
+                    forming[-1] = _last >= self._today.normalize()
                 except (TypeError, ValueError):
                     pass                        # non-dated index: never forming
             publish = valid_row & (complete | forming)

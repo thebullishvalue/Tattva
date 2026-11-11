@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 import time
 
-import pandas as pd
 
 from data.cache import Cache
 
@@ -140,8 +139,8 @@ def resolve_stock_symbol(raw: str, market: str) -> tuple[str | None, str]:
     else:
         candidates = [(cleaned.replace(".", "-"), "US")]
 
-    end = pd.Timestamp.today()
-    start = end - pd.Timedelta(days=365 * 9)
+    from core.config import fetch_window
+    start, end = fetch_window()
     unreachable = False
     for ticker, exch in candidates:
         s, outcome = probe_symbol(ticker, start, end)

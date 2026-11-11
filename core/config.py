@@ -73,6 +73,18 @@ FVO_VALUATION_DELTAS = (0.999, 0.9995, 0.9999, 1.0)
 OU_PROJECTION_DAYS = 90
 MIN_DATA_POINTS = 1500
 
+#: First date of every fetch. Fixed, so the estimators' origin never moves
+#: from one day's run to the next.
+EPOCH = "2015-01-01"
+
+
+def fetch_window(today=None):
+    """``(EPOCH, today)`` — the one window every fetch uses."""
+    import pandas as _pd
+    return _pd.Timestamp(EPOCH), (_pd.Timestamp.today() if today is None else _pd.Timestamp(today))
+
+
+
 # Evaluation horizons. FORECAST_HORIZON is no longer a label horizon the engine
 # is trained on (nothing is): it is the holding period the convergence layer,
 # the precedent analogs and the Intelligence calibrator score against, and the

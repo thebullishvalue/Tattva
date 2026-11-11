@@ -638,7 +638,7 @@ RUN_PHASES = (
     (2, 20, 41, "Mūla Engine"),
     (3, 42, 75, "Swayam Engine"),
     (4, 76, 95, "Convergence"),
-    (5, 96, 100, "Final Assembly"),
+    (5, 96, 100, "Precedent"),
 )
 
 

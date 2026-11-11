@@ -427,7 +427,7 @@ def _render_footer() -> None:
 
 def main():
     st.set_page_config(
-        page_title="TATTVA | Unified Convergence",
+        page_title="TATTVA | Cross-Asset Valuation",
         page_icon="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzNENkZFOCIgc3Ryb2tlLXdpZHRoPSIyIi8+PHBhdGggZD0iTTggMTRsMy01IDIgMyAzLTQiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzNENkZFOCIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4=",
         layout="wide", initial_sidebar_state="expanded",
     )
@@ -676,7 +676,7 @@ def main():
             st.rerun()
         st.session_state.pop("engine", None)
 
-        console.header("TATTVA — Unified Convergence Analysis", f"v{VERSION}")
+        console.header("TATTVA — Analysis", f"v{VERSION}")
         console.main_header("ANALYSIS CONFIGURATION", {
             "Run ID": generate_run_id(), "Target": active_target,
             "Predictors": f"{len(prep.features)} columns",
@@ -807,7 +807,7 @@ def main():
         _agree = float(_ag.mean()) if len(_ag) >= 10 else None
         _val = verdict["valuation"]
         _fvo_v = _val.get("fvo")
-        _pct_txt = ordinal_percentile(_val.get("percentile"))
+        _pct_txt = ordinal_percentile(_val.get("percentile")).replace(" percentile", " pct")
         _pct_txt = f"{_pct_txt} · " if _pct_txt else ""
         _trust = verdict["trust"]
         _own = (_edges.get("call") or {})
@@ -819,7 +819,7 @@ def main():
              "color_class": ("success" if verdict["signal_class"] == "buy"
                              else "danger" if verdict["signal_class"] == "sell" else "neutral")},
             {"label": "Valuation", "value": (_val.get("state") or "—").title() if _fvo_v is not None else "—",
-             "subtext": (f"{_fvo_v:+.2f} typical gaps · {_pct_txt}{abs(_val['pct']):.1f}% {_val['side']}"
+             "subtext": (f"{_fvo_v:+.2f} · {_pct_txt}{abs(_val['pct']):.1f}% {_val['side']}"
                          if _fvo_v is not None else "no published valuation"),
              "color_class": ("success" if _fvo_v is not None and _fvo_v <= -0.5
                              else "danger" if _fvo_v is not None and _fvo_v >= 0.5 else "neutral")},

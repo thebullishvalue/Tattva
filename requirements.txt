@@ -1,4 +1,4 @@
-# Tattva — Unified Convergence Analysis System
+# Tattva — cross-asset valuation terminal
 # @thebullishvalue Product
 
 # Core Framework

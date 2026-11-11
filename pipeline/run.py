@@ -345,7 +345,7 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
         if progress is not None:
             progress(int(pct), title, detail)
 
-    console.start_phase("MŪLA ENGINE", 1, 4)
+    console.start_phase("MŪLA ENGINE", 2, 5)
     _p(20, "Running Mūla Engine", f"Valuation · {len(prep.features)} instruments · {len(prep.price)} rows")
     engine = run_mula(prep, progress, today)
     sig = _log_mula(engine, prep)
@@ -359,7 +359,7 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
         _ix = (_ix.tz_localize(None) if _ix.tz is not None else _ix).normalize()
         ohlcv = ohlcv[_ix.isin(prep.calendar)]
 
-    console.start_phase("SWAYAM ENGINE", 2, 4)
+    console.start_phase("SWAYAM ENGINE", 3, 5)
     _p(42, "Running Swayam Engine", "self-referential view bank")
     drivers = swayam_driver_frame(df, prep.target) if df is not None else pd.DataFrame()
     sw = run_swayam(prep, ohlcv, drivers, progress)
@@ -367,7 +367,7 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
     console.end_phase("SWAYAM ENGINE")
     _p(75, "Swayam Engine Complete", f"{len(sw['view_dfs'])} views · {len(swayam_daily)} trading days")
 
-    console.start_phase("CONVERGENCE", 3, 4)
+    console.start_phase("CONVERGENCE", 4, 5)
     _p(76, "Computing Convergence", "per session")
     fvo_ts = engine.ts_data.copy()
     fvo_ts["Date"] = prep.calendar
@@ -386,7 +386,7 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
     edges = grade(prep, fvo_ts, swayam_daily)
     console.end_phase("CONVERGENCE")
 
-    console.start_phase("PRECEDENT", 4, 4)
+    console.start_phase("PRECEDENT", 5, 5)
     _p(96, "Reading Precedent", "analog base rate")
     summary, analogs, skill = precedent(prep, engine)
     console.end_phase("PRECEDENT")

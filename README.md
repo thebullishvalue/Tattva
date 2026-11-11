@@ -1,304 +1,256 @@
 # TATTVA — तत्त्व
 
-**Unified Convergence Engine** · v2.8.2 · *@thebullishvalue*
+**Cross-asset valuation, with a call only where its record supports one** · v3.1.0 · *@thebullishvalue*
 
-> *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality": the underlying
-> truth distilled from the convergence of evidence.
+> *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality".
 
-Tattva is a research terminal that makes **one graded call** about a target — a
-commodity, a currency, a crypto asset, an equity index or any listed stock — for
-roughly the next ten trading sessions. One engine values the target against the
-whole traded macro cross-section; a second reads the target's own price from
-fifteen angles; the call is the first engine's, and six independent conditions
-say how far to trust it, with the weakest one named.
+Tattva is a research terminal. For a target — a commodity, a currency, a crypto
+asset, an equity index or any listed stock — it says where the price stands
+against the whole traded macro cross-section: **cheap, fair or rich**. It then
+shows what that reading has been worth, graded exactly as a user would act on
+it, and prints **BUY** or **SELL** only where that record supports one.
 
-It runs entirely on free **yfinance** data. No API keys, no secrets, no database.
+Today it supports none. Across 27 catalogue targets and eleven years the
+contrarian call has no measurable edge over simply holding the same direction
+([the record](#the-record)). The valuation, its drivers and its history are the
+product; the record is printed beside every reading so nothing is taken on
+trust.
 
-**Where to start.** [What it does](#what-it-does) is the one-screen version and
-[Quickstart](#quickstart) gets it running. [How the model works](#how-the-model-works)
-is the argument — what is estimated, what is declared, and what is deliberately
-not claimed. [Reading the output](#reading-the-output) is what to look at once a
-run finishes, including where the edge is not.
+It runs on free **yfinance** data. No API keys, no secrets, no database.
 
 ---
 
 ## What it does
 
-| Engine | Question it answers | How |
+| Part | Question | How |
 |---|---|---|
-| **Mūla** | *Where should this be trading, given the state of the world — and does price go there?* | A recursive **dynamic cointegrating regression** of log price on the integrated factors of ~200 macro instruments (and on named asset-class blocks), with time-varying coefficients. Publishes a fair-value **level**, the gap to it, and the **oscillator** (the gap in units of its own typical size) — the one call Tattva makes. An **error-correction** layer then asks the question a trade depends on: does the *price* close the gap, or does fair value move to price? |
-| **Swayam** | *What does the target's own price say about itself?* | MSF + MMR oscillators with HMM/GARCH/CUSUM regime detection, run as a 15-view bank (timescale × information set × mechanism) on the target's **own** OHLCV, each view weighted by its own realised skill. Published as **net breadth**: the share of views reading the target oversold minus the share reading it overbought. |
-| **Convergence** | *Do the two agree, and has agreement been worth anything?* | Four agreement dimensions (direction, breadth, magnitude, regime) weighted **online** by each dimension's own signed skill, a weighted composite with a drift-diffusion filter, a zero-anchored consensus, and the divergences between the engines. |
-| **Precedent** | *What followed states like today's?* | Covariance-aware **Mahalanobis** analog matching (OAS shrinkage) over the system's own state, under a **Theiler exclusion window** so analogs are distinct episodes — a base rate across a fixed **1/3/5/10/20/60d** term structure. |
+| **Mūla** | *Where should this be trading, given the state of the world?* | A recursive dynamic cointegrating regression of log price on the integrated factors of ~190 macro instruments and on named asset-class blocks, with time-varying coefficients. Publishes a fair-value level, the gap to it, and the gap in units of its own typical size (the oscillator). An error-correction layer asks whether *price* closes the gap or fair value moves to price. |
+| **Swayam** | *What does the target's own price say?* | Fifteen causal views of the target's own OHLCV (timescale × macro-anchored or price-only × mechanism), each weighted by its own realised skill. Published as net breadth: views reading it oversold minus views reading it overbought. |
+| **Convergence** | *Do the two lean the same way?* | The two leans joined by date: how often they agree in sign, their consensus on a common scale, and the sessions on which they part company. Described, not graded. |
+| **Precedent** | *What followed states like today's?* | Mahalanobis analog matching over the system's own state under a Theiler exclusion window — a base rate across 1/3/5/10/20/60 sessions, with the matcher's own walk-forward skill beside it. |
+| **Universe** | *Where does everything stand?* | Mūla on every catalogue target in one scan, cheapest first, each with its own record. |
 
-The headline is the **conviction chain** on the Overview page: Mūla's call
-(cheap → bullish, rich → bearish, inside ±0.5σ → no claim), and six gates whose
-product is the conviction —
+**The read** on the Overview page is a state and, if licensed, a call:
 
-| Gate | Question | Reads |
-|---|---|---|
-| Mispricing | Is it mispriced at all? | \|oscillator\|, open from 0.5σ to 2σ |
-| Reversion | Does **price** close the gap? | P(κ̂ > 0), the price-side error-correction coefficient |
-| Cross-section | Does the whole world agree? | leave-one-block-out agreement on the gap's sign |
-| Convergence | Do the target's own internals confirm it? | Swayam net breadth, aligned with the call |
-| Edge | Has this call paid out of sample? | Mūla's walk-forward IC at the horizon |
-| Precedent | Did it pay the last times this state occurred? | the analog base rate, only when it is usable |
+| Reads | Means |
+|---|---|
+| `FAIR` · NO CALL | the gap is within half its typical size |
+| `CHEAP` / `RICH` · NO GRADED CALL | a claim, but that side's pooled record does not support acting; the record is printed |
+| `BUY` / `SELL` · GRADED CALL | a claim whose side of the asset-class record is licensed |
 
-The signal word follows the arithmetic: **STRONG BUY / BUY / LEAN BUY** (and the
-SELL side) at high / moderate / low conviction, and **HOLD** whenever the gates
-do not support acting — with the reason on the card.
-
-Every engine is graded the same way: the rank IC of its bullish-positive lean
-against the h-day forward return, on **non-overlapping** windows, period by
-period. Every engine page leads with its answer and its own grade.
+Under it are six readings, each with its number: mispricing, price-side
+reversion, cross-section agreement, Swayam's breadth, the record, and
+precedent. **They are shown, not multiplied into a score.** Graded on past
+claims, their product did not separate good calls from bad.
 
 ---
 
 ## Quickstart
 
 ```bash
-# 1. Install (Python 3.10+)
-pip install -r requirements.txt
-
-# 2. Run
+pip install -r requirements.txt          # Python 3.10+; Streamlit is pinned exactly
 streamlit run app.py
-
-# 3. Test (offline, ~15 s)
-pip install pytest && python -m pytest tests -q
+pip install pytest && python -m pytest tests -q     # offline, ~30 s
 ```
 
-In the control rail pick an **Asset Class** and a **Target** (or type a stock
-symbol under India / US Stocks) and click **Run Analysis**. The first run fetches
-~9 years of daily history (cached for an hour); switching target re-runs the
-engines on the panel already in session. **Refresh data** forces one live pull;
-**Start over** clears the session's results.
+Pick an **Asset Class** and a **Target** in the rail (or type a stock symbol
+under India / US Stocks) and click **Run Analysis**. The first run fetches daily
+history from 2015; switching target re-runs the engines on the panel already in
+session. **Refresh data** forces one live pull. **Universe → Scan catalogue**
+values every catalogue target, about ten seconds each.
 
-The rail is grouped by scope — **Instrument** → **Model** (a read-only readout:
-the learned dimension weights and Mūla's walk-forward edge) → **Session** →
-**Appearance** (Paper, the light default; Slate, the dark one). Controls that
-reframe a chart live in that chart's panel header, so a control's position
-tells you its scope. Nothing about the model is user-configurable, by design.
+Nothing about the model is user-configurable, by design.
 
 ---
 
-## How the model works
+## How it works
 
-**Valuation, in levels.** Mūla regresses **log price** on the *integrated* common
+**Valuation, in levels.** Mūla regresses log price on the integrated common
 factors of the macro cross-section with time-varying coefficients:
 
 ```
 p_t = alpha_t + sum_j beta_{j,t} F_{j,t} + e_t ,   F_{j,t} = sum_{s<=t} f_{j,s}
 ```
 
-This is a dynamic cointegrating regression (Bierens & Martins 2010): `p` and `F`
-are both integrated, and `e` is the deviation from the time-varying long-run
-relation — the mispricing. The residual is a **level**, so fair value is a price
-rather than a forecast, and the gap is a genuine mean-reverting spread. Two
-independent views are averaged by their own out-of-sample predictive evidence: a
-**latent** view on the principal factors of the cross-section and a **block**
-view on named asset-class aggregates (equity, rates, credit, inflation, energy,
-metals, agriculture, currency, volatility, real assets). Leave-one-block-out
-refits give ablation-based driver importance and the **cross-section** gate.
+`e` is the gap. Two views — latent principal factors and named asset-class
+blocks — are averaged by their own out-of-sample predictive evidence.
+Leave-one-block-out refits give driver importance and the cross-section read.
 
-**A stationary gap is not yet a trade.** The gap is stationary on every
-instrument tested (ADF p ≈ 0, half-life ~1–2 weeks) — but measured on Gold,
-S&P 500 and USD/INR, price accounts for only 2–24% of daily gap closure; the
-rest is fair value moving to price. So the reversion gate does not read the
-gap's own stationarity. It reads the **error-correction** layer: each day's price
-change regressed on yesterday's gap (Engle & Granger 1987), on differenced data
-where fast memories are legitimate. κ̂ > 0 means price moves toward fair value;
-the gate is the probability that it does, from the coefficient's own posterior.
-The layer also publishes the h-day price move that regression implies, with its
-h-day SD, and pools a valuation-led, a momentum-led and a full forecast of the
-price change by discounted predictive likelihood (Geweke & Amisano 2011).
+**The gap is not a z-score.** It is divided by its own predictive SD, but its
+tails are fat: |gap| ≥ 2 occurs about one day in ten. The pages print the gap's
+percentile of its own history beside it.
 
-**What is deliberately not claimed.** One step ahead, yesterday's close beats any
-valuation of a near-integrated price, so the engine is *not* scored against a
-random-walk null. Its level fit is scored against the honest competitor — the
-asset's own 252-day trailing mean (R² vs Trailing Mean) — and its **call** is
-scored by its walk-forward IC, like every engine's.
+**A stationary gap is not yet a trade.** A gap closes when either side moves,
+and most of the closing is fair value moving to price. The reversion reading is
+therefore the price-side error-correction coefficient: each session's price
+change regressed on the previous gap.
 
-**One sign vocabulary.** Every reading keeps one orientation: positive = stretched
-up (Mūla's oscillator above zero is rich; Swayam's oscillator above zero is
-overbought). The call is contrarian on all of them. That inversion is written
-once, in `core/semantics.py` — a *reading* (native sign, what charts show) and a
-*lean* (bullish-positive, what anything scored against a forward return uses) —
-and every layer imports it.
+**The panel is ragged on purpose.** A predictor that lists later keeps its
+leading gaps and joins the cross-section when its own print count allows. No
+predictor's listing date shortens the target's history, and a new predictor
+does not change any row before its first print.
 
-**One horizon.** Tattva reads a single **10-day** horizon on daily bars. The
-Precedent page shows a fixed 1/3/5/10/20/60d term structure on purpose, with the
-matcher's own walk-forward skill at each horizon, so where its edge fades is
-visible rather than hidden behind a truncated grid.
+**The call is graded as it is issued.** A claim is a session where the gap is
+at least half its typical size. It is entered at the **next** close — the panel
+row for a date holds closes from markets that shut after the target did — and
+held ten sessions. Each claim is scored **in excess of always holding its
+direction on that target**: on an asset that drifts up, a buy claim wins more
+than half the time whatever it is conditioned on, so a raw hit rate grades the
+drift. Dividend-paying targets are graded on a total-return level built forward
+from the close.
 
-**Estimated, not tuned.** A classification cut-point is the causal empirical
-quantile of the signal's own past; a weight is the exponentially-discounted
-realised skill of the thing being weighted (`analytics/adaptive.py`). Each
-constant has a **warm-up prior**, so an instrument's first year runs on the
-declared value and its own estimate takes over once it is better informed.
-What stays declared is *structure* — the horizon, the view bank, the discount
-grid, the estimability floors — because those are choices about the question.
-Still hand-set, and said so: the drift-diffusion filter constants and the
-Swayam kernel knobs.
+**One target cannot license a call.** A single target has a few hundred
+independent claims at most, which cannot tell an edge from noise. Claims are
+pooled within the asset class (`studies/pooled_record.py` →
+`data/priors/call_record.json`), and a side is licensed when its pooled excess
+is at least one standard error above zero **and** its hit rate beats the
+any-day base (`core/trust.py`).
 
-**The engine never looks ahead, and it is asserted.** Every published value is a
-function of data available at its own date, so re-running on more data extends
-the record rather than rewriting it. `tests/test_causality.py` fits Mūla on
-`data[:T]` and on `data[:T-200]` and requires the two to agree **exactly** on
-every shared date, for fair value, the oscillator, the error-correction outputs,
-the window agreement and the confidence family; `tests/test_edge_and_learners.py`
-does the same for Swayam's view weights. A component that consulted the future
-cannot pass, and neither can one that quietly stopped producing anything.
+**Nothing looks ahead, and it is asserted.** Every published value is a
+function of data available at its own date. `tests/test_causality.py` and
+`tests/test_panel.py` fit Mūla on `data[:T]` and `data[:T-200]` and require
+exact agreement on every shared date, on rectangular and ragged panels;
+`tests/test_swayam.py` requires the same of Swayam's views, skill weights and
+aggregate.
 
-**Two things can still move a past reading, and neither is look-ahead.** *The
-newest bar is still forming* until its session closes; it is published flagged
-`Provisional` and excluded from everything that learns or matches. *The panel's
-composition can change between runs* — a rate-limited fetch, a holiday, an
-instrument admitted for the first time — and the factor basis is estimated from
-whichever instruments are present. The panel fingerprint printed in the run
-console is how a composition change is detected; a predictor refilled from a
-cached snapshot is named in a warning on the page. Free-form stock symbols never
-enter the shared panel, so another user's typing cannot move your history.
-
-**Why the coefficient memory is slow.** Scoring discount factors by one-step
-predictive likelihood is degenerate for a *level* regression: the model that
-tracks price most closely always wins, and its limit is "fair value = price". The
-grid is therefore restricted to implied memories of ~4y, ~8y, ~40y and permanent
-— a modelling commitment, not a tuned choice. (The error-correction layer, on
-differenced data, uses a fast grid and lets the data choose.)
-
-**Honest validation.** Every engine's edge is `convergence.intelligence.series_edge`:
-the Spearman IC of its lean against the h-day forward log return, sampled every h
-sessions (averaged over the h phase offsets) so no two scored windows overlap,
-reported with its standard error, its hit rate beside the majority-direction base
-rate, and per-period ICs. Nothing is fitted to produce it. A durable edge is
-positive in most periods, not large in one; with ~130 non-overlapping calls one
-standard error is about ±0.09, and the page prints it.
+**What can still move a past reading.** The newest bar is still forming until
+its session closes; it is published flagged `Provisional` and excluded from
+everything that learns. And the panel's composition can differ between fetches
+(a rate-limited ticker): the panel fingerprint in the run console says when it
+has, and a predictor refilled from a cached snapshot is named in a warning.
+The fetch always starts on the same date (`core.config.EPOCH`), so the
+estimators' origin does not move from day to day.
 
 ---
 
-## Data sources (all yfinance)
+## The record
 
-- **Target & predictors:** the target's price plus the macro universe in
-  `core/config.py` — `GLOBAL_MACRO_MAP` (bond, rates, credit, equity, sector,
-  style, volatility, real-asset ETFs) + `MACRO_SYMBOLS_YF` (commodities + FX).
-  Each target excludes its own near-replicas (GLTR for gold, the dollar's
-  component crosses for DXY, the whole US equity complex for a US index —
-  VTV + VUG alone explain 99.5% of the S&P 500's daily returns).
-- **Swayam input:** the target's **own** OHLCV. Its MMR driver pool is the same
-  panel Mūla values against, minus the target and its near-replicas.
+<!-- record:start -->
+Generated 2026-11-11 by `studies/pooled_record.py` from a panel through 2026-11-11 (fingerprint `439877db9eb4`). 27 targets, 10 sessions, entered 1 session after the claim. *Hit vs base* is the share of claims that made money against the share the same direction made on any day; *t* is the mean return in excess of always holding that direction, over its standard error.
+
+| Asset class | Claims | All claims | Buy claims | Sell claims |
+|---|---|---|---|---|
+| **All targets** | 45,522 | 47.0% vs 48.2% · t -0.13 | 53.8% vs 55.0% · t -0.02 | 42.6% vs 43.8% · t -0.16 |
+| Commodities | 12,631 | 49.7% vs 49.3% · t +0.46 | 53.9% vs 53.1% · t -0.02 | 46.6% vs 46.5% · t +0.60 |
+| Currencies | 3,429 | 51.4% vs 49.1% · t +0.70 | 55.8% vs 52.8% · t +0.64 | 48.9% vs 47.0% · t +0.38 |
+| Crypto | 8,827 | 47.7% vs 49.5% · t -0.91 | 46.8% vs 49.4% · t -0.88 | 48.5% vs 49.6% · t -0.48 |
+| Indian equities | 14,919 | 44.3% vs 47.5% · t -0.47 | 55.4% vs 58.6% · t +0.22 | 38.0% vs 41.2% · t -0.81 |
+| US equities | 5,716 | 44.5% vs 44.9% · t +0.16 | 63.5% vs 63.6% · t +0.07 | 35.7% vs 36.3% · t +0.16 |
+
+<!-- record:end -->
+
+No side of any class reaches the licence (t ≥ 1.0 and hit above base), so every
+claim currently reads as a state with its record.
+
+Three things the record explains:
+
+1. **The gap leans rich.** It reads rich on about 39% of days and cheap on 26%:
+   a slow-memory level regression lags a trending target, so "rich" partly
+   means "has gone up", and a contrarian call shorts the drift.
+2. **A good rank correlation is not a good call.** The lean's rank IC is shown
+   on the System page as a diagnostic. It grades every row; the call is a sign
+   at a threshold on claim rows.
+3. **Swayam's breadth has no measured edge either** — its ten-session IC is
+   inside one standard error of zero on every target measured.
+
+### The candidate study
+
+`studies/PREREGISTRATION.md` fixes seven alternative readings of the same
+valuation, the grader, a 252-session holdout that no script reads, and a
+promotion bar, and was committed before any of it was run.
+`studies/run_study.py` runs them; results are in `studies/results/`. **No
+candidate clears the bar** on the development sample, so the holdout has not
+been read. Adding a candidate means a new dated section in the pre-registration
+and a higher bar.
+
+---
+
+## Reading the pages
+
+- **Overview** — the read, the class record and this target's own, then the
+  six readings.
+- **Universe** — every catalogue target's state, gap, percentile and own
+  record; open any of them.
+- **Mūla** — price against fair value with the oscillator and its no-claim
+  band; the error-correction read; model quality; drivers; how broad the
+  mispricing is across 1-month / 1-quarter / 1-year windows.
+- **Swayam** — net breadth, the effective number of independent views, which
+  views carry weight, the regime underneath.
+- **Convergence** — sign agreement, the consensus, lean against lean, the
+  divergences table.
+- **Precedent** — the base rate with its distinct-episode count, the matcher's
+  skill at every horizon, the closest analogs.
+- **System** — each engine's lean IC, the call's record by side for this target
+  and its class, the gap's stationarity statistics, data-layer health.
+  **Data** — the joined record, exportable.
+
+---
+
+## Data
+
+- **Predictors:** `GLOBAL_MACRO_MAP` (bond, rates, credit, equity, sector,
+  style, volatility, real-asset ETFs and indices) and `MACRO_SYMBOLS_YF`
+  (commodities, FX) in `core/config.py`. Reciprocals and re-denominations of an
+  instrument already present are not listed. Each target excludes its own
+  near-replicas.
+- **Swayam input:** the target's own OHLCV; its macro driver pool is the same
+  panel, minus the target and its near-replicas.
 - **Sheet-sourced targets** (Jeera, Nifty 50 - PE) come from published Google
-  Sheets; they have no OHLCV feed, so they run without Swayam.
+  Sheets, have no OHLCV and run without Swayam. A valuation ratio is not graded
+  as a call.
 
-Every external call goes through a two-tier cache (memory + disk), a
-per-service consecutive-failure circuit breaker, retry-with-backoff, a
-partial-success re-fetch, and a stale-snapshot fallback. A symbol that simply
-does not exist is a distinct "no data" answer — not retried, and not counted
-against the service. Freshness is counted in trading days on the target's own
-exchange calendar (`data/calendars.py`, `exchange_calendars` optional).
+Every external call goes through a two-tier cache, a consecutive-failure
+circuit breaker, retry with backoff and a stale-snapshot fallback. A target
+whose own price changed on fewer than half of its last 252 sessions is refused
+as not live.
+
+**Limits worth knowing.**
+
+- Prices are the traded close, not dividend-adjusted: an adjusted history is
+  rewritten backwards on every distribution, which would repaint. Only the
+  *grading* of dividend-paying targets uses total return.
+- Continuous futures (`=F`) carry contract rolls as returns.
+- Crypto is read on a five-day week, by both engines.
+- The disk cache (`~/.cache/tattva`) is unpickled as found. Use it on a host
+  you control.
+- The record covers one decade that was a bull market for most of the
+  catalogue — the regime in which a contrarian call does worst.
 
 ---
 
-## Configuration
-
-Each catalogue target carries its own `InstrumentConfig` (`core/config.py`):
-structure (leakage exclusions, view bank, horizons), estimability floors, and
-the warm-up priors its own adaptive tiers start from. Targets inherit their
-asset class's defaults (`CLASS_CONFIG_DEFAULTS`); `_PER_INSTRUMENT_OVERRIDES`
-holds the few genuinely instrument-specific values. Free-form stocks are
-configured per market (`STOCK_CONFIGS`).
+## Configuration and structure
 
 | What | Where |
 |---|---|
-| Catalogue (commodities, FX, crypto) | `COMMODITY_TARGETS` in `core/config.py` |
-| Index targets (India / US) | `INDEX_TARGETS` in `data/universe.py` |
-| Per-instrument config | `InstrumentConfig` / `INSTRUMENT_CONFIGS` in `core/config.py` |
-| Leakage exclusions | `TARGET_EXCLUDED_PREDICTORS` → each config's `excluded_predictors` |
-| Mūla floors, memory grid, windows | `FVO_BURN_IN`, `FVO_MIN_PRINTS`, `FVO_VALUATION_DELTAS`, `LOOKBACK_WINDOWS` |
+| Catalogue, universe, exclusions, per-target config | `core/config.py` |
 | Sign vocabulary and valuation states | `core/semantics.py` |
-| Asset-class blocks for the cross-section | `engines/mula/blocks.py` |
-
-**The catalogue is what can run.** Sixteen NSE sector indices that yfinance
-serves only one or two bars for are not listed; the broad Nifty 500 is listed
-under its own name.
-
----
-
-## Project structure
+| The licence | `core/trust.py`, `data/priors/call_record.json` |
+| Index targets, stock symbol resolution | `data/universe.py` |
+| Asset-class blocks | `engines/mula/blocks.py` |
 
 ```
-app.py                  Streamlit entrypoint: data prep, the 5-phase pipeline, page shell
-core/                   config (universe, targets, per-instrument config), semantics
-                        (the sign vocabulary), logging
-data/                   yfinance fetchers, index catalogue, two-tier cache, circuit
-                        breakers, per-exchange trading calendars, sheet sources
-engines/mula/           valuation: online factor model with a Marchenko-Pastur cut,
-                        block map, dynamic cointegrating regression, error-correction
-                        layer, market-regime filter
-engines/swayam/         breadth: the per-series MSF/MMR/regime kernel and the
-                        skill-weighted self-referential view bank
-analytics/              causal primitives (DLMs, DMA, online AR(1)), adaptive tiers and
-                        skill weights, robust z, OU, the regime kernel, analogs
-convergence/            cross-validator, online weights + series_edge, consensus,
-                        divergences, the composite's drift-diffusion filter
-ui/                     theme, components (incl. the conviction chain), one module per page
-tests/                  offline assertions: causality, signs, ECM arithmetic, edge
-                        recovery, the conviction chain's rules
+app.py              Streamlit shell: rail, session caching, pages
+pipeline/           prep (one target's panel), run (every phase, no Streamlit),
+                    scan (the universe), freshness
+core/               config, semantics, trust, logging
+data/               yfinance fetchers, cache, circuit breakers, calendars, sheets
+engines/mula/       factor model, block map, valuation regression, error correction
+engines/swayam/     the per-series kernel and the view bank
+analytics/          causal primitives, adaptive tiers, analogs
+convergence/        grading (lean IC, call record), consensus, divergences
+ui/                 theme, components, one module per page
+studies/            pooled record, pre-registered candidate study, the audit's scripts
+tests/              offline: causality, the panel, grading, the verdict, the pipeline
+docs/               the audit and directive this release implements
 ```
-
----
-
-## Reading the output
-
-- **Overview** — the call and its conviction, then the chain: each gate with the
-  number behind it, the binding constraint named, standing risks below.
-- **Mūla** — the valuation call; price against fair value with the oscillator and
-  its ±0.5σ no-claim band; the error-correction read (does price close the gap?);
-  model quality; the call's walk-forward edge; what drives fair value; how broad
-  the mispricing is across 1-month / 1-quarter / 1-year windows.
-- **Swayam** — net breadth, the effective number of independent views (fifteen
-  views of one price are never fifteen opinions), its own edge, which views carry
-  weight, the regime underneath.
-- **Convergence** — agreement against the target's own history, the consensus,
-  the learner's weighted composite and its edge, and the divergences table.
-- **Precedent** — the base rate (with its distinct-episode count and a usability
-  flag), the matcher's skill at every horizon, the closest analogs.
-- **System** — every engine's edge side by side, what the learner concluded, the
-  gap's stationarity statistics, data-layer health. **Data** — the joined record,
-  exportable.
-
-**Where the edge is not.** Measured by the app itself on live data, 2026-10-17 —
-non-overlapping 10-day IC (periods positive of 6); one standard error is about
-±0.09 for Mūla and the composite and ±0.08 for Swayam:
-
-| Target | Mūla's call | Swayam net breadth | Weighted composite |
-|---|---|---|---|
-| Gold | −0.005 (5/6) | +0.056 (5/6) | +0.023 (5/6) |
-| S&P 500 | −0.001 (4/6) | +0.055 (5/6) | +0.026 (4/6) |
-| Nifty 50 | +0.078 (4/6) | +0.057 (5/6) | +0.078 (4/6) |
-| Nifty 500 | +0.047 (4/6) | +0.041 (4/6) | +0.052 (4/6) |
-| USD/INR | +0.044 (3/6) | −0.009 (3/6) | +0.042 (3/6) |
-| Bitcoin | −0.056 (2/6) | −0.023 (2/6) | −0.062 (1/6) |
-| AAPL | +0.088 (5/6) | −0.006 (2/6) | +0.064 (4/6) |
-
-These come from one day's fetch. The panel's composition can differ between
-fetches (a rate-limited ticker, a newly admitted instrument), and with ~130
-calls a different panel moves an IC by a few hundredths — a second fetch the
-same day read Gold's Mūla IC at +0.038. So treat the table as the shape of the
-evidence, not as constants. Every figure is within about one standard error of
-zero. What is consistent is
-modest: Swayam's contrarian breadth is positive in five of six periods on gold
-and both equity benchmarks, and nothing works on Bitcoin. These are the numbers
-the Edge gate and every engine page print; read conviction against them, and
-trust a period-by-period record that stays positive over any single reading.
 
 ---
 
 ## Disclaimer
 
-Tattva is a **research and educational tool**, not investment advice. Outputs are
-statistical readings with weak, regime-dependent, out-of-sample edge — not
-predictions. Do not make trading or investment decisions solely on this
-software's output. See [LICENSE.md](LICENSE.md).
+Tattva is a **research and educational tool**, not investment advice. Its own
+record shows no edge in the call it grades. Do not make trading or investment
+decisions on this software's output. See [LICENSE.md](LICENSE.md).
 
 ---
 

@@ -9,6 +9,86 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.0] — 2026-11-11 — *The call is graded as issued*
+
+An audit read every module, ran Mūla on the whole catalogue and graded the call
+the way a user would act on it (`docs/RESOLUTION_DIRECTIVE.md`). The call had
+no measurable edge, and the page printed BUY and SELL anyway. This release makes
+the system say only what it has measured, fixes the defects the audit found, and
+adds a way to earn a call legitimately. (3.0.0 was used by a reverted build.)
+
+### What you will see
+- **A state, and a call only where one is licensed.** Overview reads `FAIR`,
+  `CHEAP` or `RICH`. It reads `BUY` / `SELL` only when that side of the asset
+  class's pooled record is at least one standard error above zero and beats the
+  any-day base. With the committed record no side of any class is licensed, so
+  every claim currently reads as a state with its record printed beside it.
+- **No conviction percentage.** The six readings are shown with their numbers
+  and are not multiplied: graded on past claims, their product did not separate
+  good calls from bad.
+- **About twice the history.** Gold's published valuations start in January
+  2016 instead of June 2021 (2,797 sessions instead of 1,402).
+- **A Universe page**: every catalogue target valued in one scan, cheapest
+  first, each with its own record.
+- **Zinc is gone** (its feed had 12 distinct prices), and a target whose price
+  has stopped updating is refused.
+
+### Added
+- `pipeline/` — data preparation, every engine phase, the universe scan and the
+  freshness notices, with no Streamlit in them. `app.py` is the shell (2,106 →
+  908 lines).
+- `convergence.intelligence.call_record` — claims graded as issued: entered at
+  the next close, in excess of always holding the claimed direction.
+- `studies/pooled_record.py` → `data/priors/call_record.json`; `core/trust.py`
+  reads it. `studies/render_record.py` renders the README table from it.
+- `studies/PREREGISTRATION.md`, `studies/candidates.py`, `studies/run_study.py`
+  — seven fixed alternative readings, a 252-session holdout no script reads,
+  one promotion bar. Run on the development sample: none clears it.
+- The System page's "The Call's Record"; the gap's percentile of its own
+  history beside the gap; total-return grading for dividend-paying targets.
+- Tests: 25 → 47 (the pipeline end to end, ragged panels, Swayam's causality,
+  the call record, the licence, the scan, total return).
+
+### Changed
+- **Data preparation is ragged.** A predictor keeps its leading gaps and is
+  admitted by the engine when its own print count allows. Previously every
+  target was cut to the listing date of its youngest predictor, and a predictor
+  crossing the 1,500-row guard would have cut published history again in early
+  2027.
+- **The fetch starts on a fixed date** (`core.config.EPOCH`, 2015-01-01), and
+  the vendor's own print mask is carried to the engine instead of being
+  inferred from value changes.
+- **Every grade is entered at the next close** (`EXECUTION_LAG = 1`): series
+  IC, Swayam's view weights, the analog matcher.
+- **Swayam's macro regression runs on log returns** with a causal replica
+  screen (it used rolling correlations of price levels and a full-sample
+  screen). A view with no macro read is carried wholly by its price signal, so
+  the price-only views vote. The flow threshold scales with the instrument's
+  own volatility.
+- **Factor levels keep their meaning** when the active correlation memory
+  switches: the incoming basis is matched to the one the levels were built on.
+- **Crypto** is read on the model's five-day calendar by both engines.
+- The precedent reading counts only when the matcher's own walk-forward skill
+  at the horizon beats its base.
+- The universe no longer lists reciprocals and re-denominations (INR/USD,
+  JPY/USD, KRW/USD, CNY/USD, UDN, ten X/INR crosses) or the dead IEGA.L.
+
+### Removed
+- Conviction, its tiers and the STRONG / LEAN words.
+- The convergence dimension machinery: four agreement dimensions, the online
+  weight learner, the weighted composite and its drift-diffusion filter. The
+  verdict read none of it. Convergence is now the two leans joined by date.
+- Mūla outputs nothing read: the rolling OU refit and its projection, crossover
+  signals, thirteen per-row diagnostics, the level R² card.
+- The per-instrument tuning scaffolding in `core/config.py`, and `vault/`.
+
+### Measured
+- Call as issued, 27 targets, eleven years: about 45,500 claims, hit rate 47.0%
+  against a 48.2% any-day base, and no side of any asset class above t = 1.
+- Published values moved with the ragged panel and the factor fix (they had
+  to); the call record stayed inside its noise at every step. Each commit
+  message carries its own before and after.
+
 ## [2.8.2] — 2026-11-10
 
 ### Fixed

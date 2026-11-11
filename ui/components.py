@@ -497,7 +497,7 @@ def render_header(title: str, tagline: str) -> None:
     )
 
 
-def render_nav_brand(title: str = "TATTVA", tagline: str = "तत्त्व · Unified Convergence") -> None:
+def render_nav_brand(title: str = "TATTVA", tagline: str = "तत्त्व · Cross-Asset Valuation") -> None:
     """Render the control rail's brand block.
 
     The mark is split so the second half carries the accent — a product mark

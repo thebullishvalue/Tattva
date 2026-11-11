@@ -50,3 +50,14 @@ def test_prepare_refuses_non_positive_target(registered):
 def test_prepare_refuses_missing_target(registered):
     with pytest.raises(PrepError):
         prepare(_frame().drop(columns=[TARGET]), TARGET)
+
+
+def test_scan_reports_each_target_and_survives_a_bad_one(registered, monkeypatch):
+    from pipeline.scan import scan
+    df = _frame()
+    res = scan(df, [TARGET, "No Such Target"], today=pd.Timestamp("2030-01-01"))
+    assert list(res["target"]) == [TARGET, "No Such Target"]
+    good, bad = res.iloc[0], res.iloc[1]
+    assert np.isfinite(good["fvo"]) and good["state"] and pd.isna(good["error"])
+    assert good["claims"] >= 0 and not good["licensed"]      # a synthetic target has no class record
+    assert isinstance(bad["error"], str) and pd.isna(bad["fvo"])

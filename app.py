@@ -100,6 +100,7 @@ from ui.tabs.tab_swayam import render_swayam_tab
 from ui.tabs.tab_diagnostics import render_diagnostics_tab
 from ui.tabs.tab_data import render_data_tab
 from ui.tabs.tab_precedent import render_precedent_tab
+from ui.tabs.tab_universe import render_universe_tab
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 from data.fetcher import fetch_ohlcv, fetch_commodity_dataset, fetch_stock_target_series, is_yfinance_ticker
@@ -1056,6 +1057,10 @@ def main():
             ts, active_target, _icfg.precedent_horizons, _icfg.analog_mom_window, _icfg.forecast_horizon,
             precomputed_periods=_cached_periods))
 
+    def _page_universe() -> None:
+        _top_bar()
+        _safe_render("Universe", lambda: render_universe_tab(df, active_target))
+
     def _page_system() -> None:
         _top_bar()
         _safe_render("System", lambda: render_diagnostics_tab(engine, signal, horizon=FWD_HORIZON))
@@ -1070,6 +1075,7 @@ def main():
         # instrument's own confirmation (Swayam), their agreement
         # (Convergence), and the base rate (Precedent).
         "Engines": [
+            st.Page(_page_universe, title="Universe", icon=":material/grid_view:"),
             st.Page(_page_mula, title="Mūla", icon=":material/monitoring:"),
             st.Page(_page_swayam, title="Swayam", icon=":material/hub:"),
             st.Page(_page_convergence, title="Convergence", icon=":material/merge_type:"),

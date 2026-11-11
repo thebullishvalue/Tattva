@@ -48,6 +48,7 @@ from core.config import EXECUTION_LAG
 
 
 _MSF_COMPONENT_NAMES = ("momentum", "structure", "flow")
+_BAR_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 
 
 def calculate_msf(
@@ -100,7 +101,7 @@ def calculate_msf(
     trend_diff_z = _zscore_clipped(trend_fast - trend_slow, length, clip)
     mom_accel_raw = close.diff(5).diff(5)
     mom_accel_z = _zscore_clipped(mom_accel_raw, length, clip)
-    atr = _calculate_atr(df, 14)
+    atr = _calculate_atr(df, length)
     vol_adj_mom_raw = close.diff(5) / atr
     vol_adj_mom_z = _zscore_clipped(vol_adj_mom_raw, length, clip)
     mean_rev_z = _zscore_clipped(close - trend_slow, length, clip)
@@ -121,9 +122,11 @@ def calculate_msf(
     accum_ratio = accum_ratio.fillna(0.5)
     accum_norm = 2.0 * (accum_ratio - 0.5)
     pct_change = close.pct_change(fill_method=None)
-    regime_signals = np.select(
-        [pct_change > 0.0033, pct_change < -0.0033], [1, -1], default=0
-    )
+    # A move counts when it is at least half the instrument's own recent daily
+    # SD. A fixed 0.33% was most days for Bitcoin and almost none for USD/INR.
+    move = (0.5 * pct_change.rolling(length, min_periods=max(5, length // 2)).std().shift(1)
+            ).fillna(0.0033)
+    regime_signals = np.select([pct_change > move, pct_change < -move], [1, -1], default=0)
     regime_count = pd.Series(regime_signals, index=df.index).cumsum()
     regime_raw = regime_count - regime_count.rolling(length).mean()
     regime_z = _zscore_clipped(regime_raw, length, clip)
@@ -142,9 +145,7 @@ def calculate_msf(
     if unknown:
         raise ValueError(f"Unknown MSF component(s): {sorted(unknown)}")
     active = [osc_parts[name] for name in active_names]
-    n_active = float(len(active))
-    msf_raw = sum(active) / np.sqrt(n_active)
-    msf_signal = _sigmoid(msf_raw * np.sqrt(n_active), 1.0)
+    msf_signal = _sigmoid(sum(active), 1.0)
 
     return msf_signal, micro_norm, momentum_norm, accum_norm
 
@@ -152,11 +153,13 @@ def calculate_msf(
 # ─── Macro-Micro Regime ──────────────────────────────────────────────────────
 
 
-#: |log-log correlation| above which a macro candidate is treated as a COPY of
-#: the target rather than a driver of it, and dropped from the MMR pool. Guards
-#: the silent-death mode described in calculate_mmr. Set high deliberately: the
-#: point is to catch replicas (r ~ 1.0), not to thin genuinely correlated macro.
+#: Trailing return correlation above which a macro candidate is treated as a
+#: COPY of the target rather than a driver of it, and left out of that row's
+#: candidates. A replica would let MMR explain the target with itself: the
+#: deviation collapses to zero and the macro half of every view goes silent.
 MMR_REPLICA_MAX_CORR: float = 0.98
+#: Window of the replica screen, in sessions.
+MMR_REPLICA_WINDOW: int = 252
 
 
 def calculate_mmr(
@@ -165,176 +168,88 @@ def calculate_mmr(
     num_vars: int = 5,
     macro_columns: list[str] | None = None,
 ) -> tuple[pd.Series, list[dict[str, Any]], pd.Series]:
-    """Calculate Macro-Micro Regime via rolling R²-weighted regression.
+    """Macro-Micro Regime: how far the target has run from what its macro drivers imply.
 
-    Finds the top ``num_vars`` macro indicators most correlated with price,
-    builds a weighted composite prediction, and measures the deviation of
-    actual price from that prediction.
+    Works on LOG RETURNS. For each session, every macro candidate's rolling
+    ``length``-session return correlation with the target (through the
+    previous session) gives a beta; the ``num_vars`` candidates with the
+    highest r² predict today's target return from their own, r²-weighted. The
+    oscillator is the z-score of the cumulative unexplained return over the
+    last ``length`` sessions: positive = the target has outrun its drivers.
 
-    CAVEAT — ``mmr_quality`` is a max-statistic and reads high by construction:
-    it is computed over the per-row TOP-``num_vars`` R² values selected from
-    ~100 candidate macros on a ~``length``-day window. Under a pure null
-    (no genuine relationship anywhere) the expected maximum |correlation|
-    among ~100 candidates at ~20 effective observations is ~0.5-0.6 (order
-    statistics of r; cf. the multiple-testing magnitude in Harvey, Liu & Zhu
-    2016, RFS 29(1)), so a "high quality" reading is NOT evidence the macro
-    fit is real. The selection stays causal (shift(1) correlations), so the
-    deviation oscillator itself is usable, and since the inflation applies
-    ~uniformly across views the breadth signal is
-    mostly unharmed — but do not repurpose ``mmr_quality`` as an absolute
-    confidence measure without benchmarking it against a same-row max-R² of
-    permuted candidates.
+    Returns are used because two price LEVELS that both trend correlate
+    whatever their relation, and a top-N pick among ~200 such correlations is
+    a maximum over spurious fits. A candidate with no return on a session is
+    simply not a candidate that session; nothing is filled with zero.
 
-    Returns
-    -------
-    mmr_signal, driver_details, mmr_quality
+    ``mmr_quality`` (the r²-weighted r of the selected drivers) is still a
+    max-statistic over many candidates on a short window and reads high by
+    construction. It weights MMR against MSF; it is not evidence that the
+    macro fit is real.
+
+    Every value at *t* uses data through *t* only — the replica screen
+    included, which is a trailing correlation, so the output on a prefix of
+    the data equals the prefix of the output.
+
+    Returns ``(mmr_signal, driver_details, mmr_quality)``.
     """
-    if macro_columns is None:
-        macro_columns = []
-    available_macros = [v for v in macro_columns if v in df.columns]
-    target = df["Close"]
+    idx = df.index
+    zero = pd.Series(0.0, index=idx)
+    names = [v for v in (macro_columns or []) if v in df.columns]
+    if len(df) < length + 10 or not names:
+        return zero.copy(), [], zero.copy()
 
-    # REPLICA SCREEN — structural, because the name-based one cannot see this.
-    #
-    # core.config.swayam_macro_columns drops the target's own column and its
-    # TARGET_EXCLUDED_PREDICTORS near-replicas, which handles everything it can
-    # NAME. A series that happens to track the target ~1.0 under an unrelated
-    # name is invisible to it, and that is the failure this function is most
-    # exposed to: driver selection locks onto the replica, predicted tracks
-    # actual, the deviation collapses to ~0, and the MMR half of every
-    # macro-anchored member dies while mmr_quality reads perfect. Silent, and
-    # indistinguishable downstream from "no macro relationship today".
-    #
-    # Screened here rather than in config because only this function has the
-    # DATA. Correlation is computed on the FULL sample and used solely to
-    # exclude — it never selects, weights or scales anything, so it cannot leak
-    # a forward-looking preference into the signal; the per-bar driver ranking
-    # below stays causal (shift(1)) exactly as before. On the live 240-column
-    # pool this removes nothing (measured 2026-08-17: 0 survivors above 0.98 on
-    # Gold/Copper/Silver), so it is a guard against a future addition, not a
-    # change to today's output.
-    if available_macros and len(df) > 200:
-        _t = np.log(target.clip(lower=1e-12))
-        _keep = []
-        for _c in available_macros:
-            _v = pd.to_numeric(df[_c], errors="coerce")
-            _m = _v.notna() & _t.notna() & (_v > 0)
-            if _m.sum() < 100:
-                _keep.append(_c)
-                continue
-            _r = np.corrcoef(_t[_m], np.log(_v[_m]))[0, 1]
-            if np.isfinite(_r) and abs(_r) > MMR_REPLICA_MAX_CORR:
-                continue                      # a copy of the target, not a driver
-            _keep.append(_c)
-        available_macros = _keep
+    target = pd.to_numeric(df["Close"], errors="coerce")
+    r = np.log(target.where(target > 0)).diff()
+    X = df[names].apply(pd.to_numeric, errors="coerce")
+    M = np.log(X.where(X > 0)).diff()
+    # A carried quote is a zero return that never happened.
+    M = M.where(M != 0)
 
-    if len(df) < length + 10 or not available_macros:
-        return (pd.Series(0.0, index=df.index), [], pd.Series(0.0, index=df.index))
+    # A window need not be complete: a driver that trades five days a week
+    # against a target that trades seven has gaps in every window.
+    mp = max(5, int(np.ceil(0.6 * length)))
+    corr = M.rolling(length, min_periods=mp).corr(r).shift(1)
+    corr = corr.replace([np.inf, -np.inf], np.nan).clip(-1.0, 1.0)
+    w = min(MMR_REPLICA_WINDOW, max(len(df) // 2, length))
+    replica = M.rolling(w, min_periods=max(w // 2, length)).corr(r).shift(1).abs() > MMR_REPLICA_MAX_CORR
+    corr = corr.mask(replica)
+    sd_r = r.rolling(length, min_periods=mp).std().shift(1)
+    sd_m = M.rolling(length, min_periods=mp).std().shift(1)
+    beta = corr.mul(sd_r, axis=0) / sd_m.replace(0, np.nan)
 
-    y_mean = target.rolling(length, min_periods=1).mean().shift(1).fillna(float(target.iloc[0]))
-    y_std = target.rolling(length, min_periods=1).std().shift(1).fillna(1.0)
-
-    preds_list = []
-    r2_list = []
-    last_corr: dict[str, float] = {}   # signed r at the last bar, per ticker
-
-    # Vectorized causal rolling computations
-    for ticker in available_macros:
-        x = df[ticker].ffill().fillna(0)
-        x_mean = x.rolling(length, min_periods=1).mean().shift(1).fillna(0)
-        x_std = x.rolling(length, min_periods=1).std().shift(1).fillna(1.0)
-
-        # Pearson correlation shifted (only prior data used to estimate relationship).
-        # rolling.corr emits ±inf on near-zero-variance windows (pegged/constant
-        # series, ff-filled holiday runs), and catastrophic cancellation can also
-        # yield finite |r| > 1 — both are numerically meaningless for a Pearson r
-        # and, squared, would hijack the top-N driver selection below (±inf sorts
-        # last in argsort, so a constant column would always win a "top driver"
-        # slot). Sanitize: non-finite -> NaN (excluded downstream), then clip to
-        # the valid Pearson range.
-        roll_corr = (
-            x.rolling(length, min_periods=length).corr(target)
-             .replace([np.inf, -np.inf], np.nan)
-             .clip(-1.0, 1.0)
-             .shift(1)
-             .fillna(0)
-        )
-        slope = roll_corr * (y_std / x_std.replace(0, np.nan)).fillna(0)
-        intercept = y_mean - (slope * x_mean)
-
-        pred = (slope * x) + intercept
-        r2 = roll_corr**2
-
-        preds_list.append(pred)
-        r2_list.append(r2)
-        if len(roll_corr):
-            last_corr[ticker] = float(roll_corr.iloc[-1])
-
-    all_preds = pd.concat(preds_list, axis=1)
-    all_r2 = pd.concat(r2_list, axis=1)
-    
-    # Causally select top `num_vars` drivers per row!
-    all_preds_arr = all_preds.values
-    all_r2_arr = all_r2.values
-    
+    pred = (beta * M).to_numpy(dtype=np.float64)          # each driver's implied return today
+    r2 = (corr ** 2).to_numpy(dtype=np.float64)
+    usable = np.isfinite(pred) & np.isfinite(r2)
+    r2u = np.where(usable, r2, -np.inf)
     n_rows = len(df)
-    y_predicted = np.empty(n_rows, dtype=np.float64)
-    model_r2_arr = np.empty(n_rows, dtype=np.float64)
-    
-    for i in range(n_rows):
-        row_r2 = all_r2_arr[i]
-        valid_mask = np.isfinite(row_r2)
-        if np.sum(valid_mask) < num_vars:
-            y_predicted[i] = y_mean.iloc[i]
-            model_r2_arr[i] = 0.0
-            continue
-            
-        top_indices = np.argsort(row_r2[valid_mask])[-num_vars:]
-        top_real_indices = np.where(valid_mask)[0][top_indices]
-        
-        r2_sel = row_r2[top_real_indices]
-        preds_sel = all_preds_arr[i, top_real_indices]
-        
-        r2_sum = np.sum(r2_sel)
-        if np.isfinite(r2_sum) and r2_sum > 1e-6:
-            y_predicted[i] = np.sum(preds_sel * r2_sel) / r2_sum
-            model_r2_arr[i] = np.sum(r2_sel**2) / r2_sum
-        else:
-            y_predicted[i] = y_mean.iloc[i]
-            model_r2_arr[i] = 0.0
+    kk = min(int(num_vars), r2u.shape[1])
+    top = np.argpartition(-r2u, kk - 1, axis=1)[:, :kk]
+    rows = np.arange(n_rows)[:, None]
+    sel_r2 = r2u[rows, top]
+    sel_pred = np.where(np.isfinite(sel_r2), pred[rows, top], 0.0)
+    sel_r2 = np.where(np.isfinite(sel_r2), sel_r2, 0.0)
+    enough = (sel_r2 > 0).sum(axis=1) >= kk
+    r2_sum = sel_r2.sum(axis=1)
+    ok = enough & (r2_sum > 1e-9)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        pred_ret = np.where(ok, (sel_pred * sel_r2).sum(axis=1) / r2_sum, np.nan)
+        quality = np.where(ok, np.sqrt((sel_r2 ** 2).sum(axis=1) / r2_sum), 0.0)
 
-    deviation = target - pd.Series(y_predicted, index=df.index)
-    mmr_z = _zscore_clipped(deviation, length, 3.0)
-    mmr_signal = _sigmoid(mmr_z, 1.5)
-    mmr_quality = pd.Series(np.sqrt(model_r2_arr), index=df.index).fillna(0)
+    # Where no driver set exists the session adds nothing: no macro read is
+    # not the same as "the target moved on its own".
+    resid = pd.Series(np.where(ok, r.to_numpy(dtype=np.float64) - pred_ret, 0.0), index=idx).fillna(0.0)
+    deviation = resid.rolling(length, min_periods=1).sum()
+    mmr_signal = _sigmoid(_zscore_clipped(deviation, length, 3.0), 1.5)
+    mmr_quality = pd.Series(quality, index=idx).fillna(0.0)
 
-    # Top drivers from the causal per-row R² weights at the last bar (same
-    # weights that actually drove the MMR signal, not a trailing static corr).
-    # Two fixes here:
-    #   • Symbol — rolling().corr() drops the Series name, so all_r2's columns
-    #     are INTEGER positions; the old code emitted those integers as the
-    #     "Symbol". Map position → available_macros[position] (the loop order).
-    #   • Correlation — the SIGNED r; sqrt(r²) would silently report |r| and
-    #     display an inversely-related driver (r = -0.8) as +0.8.
-    driver_details = []
-    if len(all_r2) > 0:
-        last_r2 = all_r2.iloc[-1].dropna()
-        if len(last_r2) > 0:
-            top_r2 = last_r2.nlargest(num_vars)
-            for col in top_r2.index:
-                if isinstance(col, (int, np.integer)) and 0 <= int(col) < len(available_macros):
-                    name = available_macros[int(col)]
-                else:
-                    name = str(col)
-                signed_r = last_corr.get(name)
-                if signed_r is None:
-                    signed_r = float(np.sqrt(max(0.0, float(top_r2[col]))))
-                driver_details.append({
-                    "Symbol": name,
-                    "Correlation": round(float(signed_r), 4),
-                })
-
-    return mmr_signal, driver_details, mmr_quality
+    drivers: list[dict[str, Any]] = []
+    if ok[-1]:
+        order = np.argsort(-sel_r2[-1])
+        for c in top[-1][order]:
+            drivers.append({"Symbol": names[int(c)],
+                            "Correlation": round(float(corr.iloc[-1, int(c)]), 4)})
+    return mmr_signal, drivers, mmr_quality
 
 
 # ─── Full Analysis Pipeline ──────────────────────────────────────────────────
@@ -375,6 +290,10 @@ def run_full_analysis(
     mmr, drivers, mmr_quality = calculate_mmr(
         df, length, num_vars=num_vars, macro_columns=macro_columns
     )
+    # The result carries the bar and the kernel's own columns. The macro
+    # driver pool has done its work; copying ~200 of its columns into every
+    # view's frame is what made a view bank cost tens of megabytes.
+    df = df[[c for c in _BAR_COLUMNS if c in df.columns]]
     df = pd.concat(
         [
             df,
@@ -399,8 +318,13 @@ def run_full_analysis(
     msf_w_adaptive = msf_clarity_scaled / clarity_sum
     mmr_w_adaptive = mmr_clarity_scaled / clarity_sum
 
-    msf_w_final = 0.5 * base_weight + 0.5 * msf_w_adaptive
-    mmr_w_final = 0.5 * (1.0 - base_weight) + 0.5 * mmr_w_adaptive
+    # Where there is no macro read (a price-only view, or a session with no
+    # usable drivers) MSF carries the whole oscillator. Leaving MMR its fixed
+    # half there halved every price-only view, so it almost never reached the
+    # oversold / overbought lines and seven of the fifteen views rarely voted.
+    has_mmr = df["MMR_Quality"] > 0
+    msf_w_final = (0.5 * base_weight + 0.5 * msf_w_adaptive).where(has_mmr, 1.0)
+    mmr_w_final = (0.5 * (1.0 - base_weight) + 0.5 * mmr_w_adaptive).where(has_mmr, 0.0)
     w_sum = msf_w_final + mmr_w_final
     msf_w_norm = msf_w_final / w_sum
     mmr_w_norm = mmr_w_final / w_sum

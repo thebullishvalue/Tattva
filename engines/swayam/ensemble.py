@@ -36,6 +36,7 @@ tuning to be picked.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable
 
@@ -43,6 +44,8 @@ import numpy as np
 import pandas as pd
 
 from engines.swayam.kernel import run_full_analysis
+
+log = logging.getLogger(__name__)
 
 
 # ─── Member specification ────────────────────────────────────────────────────
@@ -202,8 +205,9 @@ def build_swayam_frames(
                 components=member.components,
             )
             frames[member.name] = result_df
-        except Exception:
-            # A single bad member must not kill the ensemble.
+        except Exception as exc:                  # noqa: BLE001 - one view, not the bank
+            log.warning("Swayam view %s failed and is left out: %s: %s",
+                        member.name, type(exc).__name__, exc)
             continue
         if progress_cb is not None:
             progress_cb(i + 1, total, member.name)

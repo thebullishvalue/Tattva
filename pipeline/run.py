@@ -15,7 +15,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from analytics.analogs import find_similar_periods, summarize_forward
+from analytics.analogs import analog_skill_by_horizon, find_similar_periods, summarize_forward
 from convergence import intelligence
 from convergence.conviction_model import CompositeDDM
 from convergence.cross_validator import CrossValidator
@@ -63,6 +63,7 @@ class RunResult:
     edges: dict
     precedent_summary: dict | None
     analogs: list = field(default_factory=list)
+    precedent_skill: dict | None = None
 
 
 def _fmt(v, spec, none="n/a"):
@@ -323,12 +324,13 @@ def grade(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame,
     return edges
 
 
-def precedent(prep: PreparedPanel, engine: MulaEngine) -> tuple[dict | None, list]:
-    """The analog base rate at the forecast horizon, and the analogs behind it."""
+def precedent(prep: PreparedPanel, engine: MulaEngine) -> tuple[dict | None, list, dict | None]:
+    """The analog base rate at the forecast horizon, the analogs behind it, and
+    the matcher's own walk-forward skill at that horizon."""
     cfg = prep.config
     ts = engine.ts_data.copy()
     ts["Date"] = prep.calendar
-    summary, analogs = None, []
+    summary, analogs, skill = None, [], None
     try:
         hold = tuple(cfg.precedent_horizons)
         analogs = find_similar_periods(ts, prep.target, hold_horizons=hold,
@@ -347,9 +349,14 @@ def precedent(prep: PreparedPanel, engine: MulaEngine) -> tuple[dict | None, lis
                        "p75": float(row.get("p75", float("nan"))),
                        "usable": bool(row.get("usable", True)),
                        "note": str(row.get("note", "") or "")}
+            sk = analog_skill_by_horizon(ts, prep.target, hold, mom_window=cfg.analog_mom_window,
+                                         only=(int(hp),)).get(int(hp))
+            if sk:
+                skill = {k: (float(sk[k]) if np.isfinite(sk[k]) else None)
+                         for k in ("hit", "base", "edge", "ic")} | {"n": int(sk["n"]), "horizon": int(hp)}
     except Exception as e:                           # noqa: BLE001 - evidence, not the run
         console.warning(f"Precedent read skipped: {type(e).__name__}: {e}")
-    return summary, analogs
+    return summary, analogs, skill
 
 
 # ── The whole run ───────────────────────────────────────────────────────────
@@ -395,7 +402,7 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
 
     console.start_phase("PRECEDENT", 4, 4)
     _p(96, "Reading Precedent", "analog base rate")
-    summary, analogs = precedent(prep, engine)
+    summary, analogs, skill = precedent(prep, engine)
     console.end_phase("PRECEDENT")
     _p(100, "Analysis Complete", prep.target)
 
@@ -409,7 +416,7 @@ def run_prepared(prep: PreparedPanel, df: pd.DataFrame | None = None, *,
         hero_series=conv["hero_series"],
         intelligence_active_weights=conv["active_weights"],
         intelligence_active_profile={"weights": conv["active_weights"], "learned": conv["learned"]},
-        edges=edges, precedent_summary=summary, analogs=analogs,
+        edges=edges, precedent_summary=summary, analogs=analogs, precedent_skill=skill,
     )
 
 

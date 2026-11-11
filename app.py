@@ -2,10 +2,10 @@
 Tattva — Main Streamlit entrypoint.
 तत्त्व (Tattva) — "Principle / Essence"
 
-TATTVA — one claim, graded. Mūla values the instrument against the whole macro
-cross-section; Swayam reads its own internals; a conviction chain of independent
-gates says how far the claim can be trusted — across commodities, FX, crypto,
-equity indices and listed stocks.
+TATTVA — one valuation, and a call only where its record supports one. Mūla
+values the instrument against the whole macro cross-section; Swayam reads its
+own internals; the call is licensed by its own pooled, as-issued record —
+across commodities, FX, crypto, equity indices and listed stocks.
 
 Usage:
     streamlit run app.py
@@ -92,10 +92,8 @@ from ui.components import (
     render_top_bar,
     render_notice_rail,
     render_rail_readout,
-    format_conviction,
     window_cutoff,
     edge_periods,
-    GATE_TITLES,
 )
 from ui.tabs.tab_mula import render_mula_tab
 from ui.tabs.tab_swayam import render_swayam_tab
@@ -113,12 +111,13 @@ from core.config import EPOCH
 from pipeline.prep import PrepError, config_for, fetch_window, log_report, prepare
 from pipeline.freshness import freshness
 from pipeline.run import run_prepared
+from core.trust import class_record
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
 from core.logger_config import console, generate_run_id
 from core.config import (ALL_TARGETS, TARGET_CATEGORIES, is_stock_target, DIV_LOOKBACK,
                          TIMEFRAME_TRADING_DAYS, FREEFORM_STOCK_CATEGORIES,
-                         register_stock_target, get_instrument_config, FORECAST_HORIZON)
+                         register_stock_target)
 
 
 # ─── Per-config result cache ─────────────────────────────────────────────────
@@ -137,7 +136,7 @@ _BUNDLE_KEYS = (
     "swayam_n_eff", "swayam_native_last",
     "convergence_df", "divergence_events", "hero_series",
     "intelligence_active_weights", "intelligence_active_profile",
-    "edges", "precedent_summary", "analogs",
+    "edges", "precedent_summary", "analogs", "precedent_skill",
 )
 # Keep the last N configs. Each entry is a full pipeline result; 6 covers a
 # session that browses a handful of targets without recomputing.
@@ -221,7 +220,7 @@ def _render_header(frame=None) -> None:
     """
     render_header(
         title=f"{PRODUCT_NAME}",
-        tagline="Cross-Asset Fair Value · Self-Referential Breadth · One Graded Call",
+        tagline="Cross-Asset Fair Value · Self-Referential Breadth · A Graded Record",
     )
     if frame is not None:
         render_ticker(frame)
@@ -236,7 +235,7 @@ _SYSTEM_PANELS = (
     ("mula", "System 01", "Mūla", "The world's valuation",
      "Prices the target against the whole traded macro cross-section with a dynamic "
      "cointegrating regression on log price, then asks the question a trade depends on: "
-     "does price, not just fair value, close the gap? It makes the one call Tattva issues.",
+     "does price, not just fair value, close the gap? Its valuation is the one claim Tattva makes.",
      (("Estimator", "Recursive discounted DLM"),
       ("Equilibrium", "MP factors + asset blocks"),
       ("Reversion", "Price-side error correction"))),
@@ -282,8 +281,8 @@ def _render_landing_page() -> None:
     st.markdown(
         """<div class="lede">
   <div class="lede-claim">One engine values the instrument against the world, a second
-    reads its own price from fifteen angles, and Tattva makes one call — graded by six
-    independent conditions, with the one that limits it named.</div>
+    reads its own price from a bank of views, and Tattva says where it stands — cheap, fair
+    or rich — and issues a call only where that call's own record supports one.</div>
   <div class="lede-cta">Pick an asset class and a target in the rail, then
     <strong>Run Analysis</strong>.</div>
 </div>""",
@@ -329,10 +328,12 @@ def _render_landing_page() -> None:
     # ── What a run returns ────────────────────────────────────────────────
     render_section_header("What a run returns", icon="target")
     _out = (
-        ("One graded call", "Cheap, rich or fair against the cross-section — and six "
-                            "independent conditions, the weakest named as the limit."),
-        ("A measured edge", "Every engine's lean scored on non-overlapping windows at the "
-                            "call's horizon: the honest answer to whether it has paid."),
+        ("A valuation state", "Cheap, rich or fair against the cross-section, with six "
+                              "readings behind it, each shown with its number."),
+        ("The call's record", "Every claim graded as issued — entered at the next close, "
+                              "against what the same direction earned on any day — pooled "
+                              "by asset class. A call is printed only where that record "
+                              "supports it."),
         ("A base rate", "What followed the most similar past states of the system — no "
                         "model fitted to returns, matched on the engines' own reading."),
         ("The record", "Every series behind the call, joined by date and exportable."),
@@ -384,23 +385,13 @@ def _recent_divergences(window: int) -> int:
     return int((when >= start).sum())
 
 
-def _compute_hero_verdict(signal: dict) -> dict:
-    """Gather the run's readings and build the conviction chain. Pure assembly.
+def _compute_hero_verdict(signal: dict, target: str, horizon: int) -> dict:
+    """Gather the run's readings and build the verdict. Pure assembly.
 
-    All interpretation lives in ``ui.components.build_hero_verdict`` (pure,
-    unit-tested in tests/test_hero_verdict.py); this only collects inputs.
-    Computed once per rerun, so every page's command bar and KPI strip read
-    the identical object Overview renders and cannot disagree with it.
+    All interpretation lives in ``ui.components.build_hero_verdict``. Computed
+    once per rerun, so every page's command bar reads the object Overview renders.
     """
     from analytics.analogs import MIN_EFFECTIVE_N
-    try:
-        horizon = get_instrument_config(st.session_state.get("active_target", "")).forecast_horizon
-    except KeyError:
-        horizon = FORECAST_HORIZON
-
-    # Swayam's current breadth — read from the same frame the Swayam page
-    # shows. A tail that is carried forward (no native Swayam row) still
-    # counts: the Convergence page discloses the carry.
     _sw = st.session_state.get("swayam_daily")
     swayam_breadth = None
     if _sw is not None and not _sw.empty:
@@ -411,13 +402,14 @@ def _compute_hero_verdict(signal: dict) -> dict:
     agreement = (float(_cdf["agreement_ratio"].dropna().iloc[-1])
                  if _cdf is not None and not _cdf.empty and "agreement_ratio" in _cdf.columns
                  and _cdf["agreement_ratio"].notna().any() else None)
-
     return build_hero_verdict(
         mula=signal,
         swayam_breadth=swayam_breadth,
         agreement=agreement,
-        edge=(st.session_state.get("edges") or {}).get("mula"),
+        call=(st.session_state.get("edges") or {}).get("call"),
+        class_record=class_record(target),
         precedent=st.session_state.get("precedent_summary"),
+        precedent_skill=st.session_state.get("precedent_skill"),
         n_divergences=_recent_divergences(DIV_LOOKBACK),
         horizon_days=int(horizon),
         div_window=DIV_LOOKBACK,
@@ -925,7 +917,7 @@ def main():
     # ─── Hero verdict — computed once. Rendered in full only on Overview;
     # every page's command bar reads the SAME object, so nothing can disagree
     # with what Overview shows.
-    verdict = _compute_hero_verdict(signal)
+    verdict = _compute_hero_verdict(signal, active_target, FWD_HORIZON)
 
     # ─── Chart window — read here, RENDERED in a chart panel header ────────
     # Read here (the filtered series below needs it) but drawn inside the panel
@@ -967,7 +959,7 @@ def main():
         changed nothing and still claimed "Window 6M".
         """
         render_ticker(data)
-        _meta = [("Call", f"{verdict['signal']} · {format_conviction(verdict)}"),
+        _meta = [("Read", f"{verdict['signal']} · {verdict['action']['label']}"),
                  ("Horizon", f"{FWD_HORIZON}D"), ("As of", _cb_asof)]
         if windowed:
             _meta.insert(1, ("Window", selected_tf))
@@ -990,12 +982,7 @@ def main():
     # Every page below is a THIN wrapper over the run above: none recompute
     # the pipeline, so every page reads the same objects.
     def _page_overview() -> None:
-        """Overview — the call, then why.
-
-        Six numbers across the top answer "what changed since I last looked";
-        the conviction chain under them answers "why", for the reader who
-        wants it. They are built from the same objects, so they cannot disagree.
-        """
+        """Overview — the read, its record, then the evidence."""
         _top_bar()
         _swd = st.session_state.get("swayam_daily")
         _os = _ob = None
@@ -1008,26 +995,28 @@ def main():
         _val = verdict["valuation"]
         _fvo_v = _val.get("fvo")
         _trust = verdict["trust"]
-        _bind = verdict.get("binding")
+        _own = (_edges.get("call") or {})
+        _has_rec = _trust.get("hit") is not None and _trust.get("base") is not None
+        _has_own = bool(_own.get("n_claims")) and np.isfinite(_own.get("hit", np.nan))
         render_kpi_strip([
-            {"label": "Call", "value": verdict["signal"],
+            {"label": "Read", "value": verdict["signal"],
              "subtext": verdict["action"]["label"].title(),
              "color_class": ("success" if verdict["signal_class"] == "buy"
                              else "danger" if verdict["signal_class"] == "sell" else "neutral")},
-            {"label": "Conviction", "value": format_conviction(verdict),
-             "subtext": (("capped by " + GATE_TITLES[_bind].lower()) if _bind
-                         else "every gate holds" if verdict.get("conviction") is not None
-                         else "no claim to grade"),
-             "color_class": "accent"},
             {"label": "Valuation", "value": (_val.get("state") or "—").title() if _fvo_v is not None else "—",
-             "subtext": (f"{_fvo_v:+.2f}σ · {abs(_val['pct']):.1f}% {_val['side']} fair value"
+             "subtext": (f"{_fvo_v:+.2f} · {abs(_val['pct']):.1f}% {_val['side']} fair value"
                          if _fvo_v is not None else "no published valuation"),
              "color_class": ("success" if _fvo_v is not None and _fvo_v <= -0.5
                              else "danger" if _fvo_v is not None and _fvo_v >= 0.5 else "neutral")},
-            {"label": "Walk-Forward Edge",
-             "value": f"{_trust['oos_ic']:+.3f}" if _trust.get("oos_ic") is not None else "—",
-             "subtext": (f"{_trust['chip'].title()} · ± {_trust['se']:.3f}"
-                         if _trust.get("se") is not None else _trust["chip"].title()),
+            {"label": "Class Record",
+             "value": f"{_trust['hit']:.1f}%" if _has_rec else "—",
+             "subtext": (f"vs {_trust['base']:.1f}% any day · t {_trust['t']:+.2f}"
+                         if _has_rec and _trust.get("t") is not None else "no pooled record"),
+             "color_class": "accent"},
+            {"label": "This Target",
+             "value": f"{_own['hit']:.1f}%" if _has_own else "—",
+             "subtext": (f"vs {_own['base']:.1f}% any day · {_own['n_claims']:,} claims"
+                         if _has_own else "no graded claims yet"),
              "color_class": "info"},
             {"label": "Swayam Net Breadth",
              "value": f"{_os - _ob:+.0f} pts" if _os is not None else "—",
@@ -1038,10 +1027,9 @@ def main():
              "subtext": "Mūla × Swayam, four dimensions", "color_class": "neutral"},
         ], max_cols=6)
         render_section_header(
-            "Conviction Chain",
-            "One directional claim from Mūla, then six independent conditions that can each "
-            "invalidate it. Conviction is their product, so the weakest gate is the binding "
-            "constraint.",
+            "The Read",
+            "Where the target sits against the cross-section, whether the record licenses "
+            "calling it, and the six readings behind it.",
             icon="target", accent="accent",
         )
         render_hero_card(verdict)
@@ -1078,7 +1066,7 @@ def main():
 
     pages = {
         "": [st.Page(_page_overview, title="Overview", icon=":material/dashboard:", default=True)],
-        # In the order the conviction chain reads them: the claim (Mūla), the
+        # In the order the evidence reads them: the claim (Mūla), the
         # instrument's own confirmation (Swayam), their agreement
         # (Convergence), and the base rate (Precedent).
         "Engines": [

@@ -688,6 +688,7 @@ def analog_skill_by_horizon(
     mom_window: int = 20,
     top_n: int = 40,
     min_windows: int = 10,
+    only: tuple[int, ...] | None = None,
 ) -> dict[int, dict]:
     """Walk-forward analog SKILL at every hold horizon — the term structure the
     Precedent page plots, so the read isn't pinned to a single horizon.
@@ -705,6 +706,9 @@ def analog_skill_by_horizon(
       ``n``      — completed windows; ``pval`` — two-sided p of ``ic``;
       ``df``     — the predicted/realized frame.
 
+    ``only`` restricts which horizons are walked (the Theiler gap still comes
+    from the full ``hold_horizons``, so the estimator is the live one).
+
     Statistics are ``nan`` until ``min_windows`` windows have completed, so a
     horizon with too little realized history reads as "no estimate".
     Horizons that yield an empty walk-forward are omitted.
@@ -713,7 +717,7 @@ def analog_skill_by_horizon(
 
     out: dict[int, dict] = {}
     gap = max(int(mom_window), int(max(hold_horizons)) if hold_horizons else 20)
-    for h in hold_horizons:
+    for h in (only if only is not None else hold_horizons):
         H = int(h)
         df = analog_prediction_series(
             ts, target_col, H, mom_window=mom_window, top_n=top_n, gap=gap,

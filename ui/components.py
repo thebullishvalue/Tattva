@@ -886,62 +886,27 @@ _TABLE_FONTS = ("https://fonts.googleapis.com/css2?"
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  HERO VERDICT — the conviction chain
+#  THE VERDICT — a valuation state, and a call only where one is licensed
 # ═══════════════════════════════════════════════════════════════════════
 #
-# The system does not produce a "signal" that evidence then votes on. It makes
-# ONE claim and attaches a series of conditions to it, every one of which can
-# independently invalidate it:
+# Mūla says where the target sits against the cross-section: cheap, fair or
+# rich. That state is always shown. Whether it may be called a BUY or a SELL is
+# a separate question with a measured answer — the pooled record of that call,
+# as issued, for the target's asset class (core.trust). Where the record does
+# not support the call, the page says so and prints the record.
 #
-#   the asset is mispriced            (Mūla oscillator — the claim)
-#   ...price, not fair value, closes it  (Mūla ECM: price-side reversion)
-#   ...the whole world agrees on it   (Mūla blocks: cross-sectional consistency)
-#   ...its own internals confirm it   (Swayam net breadth — the convergence)
-#   ...this call has paid before      (the claim's own walk-forward IC)
-#   ...and it paid last time too      (precedent base rate)
-#
-# Every gate answers a question no other gate answers. That is a requirement,
-# not a nicety: conviction is their PRODUCT, so a piece of evidence that sits
-# in two gates is counted twice. The chain used to carry seven, and three of
-# them re-counted each other — Mūla/Swayam agreement sat in the breadth gate,
-# the agreement ratio and the normalized consensus (itself half Mūla), and the
-# reversion gate's detail printed the ECM gate's number. Six questions, each
-# asked once.
-#
-# So conviction is a PRODUCT of gates in [0, 1], not a sum of votes. That
-# distinction is the entire design, and it matters for two reasons.
-#
-# A product cannot be rescued by piling on agreement: three enthusiastic
-# confirmations and one broken precondition is not "3 - 1 = act smaller", it is
-# "the precondition is broken". Additive scoring said the former.
-#
-# And a product has a MINIMUM. Whichever gate is smallest is the binding
-# constraint — the single specific reason conviction is not higher, which is
-# the most useful sentence a card of this kind can produce and which no amount
-# of vote-tallying can express. The card leads with it.
-#
-# Direction comes from Mūla alone. It is the only component that makes a
-# directional claim about the world ("this is cheap relative to the traded
-# opportunity set"); breadth, reversion evidence and historical skill are all
-# statements ABOUT that claim, not rival claims of their own.
-#
-# The words follow the arithmetic. A cheap reading that the gates do not
-# support is a HOLD with the reason attached, never a BUY sitting beside
-# "stand aside" — the card used to print exactly that, and the largest word on
-# the page contradicted the decision under it.
+# The six readings under the state are evidence, shown with their numbers.
+# They are not multiplied into a score: graded on past claims, their product
+# did not separate good calls from bad, so presenting it as conviction would
+# claim a calibration it does not have.
 
 from core.semantics import (CLAIM_SIGMA as _CLAIM_SIGMA,  # noqa: E402
                             DEEP_SIGMA as _DEEP_SIGMA, claim_direction as _claim_direction)
+from core.trust import LICENCE_T as _LICENCE_T, is_licensed as _is_licensed  # noqa: E402
 
 
 def _gate(value: float, lo: float, hi: float) -> float:
-    """Map a raw reading onto [0, 1] with a soft floor and ceiling.
-
-    ``lo`` is where the gate is fully shut, ``hi`` where it is fully open;
-    between them it opens linearly. Never returns exactly 0 — a shut gate
-    should collapse conviction, not erase the reading and its explanation
-    with it.
-    """
+    """Map a reading onto [0, 1] for its bar: ``lo`` empty, ``hi`` full."""
     if value is None or not np.isfinite(value):
         return 0.5
     if hi == lo:
@@ -949,41 +914,19 @@ def _gate(value: float, lo: float, hi: float) -> float:
     return float(np.clip((value - lo) / (hi - lo), 0.02, 1.0))
 
 
-#: What a gate reads when its evidence is ABSENT (no Swayam row, too few
-#: effective analogs): uninformative, neither opening nor shutting the chain.
-#: The one exception is an UNVALIDATED edge — a call with no scored history
-#: is discounted, because "never measured" is not the same as "measured at
-#: zero" but is not evidence of skill either.
-_GATE_ABSENT = 0.5
-_GATE_UNVALIDATED = 0.25
-
-#: Conviction tiers. Products of SIX gates concentrate hard toward zero, so
-#: these are not evenly spaced: 0.30 already requires every gate to average
-#: ~0.82, and 0.15 requires ~0.73.
-_TIERS = (
-    (0.30, "high", "HIGH CONVICTION", "act on it"),
-    (0.15, "moderate", "MODERATE CONVICTION", "act at reduced size"),
-    (0.06, "low", "LOW CONVICTION", "starter size at most"),
-    (0.00, "standaside", "STAND ASIDE", "the evidence does not support acting"),
-)
-
-#: The signal word per tier, so the word and the action cannot disagree.
-_TIER_WORD = {"high": "STRONG {}", "moderate": "{}", "low": "LEAN {}", "standaside": "HOLD"}
-
-#: Display names for the gates, in chain order.
+#: Display names of the evidence rows, in order.
 GATE_TITLES = {
     "mispricing": "Mispricing", "reversion": "Reversion", "cross_section": "Cross-section",
-    "convergence": "Convergence", "edge": "Edge", "precedent": "Precedent",
+    "convergence": "Convergence", "edge": "Record", "precedent": "Precedent",
 }
+
+#: How an asset class is named in a sentence.
+CLASS_WORDS = {"commodity": "commodities", "fx": "currencies", "crypto": "crypto",
+               "india_index": "Indian equities", "us_index": "US equities"}
 
 
 def edge_periods(edge: dict | None) -> tuple[int, int]:
-    """``(positive, scored)`` periods of an edge read.
-
-    The denominator is the periods that had enough calls to score
-    (``scored_blocks``), not every period drawn: a short history leaves its
-    first blocks unscored, and dividing by all of them understated durability.
-    """
+    """``(positive, scored)`` periods of an edge read."""
     e = edge or {}
     blocks = [b for b in (e.get("blocks") or [])
               if b.get("ic") is not None and np.isfinite(b.get("ic"))]
@@ -1013,33 +956,51 @@ def _f(d: dict | None, key: str, default=None):
     return v if np.isfinite(v) else default
 
 
+def _tone(value: float) -> str:
+    return "supports" if value >= 0.75 else "against" if value < 0.35 else "neutral"
+
+
+def record_sentence(side: dict | None, what: str) -> str:
+    """One sentence for a pooled or per-target call record."""
+    n = int((side or {}).get("n_claims", 0) or 0)
+    hit, base, ex, t = (_f(side, k) for k in ("hit", "base", "excess_bps", "t"))
+    if not n or hit is None or base is None:
+        return f"No graded {what} yet."
+    return (f"{what[0].upper() + what[1:]} hit {hit:.1f}% against {base:.1f}% for the same "
+            f"direction on any day, over {n:,} claims"
+            + (f" ({ex:+.0f} bps per claim in excess of holding, t {t:+.2f})."
+               if ex is not None and t is not None else "."))
+
+
 def build_hero_verdict(
     *,
     mula: dict,
     swayam_breadth: dict | None,
     agreement: float | None,
-    edge: dict | None,
+    call: dict | None,
+    class_record: dict | None,
     precedent: dict | None,
-    n_divergences: int,
-    horizon_days: int,
+    precedent_skill: dict | None = None,
+    n_divergences: int = 0,
+    horizon_days: int = 10,
     div_window: int | None = None,
     min_precedent_n: int = 8,
 ) -> dict:
-    """Build the hero verdict from the conviction chain. Pure data in/out.
+    """The verdict: a valuation state, whether a call is licensed, and the evidence.
 
-    ``mula`` is ``MulaEngine.get_current_signal()``; ``edge`` is the claim's
-    own walk-forward read (``convergence.intelligence.series_edge`` on the
-    oscillator's lean); ``precedent`` the hero's base-rate summary.
+    ``mula`` is ``MulaEngine.get_current_signal()``; ``call`` is this target's
+    own as-issued record (``convergence.intelligence.call_record``);
+    ``class_record`` the pooled record of its asset class
+    (``core.trust.class_record``); ``precedent`` the base-rate summary and
+    ``precedent_skill`` the matcher's own walk-forward at the horizon.
 
-    Returns ``{signal, signal_class, direction, conviction, headline, limit,
-    binding, gates, risk, caveat, trust, action, horizon_days, valuation}``
-    where ``gates`` is the ordered chain (each ``{name, title, value, label,
-    detail}``) and ``binding`` names the smallest one. Rendering is separate
-    (``render_hero_card``) so these rules stay unit-testable — see
-    tests/test_hero_verdict.py.
+    Returns ``{signal, signal_class, direction, valuation, licensed, record,
+    action, headline, limit, evidence, risk, caveat, trust, horizon_days}``.
+    ``signal`` is BUY / SELL only when the called side of the class record is
+    licensed (``core.trust.is_licensed``); otherwise it is the state word.
+    Pure data in and out — see tests/test_hero_verdict.py.
     """
     h = int(horizon_days)
-    # ── The claim: Mūla's standardized mispricing ───────────────────────
     fvo = _f(mula, "fvo")
     pct = (_f(mula, "pct_mispricing", 0.0) or 0.0) * 100.0
     dir_ = _claim_direction(fvo)
@@ -1047,11 +1008,18 @@ def build_hero_verdict(
     verb = "cheap" if dir_ > 0 else "rich" if dir_ < 0 else "fairly valued"
     side = "below" if pct < 0 else "above"
 
-    gates: list[dict] = []
+    # ── Is the call licensed? ───────────────────────────────────────────
+    side_key = "long" if dir_ > 0 else "short"
+    side_rec = (class_record or {}).get(side_key) if dir_ else None
+    licensed = bool(dir_) and _is_licensed(side_rec)
+    cls_word = CLASS_WORDS.get((class_record or {}).get("asset_class"), "this asset class")
+    call_word = "buy" if dir_ > 0 else "sell"
+
+    rows: list[dict] = []
 
     def _add(name, value, label, detail):
-        gates.append({"name": name, "title": GATE_TITLES[name], "value": float(value),
-                      "label": label, "detail": detail})
+        rows.append({"name": name, "title": GATE_TITLES[name], "value": float(value),
+                     "tone": _tone(float(value)), "label": label, "detail": detail})
 
     # ── 1. Is it mispriced at all? ──────────────────────────────────────
     if fvo is None:
@@ -1059,34 +1027,22 @@ def build_hero_verdict(
              "Mūla has published no valuation yet for this instrument.")
     elif dir_ == 0:
         _add("mispricing", _gate(abs(fvo), _CLAIM_SIGMA, _DEEP_SIGMA), "within noise",
-             f"{abs(pct):.1f}% {side} fair value, {fvo:+.2f}σ — inside the normal "
-             f"day-to-day noise of price around fair value (±{_CLAIM_SIGMA:.1f}σ).")
+             f"{abs(pct):.1f}% {side} fair value, {fvo:+.2f} — inside the normal "
+             f"day-to-day noise of price around fair value (±{_CLAIM_SIGMA:.1f}).")
     else:
-        _add("mispricing", _gate(abs(fvo), _CLAIM_SIGMA, _DEEP_SIGMA), f"{abs(fvo):.2f}σ {verb}",
+        _add("mispricing", _gate(abs(fvo), _CLAIM_SIGMA, _DEEP_SIGMA), f"{abs(fvo):.2f} {verb}",
              f"{abs(pct):.1f}% {side} the level the macro cross-section implies "
-             f"({fvo:+.2f}σ; fully open at {_DEEP_SIGMA:.0f}σ).")
+             f"({fvo:+.2f} typical gaps).")
 
     # ── 2. Does PRICE close the gap? ────────────────────────────────────
-    # The gap is stationary on every instrument tested, but mostly because
-    # fair value moves toward price, not the other way: a gap that closes that
-    # way is not a trade. The ECM regresses the price change itself on the
-    # lagged gap, so this gate asks the question the trade depends on.
     rev = _f(mula, "mr_prob")
     w_led = (_f(mula, "w_valuation", 0.0) or 0.0) + (_f(mula, "w_full", 0.0) or 0.0)
-    kappa = _f(mula, "mula_kappa")
-    hl = _f(mula, "mula_half_life")
-    drift = _f(mula, "expected_drift_pct")
-    dsd = _f(mula, "drift_sd_pct")
+    kappa, hl = _f(mula, "mula_kappa"), _f(mula, "mula_half_life")
+    drift, dsd = _f(mula, "expected_drift_pct"), _f(mula, "drift_sd_pct")
     if rev is None:
-        _add("reversion", _GATE_ABSENT, "no ECM read",
+        _add("reversion", 0.5, "no ECM read",
              "The error-correction layer has not accumulated enough history to read.")
     else:
-        # The gate is the price-side reversion probability itself. The pool
-        # weight is reported beside it but does not move the gate: measured on
-        # synthetic gaps it separated "price closes the gap" from "fair value
-        # closes it" only weakly (0.82 vs 0.66), where P(κ̂ > 0) separates
-        # them cleanly.
-        g_rev = _gate(rev, 0.5, 0.9)
         label = ("price reverts" if rev >= 0.8 else
                  "price does not revert" if rev < 0.55 else "weak reversion")
         bits = []
@@ -1098,22 +1054,22 @@ def build_hero_verdict(
         if drift is not None:
             bits.append(f"expected {h}-d move {drift:+.2f}%"
                         + (f" ± {dsd:.2f}%" if dsd is not None else ""))
-        _add("reversion", g_rev, label, "; ".join(bits) + ".")
+        _add("reversion", _gate(rev, 0.5, 0.9), label, "; ".join(bits) + ".")
 
-    # ── 3. Does the whole cross-section agree? ──────────────────────────
+    # ── 3. Does the cross-section agree on the sign? ────────────────────
     xs = _f(mula, "xs_consistency")
     if xs is None:
-        _add("cross_section", _GATE_ABSENT, "no cross-section read",
+        _add("cross_section", 0.5, "no cross-section read",
              "No leave-one-block-out consistency is available for this session.")
     else:
         _add("cross_section", _gate(xs, 0.3, 0.9),
-             ("no claim to confirm" if dir_ == 0 else
+             ("nothing to confirm" if dir_ == 0 else
               "the world agrees" if xs >= 0.75 else
               "the world is split" if xs >= 0.5 else "the world disagrees"),
-             f"Independent slices of the cross-section (each asset-class block left "
-             f"out in turn) agree on the gap's sign: consistency {xs:.2f}.")
+             f"With each asset-class block left out in turn, the refits agree on the "
+             f"gap's sign: consistency {xs:.2f}.")
 
-    # ── 4. Do the instrument's own internals confirm it? ────────────────
+    # ── 4. Do the instrument's own internals lean the same way? ─────────
     if swayam_breadth:
         os_ = float(swayam_breadth.get("oversold_pct", 0.0) or 0.0)
         ob_ = float(swayam_breadth.get("overbought_pct", 0.0) or 0.0)
@@ -1122,92 +1078,87 @@ def build_hero_verdict(
         agree_txt = (f" Across direction, breadth, magnitude and regime the engines agree "
                      f"{agreement:.0%}." if agreement is not None and np.isfinite(agreement) else "")
         _add("convergence", _gate(aligned, -0.3, 0.4),
-             ("no claim to confirm" if dir_ == 0 else
+             ("nothing to confirm" if dir_ == 0 else
               "Swayam confirms" if aligned > 0.1 else
               "Swayam contradicts" if aligned < -0.1 else "Swayam split"),
              f"Swayam net breadth {net:+.0%} ({os_:.0f}% of views oversold, "
              f"{ob_:.0f}% overbought).{agree_txt}")
     else:
-        _add("convergence", _GATE_ABSENT, "no Swayam read",
+        _add("convergence", 0.5, "no Swayam read",
              "Swayam produced no breadth for this target's latest session.")
 
-    # ── 5. Has this call paid, out of sample? ───────────────────────────
-    ic = _f(edge, "ic")
-    if ic is None:
-        _add("edge", _GATE_UNVALIDATED, "unvalidated",
-             "Not enough scored history for a walk-forward read of the call.")
+    # ── 5. What has this call been worth? ───────────────────────────────
+    own = (call or {}).get(side_key) if dir_ else call
+    t_cls = _f(side_rec if dir_ else class_record, "t")
+    if dir_ and side_rec:
+        label = "licensed" if licensed else "not licensed"
+    elif class_record:
+        label = "nothing to grade"
     else:
-        se = _f(edge, "se")
-        n = int((edge or {}).get("n", 0) or 0)
-        pos, nb = edge_periods(edge)
-        _add("edge", _gate(ic, -0.02, 0.15),
-             ("edge holds" if ic > 0.05 else "edge marginal" if ic > 0 else "no measured edge"),
-             f"Mūla's call has a non-overlapping {h}-d IC of {ic:+.3f}"
-             + (f" (± {se:.3f})" if se is not None else "")
-             + (f" over {n} calls" if n else "")
-             + (f"; {pos} of {nb} periods positive." if nb else "."))
+        label = "no record"
+    _add("edge", _gate(t_cls, -1.0, 2.0) if t_cls is not None else 0.25, label,
+         record_sentence(side_rec if dir_ else class_record,
+                         f"{call_word + ' ' if dir_ else ''}claims in {cls_word}")
+         + " " + record_sentence(own, "on this target they"))
 
     # ── 6. Did it pay the last times this state occurred? ───────────────
     p_n = _f(precedent, "n_eff", 0.0) or 0.0
     p_pos = _f(precedent, "positive_pct")
     p_h = int((precedent or {}).get("horizon", h) or h)
     usable = bool((precedent or {}).get("usable", True))
+    sk_edge, sk_n = _f(precedent_skill, "edge"), int((precedent_skill or {}).get("n", 0) or 0)
+    skilled = sk_edge is not None and sk_edge > 0 and sk_n >= 20
     if precedent and usable and p_n >= min_precedent_n and p_pos is not None:
-        p_bull = p_pos / 100.0
-        agree = p_bull if dir_ > 0 else 1.0 - p_bull if dir_ < 0 else 0.5
-        if dir_ == 0:
-            label = "no claim to test"
+        base_txt = (f"{p_pos:.0f}% of the closest analogs rose over the next {p_h}d "
+                    f"(≈{p_n:.0f} effective episodes; median "
+                    f"{(_f(precedent, 'median', 0.0) or 0.0):+.2f}%).")
+        if not skilled:
+            why = ("its walk-forward hit rate is "
+                   f"{sk_edge:+.1f} points against its base over {sk_n} windows"
+                   if sk_edge is not None and sk_n else "it has too few completed windows to grade")
+            _add("precedent", 0.5, "matcher unproven",
+                 f"{base_txt} The matcher has no measured skill at this horizon: {why}.")
         else:
-            label = ("precedent agrees" if agree > 0.55 else
+            p_bull = p_pos / 100.0
+            agree = p_bull if dir_ > 0 else 1.0 - p_bull if dir_ < 0 else 0.5
+            label = ("nothing to test" if dir_ == 0 else
+                     "precedent agrees" if agree > 0.55 else
                      "precedent disagrees" if agree < 0.45 else "precedent split")
-        _raw = int((precedent or {}).get("n", 0) or 0)
-        _add("precedent", _gate(agree, 0.35, 0.65), label,
-             f"{p_pos:.0f}% of the closest analogs rose over the next {p_h}d "
-             f"(≈{p_n:.0f} effective of {_raw} distinct episodes; median "
-             f"{(_f(precedent, 'median', 0.0) or 0.0):+.2f}%).")
+            _add("precedent", _gate(agree, 0.35, 0.65), label, base_txt)
     else:
         why = str((precedent or {}).get("note") or "").strip()
-        _add("precedent", _GATE_ABSENT, "no usable precedent",
+        _add("precedent", 0.5, "no usable precedent",
              (why + " " if why else "")
              + f"≈{p_n:.0f} effective analogs (need {min_precedent_n}) — too few to read as a base rate.")
 
-    # ── Conviction: the product, and the constraint that binds it ──────
-    conviction = float(np.prod([g["value"] for g in gates]))
-    binding = min(gates, key=lambda g: g["value"])
-
-    level, label, prose = _TIERS[-1][1:]
-    for cut, lvl, lab, pr in _TIERS:
-        if conviction >= cut:
-            level, label, prose = lvl, lab, pr
-            break
-    if dir_ == 0:
-        level, label, prose = "noclaim", "NO CLAIM", "fairly valued — nothing to act on"
-
-    word = "BUY" if dir_ > 0 else "SELL"
-    signal = _TIER_WORD.get(level, "HOLD").format(word) if dir_ else "HOLD"
-    acting = signal != "HOLD"
-
+    # ── The word ────────────────────────────────────────────────────────
+    state = str((mula or {}).get("valuation_state") or "").upper()
     if fvo is None:
-        headline = "HOLD — no valuation has been published for this instrument yet."
+        signal, level, label, prose = "NO VALUATION", "novaluation", "NO CALL", "nothing has been valued yet"
+        headline = "No valuation has been published for this instrument yet."
+        limit = "There is nothing to call until Mūla publishes a valuation."
     elif dir_ == 0:
-        headline = (f"HOLD — {abs(pct):.1f}% {side} fair value, within the normal "
-                    f"noise of price around it.")
-    elif acting:
+        signal, level, label, prose = "FAIR", "noclaim", "NO CALL", "fairly valued — nothing to act on"
+        headline = (f"Fair: {abs(pct):.1f}% {side} fair value, within the normal noise of "
+                    f"price around it.")
+        limit = "No directional claim: the gap is inside the normal noise around fair value."
+    elif licensed:
+        signal = "BUY" if dir_ > 0 else "SELL"
+        level, label, prose = "licensed", "GRADED CALL", "the class record supports this call"
         headline = (f"{signal} — {abs(pct):.1f}% {verb} versus the level the macro "
                     f"cross-section implies.")
+        limit = record_sentence(side_rec, f"{call_word} claims in {cls_word}")
     else:
-        headline = (f"HOLD — {abs(pct):.1f}% {verb} versus the cross-section, but the "
-                    f"evidence does not support acting on it.")
+        signal = "CHEAP" if dir_ > 0 else "RICH"
+        level, label, prose = "unlicensed", "NO GRADED CALL", "the record does not support acting on it"
+        headline = (f"{state.title() or signal.title()}: {abs(pct):.1f}% {side} the level the macro "
+                    f"cross-section implies ({fvo:+.2f}). No {call_word} call is issued.")
+        if side_rec and int(side_rec.get("n_claims", 0) or 0):
+            limit = (record_sentence(side_rec, f"{call_word} claims in {cls_word}")
+                     + f" A call needs t ≥ {_LICENCE_T:.1f} and a hit rate above that base.")
+        else:
+            limit = f"There is no graded record of {call_word} claims in {cls_word}, so no call is issued."
 
-    # The single most useful sentence the card produces: what is holding it back.
-    if dir_ == 0:
-        limit = "No directional claim: the gap is inside the normal noise around fair value."
-    elif binding["value"] >= 0.75:
-        limit = "Nothing is materially limiting this — every condition holds."
-    else:
-        limit = f"Capped by {binding['title'].lower()}: {binding['detail']}"
-
-    # ── Standing flags, outside the chain ──────────────────────────────
     risk = None
     if n_divergences > 0:
         risk = (f"{n_divergences} Mūla/Swayam divergence event"
@@ -1219,24 +1170,24 @@ def build_hero_verdict(
         caveat = (f"The latest session was not valued ({reason}); every reading above is "
                   f"from the last session that was.")
 
-    tier, chip = edge_tier(ic)
-    trust = {"tier": tier, "chip": chip, "oos_ic": ic, "se": _f(edge, "se"),
-             "n": int((edge or {}).get("n", 0) or 0),
-             "positive_blocks": edge_periods(edge)[0],
-             "n_blocks": edge_periods(edge)[1]}
+    shown = side_rec if dir_ else class_record
+    trust = {"tier": "licensed" if licensed else "unlicensed" if shown else "norecord",
+             "chip": "LICENSED" if licensed else "NOT LICENSED" if shown else "NO RECORD",
+             "hit": _f(shown, "hit"), "base": _f(shown, "base"), "t": _f(shown, "t"),
+             "excess_bps": _f(shown, "excess_bps"),
+             "n": int((shown or {}).get("n_claims", 0) or 0), "asset_class": cls_word}
 
     return {
         "signal": signal,
-        "signal_class": ("buy" if acting and dir_ > 0 else
-                         "sell" if acting and dir_ < 0 else "hold"),
+        "signal_class": ("buy" if signal == "BUY" else "sell" if signal == "SELL" else "hold"),
         "direction": direction,
         "valuation": {"fvo": fvo, "pct": pct, "verb": verb, "side": side,
                       "state": (mula or {}).get("valuation_state")},
-        "conviction": conviction if dir_ else None,
+        "licensed": licensed,
+        "record": shown,
         "headline": headline,
-        "binding": binding["name"] if dir_ and binding["value"] < 0.75 else None,
         "limit": limit,
-        "gates": gates,
+        "evidence": rows,
         "risk": risk,
         "caveat": caveat,
         "trust": trust,
@@ -1245,83 +1196,60 @@ def build_hero_verdict(
     }
 
 
-def format_conviction(verdict: dict) -> str:
-    """Conviction as the card and the KPI strip both print it."""
-    c = verdict.get("conviction")
-    return "—" if c is None else f"{c:.0%}"
-
-
 def render_hero_card(verdict: dict) -> None:
-    """Render the verdict: claim, what limits it, then the chain behind both.
-
-    The layout follows the logic rather than decorating it. A reader who stops
-    after two lines has the decision (signal + conviction) and the single
-    reason it is not stronger; a reader who continues gets every gate with the
-    number behind it.
-    """
+    """Render the verdict: the state, whether a call is issued and why, then the evidence."""
     trust = verdict["trust"]
-    # Theme-aware: every colour here is a CSS var, not a literal hex, so the
-    # trust chip repaints correctly under the light theme too.
     chip_style = {
-        "uncalibrated": ("var(--ink-tertiary)", "var(--surface-2)"),
-        "no_edge":      ("var(--short)", "var(--short-fill)"),
-        "marginal":     ("var(--caution)", "var(--caution-fill)"),
-        "modest":       ("var(--long)", "var(--long-fill)"),
-        "solid":        ("var(--long)", "color-mix(in srgb, var(--long) 18%, transparent)"),
+        "norecord":   ("var(--ink-tertiary)", "var(--surface-2)"),
+        "unlicensed": ("var(--caution)", "var(--caution-fill)"),
+        "licensed":   ("var(--long)", "var(--long-fill)"),
     }.get(trust["tier"], ("var(--ink-tertiary)", "var(--surface-2)"))
-    ic_text = (f"walk-forward IC {trust['oos_ic']:+.3f}" if trust.get("oos_ic") is not None
-               else "no walk-forward read")
-    if trust.get("n_blocks"):
-        ic_text += f" &bull; {trust.get('positive_blocks', 0)}/{trust['n_blocks']} periods +"
+    rec_text = (f"{trust['asset_class']} &bull; hit {trust['hit']:.1f}% vs {trust['base']:.1f}% "
+                f"&bull; t {trust['t']:+.2f}"
+                if trust.get("hit") is not None and trust.get("base") is not None
+                and trust.get("t") is not None else "no pooled record")
 
     action = verdict["action"]
-    tier_color = {"high": "var(--long)", "moderate": "var(--caution)",
-                  "low": "var(--ink-secondary)", "standaside": "var(--ink-tertiary)",
-                  "noclaim": "var(--ink-tertiary)"}.get(action["level"], "var(--ink-tertiary)")
+    tier_color = {"licensed": "var(--long)", "unlicensed": "var(--caution)"}.get(
+        action["level"], "var(--ink-tertiary)")
 
-    # ── Gate chain: one row each, bar width = how open the gate is ──────
-    # Bar colour thresholds sit on the same 0.75 line the binding constraint
-    # uses, so a gate drawn green can never be the one named as binding.
-    binding = verdict.get("binding")
-    gate_rows = "".join(
-        f'<div class="hero-gate{" binding" if g["name"] == binding else ""}">'
+    rows = "".join(
+        f'<div class="hero-gate">'
         f'<span class="hero-gate-name">{html_mod.escape(g["title"])}</span>'
         f'<span class="hero-gate-bar"><i style="width:{max(2, round(g["value"] * 100))}%;'
-        f'background:{"var(--short)" if g["value"] < 0.35 else "var(--caution)" if g["value"] < 0.75 else "var(--long)"};">'
+        f'background:{"var(--short)" if g["tone"] == "against" else "var(--long)" if g["tone"] == "supports" else "var(--caution)"};">'
         f'</i></span>'
         f'<span class="hero-gate-label">{html_mod.escape(g["label"])}</span>'
         f'<span class="hero-gate-detail">{html_mod.escape(g["detail"])}</span>'
         f'</div>'
-        for g in verdict["gates"]
+        for g in verdict["evidence"]
     )
-
     flags = "".join(
         f'<div class="hero-risk">{html_mod.escape(t)}</div>'
         for t in (verdict.get("caveat"), verdict.get("risk")) if t
     )
-    conv_txt = format_conviction(verdict)
 
     st.markdown(
         f"""\
 <div class="hero-card {html_mod.escape(verdict["signal_class"])}">
   <div class="hero-top">
     <div class="hero-signal-block">
-      <div class="hero-eyebrow">Tattva &bull; {verdict["horizon_days"]}-day call</div>
+      <div class="hero-eyebrow">Tattva &bull; {verdict["horizon_days"]}-session read</div>
       <div class="hero-signal">{html_mod.escape(verdict["signal"])}</div>
     </div>
     <div class="hero-conviction-block">
       <span class="hero-chip" style="background:{chip_style[1]};color:{chip_style[0]};">\
-{html_mod.escape(trust["chip"])} &bull; {ic_text}</span>
-      <div class="hero-conviction" style="color:{tier_color};">\
-{html_mod.escape(action["label"])}{f" &middot; {conv_txt}" if verdict.get("conviction") is not None else ""}</div>
+{html_mod.escape(trust["chip"])} &bull; {rec_text}</span>
+      <div class="hero-conviction" style="color:{tier_color};">{html_mod.escape(action["label"])}</div>
       <div class="hero-conviction-sub">{html_mod.escape(action["prose"])}</div>
     </div>
   </div>
   <div class="hero-headline">{html_mod.escape(verdict["headline"])}</div>
   <div class="hero-limit">{html_mod.escape(verdict["limit"])}</div>
-  <div class="hero-gates">{gate_rows}</div>
+  <div class="hero-gates">{rows}</div>
   {flags}
-  <div class="hero-foot">Conviction is the product of the six gates above &mdash; the weakest caps it.</div>
+  <div class="hero-foot">Evidence is shown, not multiplied into a score: graded on past claims, \
+these readings did not separate good calls from bad.</div>
 </div>
 """,
         unsafe_allow_html=True,

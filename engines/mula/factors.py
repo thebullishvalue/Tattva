@@ -378,6 +378,13 @@ class OnlineFactorModel:
         self.contrib = np.zeros((K_MAX, n))    # per-instrument attribution
         self.last_scores = np.zeros(K_MAX)
         self._logw = np.zeros(len(memories))
+        # Which level SLOT each factor of the active memory accumulates into,
+        # and with which sign. The identity until the active memory changes;
+        # see _remap.
+        self._slot = np.arange(K_MAX)
+        self._sgn = np.ones(K_MAX)
+        self._level_mem = self.active          # the memory the levels were last built on
+        self._level_basis = np.zeros((n, K_MAX))   # that memory's basis, in slot order
 
     # -- internals ----------------------------------------------------------
     def _maybe_recompute(self, m: _CorrMemory) -> None:
@@ -408,6 +415,43 @@ class OnlineFactorModel:
         m.k = int(Vk.shape[1])
         m.C_ref = C
         m.last_recompute = self.t
+
+    def _remap(self, m: _CorrMemory) -> None:
+        """Match a newly active memory's factors to the level slots in use.
+
+        Each correlation memory carries its own eigenbasis, ordered and signed
+        against its own past only. The factor LEVELS are one running sum, so
+        when the active memory changes, its factor j is in general not the
+        direction slot j has been accumulating: left alone, a level would
+        carry on summing the scores of a different (or sign-flipped) factor
+        and the integrated regressor would silently change meaning. Here the
+        incoming basis is matched to the basis the levels were built on —
+        greedily on |cosine|, as ``_align`` does within a memory — and every
+        factor is routed, signed, to the slot it continues. Unmatched factors
+        take the slots nothing is using. The levels themselves are untouched,
+        so the regressors stay continuous in value.
+        """
+        k = m.k
+        B = self._level_basis
+        sim = m.V[:, :k].T @ B                       # k x K_MAX, signed
+        slot = np.full(K_MAX, -1, dtype=int)
+        sgn = np.ones(K_MAX)
+        taken: set[int] = set()
+        pairs = sorted(((abs(sim[i, j]), i, j) for i in range(k) for j in range(K_MAX)),
+                       key=lambda t: (-t[0], t[1], t[2]))
+        for a, i, j in pairs:
+            if a < 0.3:
+                break
+            if slot[i] >= 0 or j in taken:
+                continue
+            slot[i] = j
+            sgn[i] = 1.0 if sim[i, j] >= 0 else -1.0
+            taken.add(j)
+        free = [j for j in range(K_MAX) if j not in taken]
+        for i in range(K_MAX):
+            if slot[i] < 0:
+                slot[i] = free.pop(0)
+        self._slot, self._sgn = slot, sgn
 
     @staticmethod
     def _loglik(m: _CorrMemory, z: np.ndarray, n_avail: int) -> float:
@@ -464,6 +508,10 @@ class OnlineFactorModel:
         m = self.mem[self.active]
 
         k = m.k
+        if self.active != self._level_mem and k > 0:
+            if self._level_basis.any():
+                self._remap(m)
+            self._level_mem = self.active
         scores = np.zeros(K_MAX)
         if k > 0:
             V = m.V[:, :k]
@@ -481,12 +529,16 @@ class OnlineFactorModel:
             norm = np.sqrt(np.maximum(observable, 1e-9))
             proj = (V * mask[:, None]).T @ zz
             denom = np.where(usable, norm * np.sqrt(lam), np.inf)
-            s = proj / denom
-            scores[:k] = s
+            slot, sgn = self._slot[:k], self._sgn[:k]
+            s = sgn * proj / denom
+            scores[slot] = s
             # exact per-instrument attribution of the factor increment
-            inc = (V * mask[:, None]) * zz[:, None] / denom[None, :]
-            self.contrib[:k] += inc.T
-            self.levels[:k] += s
+            inc = (V * mask[:, None]) * zz[:, None] * (sgn / denom)[None, :]
+            self.contrib[slot] += inc.T
+            self.levels[slot] += s
+            basis = np.zeros((self.n, K_MAX))
+            basis[:, slot] = V * sgn[None, :]
+            self._level_basis = basis
 
         self.k = k
         self.last_scores = scores

@@ -90,3 +90,33 @@ def test_no_inverse_pairs_in_the_universe():
         assert not ({a, b} <= tickers), f"{a} and {b} are the same instrument"
     inr_legs = [t for t in tickers if t.endswith("INR=X") and t != "INR=X"]
     assert not inr_legs, f"INR crosses duplicate USD/INR: {inr_legs}"
+
+
+def test_factor_levels_keep_their_meaning_when_the_memory_switches():
+    """Switch to a memory whose basis is reordered and sign-flipped: slot 0 must
+    go on accumulating the same factor."""
+    from engines.mula.factors import OnlineFactorModel
+    rng = np.random.default_rng(3)
+    n, T = 30, 900
+    load = np.zeros((n, 2))
+    load[:15, 0] = 1.0
+    load[15:, 1] = 1.0
+    f = rng.normal(0, 1, (T, 2)) * np.array([2.0, 1.2])
+    z = f @ load.T + rng.normal(0, 0.5, (T, n))
+    avail = np.ones(n, dtype=bool)
+    fm = OnlineFactorModel(n)
+    scores = np.zeros((T, 2))
+    for t in range(T):
+        if t == 600:                       # scramble the memory about to become active
+            m = fm.mem[0]
+            m.V[:, [0, 1]] = -m.V[:, [1, 0]]
+            m.lam_eig[[0, 1]] = m.lam_eig[[1, 0]]
+            m.last_recompute = fm.t        # hold that basis for the check
+            m.C_ref = m.correlation()
+        fm._logw = (np.array([-1e9, -1e9, 0.0]) if t < 600 else np.array([0.0, -1e9, -1e9]))
+        out = fm.update(z[t].copy(), avail)
+        scores[t] = out["scores"][:2]
+    before = np.corrcoef(scores[300:600, 0], f[300:600, 0])[0, 1]
+    after = np.corrcoef(scores[600:640, 0], f[600:640, 0])[0, 1]
+    assert abs(before) > 0.8
+    assert np.sign(after) == np.sign(before) and abs(after) > 0.8

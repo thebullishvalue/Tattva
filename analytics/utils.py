@@ -99,29 +99,6 @@ def _classify_zones(
     return zones
 
 
-def _detect_crossover_signals(
-    z_scores: np.ndarray, threshold: float = 1.0
-) -> tuple[np.ndarray, np.ndarray]:
-    """Detect z-score threshold crossings as boolean signal arrays.
-
-    A buy signal fires when z crosses below ``-threshold``.
-    A sell signal fires when z crosses above ``+threshold``.
-    """
-    n = len(z_scores)
-    if n < 2:
-        return np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
-    z_curr = z_scores[1:]
-    z_prev = z_scores[:-1]
-    valid = np.isfinite(z_curr) & np.isfinite(z_prev)
-    buy_cond = valid & (z_curr < -threshold) & (z_prev >= -threshold)
-    sell_cond = valid & (z_curr > threshold) & (z_prev <= threshold)
-    buy_signals = np.zeros(n, dtype=bool)
-    sell_signals = np.zeros(n, dtype=bool)
-    buy_signals[1:] = buy_cond
-    sell_signals[1:] = sell_cond
-    return buy_signals, sell_signals
-
-
 def _compute_significance(values: list[float]) -> dict[str, float]:
     """Compute t-statistic and p-value for a list of values.
 

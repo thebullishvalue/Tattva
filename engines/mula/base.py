@@ -67,7 +67,6 @@ from core.config import (
     DDM_LONG_RUN_VAR,
     FORECAST_HORIZON,
     LOOKBACK_WINDOWS,
-    OU_PROJECTION_DAYS,
 )
 from core.semantics import VALUATION_STATES, claim_direction, valuation_state
 
@@ -83,7 +82,6 @@ from analytics.robust_z import rolling_robust_z
 from analytics.utils import (
     _apply_conviction_bounds,
     _classify_zones,
-    _detect_crossover_signals,
 )
 
 from .ecm import COLUMNS as ECM_COLUMNS
@@ -117,12 +115,8 @@ class MulaEngine:
         self.lookback_data: dict = {}
         self.model_stats: dict = {}
         self.ou_params: dict = {}
-        self.ou_projection: np.ndarray = np.array([])
-        self.ou_projection_upper: np.ndarray = np.array([])
-        self.ou_projection_lower: np.ndarray = np.array([])
         self.latest_feature_impacts: dict = {}
         self.feature_impact_history: list[dict] = []
-        self.theta_history: list[float] = []
         self.feature_names: list[str] = []
         self.n_samples: int = 0
         self.y: np.ndarray = np.array([])
@@ -337,7 +331,7 @@ class MulaEngine:
                 "valuation_confidence": float("nan"), "xs_consistency": float("nan"),
                 "mr_prob": float("nan"), "gap_half_life": float("nan"),
                 "ou_half_life": float("nan"), "adf_pvalue": 1.0, "kpss_pvalue": 0.0,
-                "theta_stable": True, "conviction_score": 0.0,
+                "conviction_score": 0.0,
                 "conviction_upper": 0.0, "conviction_lower": 0.0,
                 "oversold_breadth": float("nan"), "overbought_breadth": float("nan"),
                 "avg_z": float("nan"), "market_regime": "initialising",
@@ -359,11 +353,6 @@ class MulaEngine:
             except (TypeError, ValueError):
                 return float("nan")
             return v if np.isfinite(v) else float("nan")
-
-        theta_stable = True
-        if len(self.theta_history) >= 10:
-            theta_cv = np.std(self.theta_history[-10:]) / max(np.mean(self.theta_history[-10:]), 1e-6)
-            theta_stable = bool(theta_cv < 0.5)
 
         fvo = _f("FVO")
         withheld = r != len(self.ts_data) - 1
@@ -387,7 +376,6 @@ class MulaEngine:
             "ou_half_life": float(self.ou_params.get("half_life", np.nan)),
             "adf_pvalue": float(self.ou_params.get("adf_pvalue", 1.0)),
             "kpss_pvalue": float(self.ou_params.get("kpss_pvalue", 0.0)),
-            "theta_stable": theta_stable,
             # ── the window stack (evidence, not a second direction) ─────
             "conviction_score": _f("ConvictionBounded"),
             "conviction_upper": _f("ConvictionUpper"),
@@ -504,25 +492,13 @@ class MulaEngine:
         valid = np.isfinite(gap) & np.isfinite(p)
         n_valid = int(valid.sum())
 
-        if n_valid > 2:
-            g = gap[valid]
-            pv = p[valid]
-            ss_res = float(np.sum(g ** 2))
-            ss_tot = float(np.sum((pv - np.mean(pv)) ** 2))
-            r2 = 1.0 - ss_res / max(ss_tot, 1e-10)
-            rmse = float(np.sqrt(np.mean(g ** 2)))
-            mae = float(np.mean(np.abs(g)))
-
-            anchor = (pd.Series(p).rolling(252, min_periods=60).mean()
-                      .shift(1).to_numpy(dtype=np.float64))
-            cmp_ok = valid & np.isfinite(anchor)
-            if cmp_ok.sum() > 2:
-                ss_anchor = float(np.sum((p[cmp_ok] - anchor[cmp_ok]) ** 2))
-                r2_vs_anchor = 1.0 - float(np.sum(gap[cmp_ok] ** 2)) / max(ss_anchor, 1e-10)
-            else:
-                r2_vs_anchor = 0.0
-        else:
-            r2, rmse, mae, r2_vs_anchor = 0.0, 0.0, 0.0, 0.0
+        r2_vs_anchor = 0.0
+        anchor = (pd.Series(p).rolling(252, min_periods=60).mean()
+                  .shift(1).to_numpy(dtype=np.float64))
+        cmp_ok = valid & np.isfinite(anchor)
+        if cmp_ok.sum() > 2:
+            ss_anchor = float(np.sum((p[cmp_ok] - anchor[cmp_ok]) ** 2))
+            r2_vs_anchor = 1.0 - float(np.sum(gap[cmp_ok] ** 2)) / max(ss_anchor, 1e-10)
 
         # Averages over TRUSTED rows (`Valid`), the same population every
         # other statistic of this engine is quoted on.
@@ -537,10 +513,7 @@ class MulaEngine:
             return float(np.mean(v)) if len(v) else float("nan")
 
         self.model_stats = {
-            "r2_oos": r2,
             "r2_vs_anchor": r2_vs_anchor,
-            "rmse_oos": rmse,
-            "mae_oos": mae,
             "n_obs": n_valid,
             "n_features": len(self.feature_names),
             # Uncertainty about the fair-value level, and the typical size of
@@ -580,10 +553,8 @@ class MulaEngine:
                 r, window=lb, min_periods=min_periods, alpha=0.05, center="zero"
             )
             zones = _classify_zones(z_scores)
-            buy_signals, sell_signals = _detect_crossover_signals(z_scores)
             self.lookback_data[lb] = {
                 "z_scores": z_scores, "zones": zones,
-                "buy_signals": buy_signals, "sell_signals": sell_signals,
                 "lower_bounds": lower_bounds, "upper_bounds": upper_bounds,
             }
 
@@ -621,8 +592,6 @@ class MulaEngine:
         for lb, data in self.lookback_data.items():
             self.ts_data[f"Z_{lb}"] = data["z_scores"]
             self.ts_data[f"Zone_{lb}"] = data["zones"]
-            self.ts_data[f"Buy_{lb}"] = data["buy_signals"]
-            self.ts_data[f"Sell_{lb}"] = data["sell_signals"]
 
     def _compute_breadth_metrics(self) -> None:
         n = len(self.ts_data)
@@ -632,8 +601,6 @@ class MulaEngine:
         overbought = np.zeros(n)
         extreme_os = np.zeros(n)
         extreme_ob = np.zeros(n)
-        buy_count = np.zeros(n)
-        sell_count = np.zeros(n)
         z_scores_list = []
 
         for lb in valid_lookbacks:
@@ -643,8 +610,6 @@ class MulaEngine:
             oversold += (zones == "Undervalued")
             extreme_ob += (zones == "Extreme Over")
             overbought += (zones == "Overvalued")
-            buy_count += self.ts_data[f"Buy_{lb}"].values
-            sell_count += self.ts_data[f"Sell_{lb}"].values
             z_scores_list.append(z)
 
         # A row with no finite z-score in ANY lookback window has no genuine
@@ -770,8 +735,6 @@ class MulaEngine:
             publish, (oversold + extreme_os) / num_lb * 100, np.nan)
         self.ts_data["OverboughtBreadth"] = np.where(
             publish, (overbought + extreme_ob) / num_lb * 100, np.nan)
-        self.ts_data["BuySignalBreadth"] = buy_count
-        self.ts_data["SellSignalBreadth"] = sell_count
         self.ts_data["AvgZ"] = np.where(publish, avg_z, np.nan)
         # Window agreement: +100 when every window reads the gap rich, an
         # extra half again for each window reading it extreme. Positive =
@@ -1039,19 +1002,11 @@ class MulaEngine:
         ]
 
     def _compute_ou_diagnostics(self) -> None:
-        """OU fit of the published gap: full-history half-life, ADF / KPSS.
+        """OU fit of the published gap over its full history, with ADF / KPSS.
 
         These describe the GAP's persistence — how long a mispricing of this
         size typically survives — not which side closes it (that is the ECM's
         question; see ``_compute_error_correction``).
-
-        The headline half-life and the decay projection use the FULL-history
-        fit. They used to use the last 60-session rolling estimate while the
-        Mūla page called the number "a full-history fit": Gold read 4.3d on
-        the window against 8.2d on its history, S&P 500 2.0d against 6.2d. A
-        60-observation AR(1) is too noisy to headline. The rolling estimates
-        are kept for one purpose — ``theta_stable``, whether the reversion
-        speed itself has been steady lately.
         """
         r = self.residuals
         oos_r = r[self.min_train_size:]
@@ -1061,8 +1016,6 @@ class MulaEngine:
             theta, mu, sigma = ornstein_uhlenbeck_estimate(oos_r)
             try:
                 with warnings.catch_warnings():
-                    # statsmodels 0.15 announces a return-type change; the
-                    # p-value is element [1] under both.
                     warnings.simplefilter("ignore", category=FutureWarning)
                     adf_pvalue = float(adfuller(oos_r, autolag="AIC")[1]) if _HAS_STATSMODELS else 1.0
             except Exception:
@@ -1073,43 +1026,16 @@ class MulaEngine:
                     kpss_pvalue = float(kpss(oos_r, regression="c", nlags="auto")[1]) if _HAS_STATSMODELS else 0.0
             except Exception:
                 kpss_pvalue = 0.0
-
-            vol_multiplier = 1.0
-            window_size = min(60, len(oos_r) // 3)
-            self.theta_history = []
-            for i in range(window_size, len(oos_r)):
-                theta_roll, _, _ = ornstein_uhlenbeck_estimate(oos_r[i - window_size : i])
-                self.theta_history.append(theta_roll)
-
-            theta_std = np.std(self.theta_history) if len(self.theta_history) > 1 else 0.0
-            dynamic_theta = self.theta_history[-1] if self.theta_history else theta
         else:
             _finite = r[np.isfinite(r)]
             theta, mu, sigma = 0.05, 0.0, max(float(np.std(_finite)) if len(_finite) else 0.0, 1e-6)
-            adf_pvalue, kpss_pvalue, vol_multiplier = 1.0, 0.0, 1.0
-            dynamic_theta, theta_std = theta, 0.0
+            adf_pvalue, kpss_pvalue = 1.0, 0.0
 
         self.ou_params = {
-            "theta": theta, "dynamic_theta": dynamic_theta, "mu": mu, "sigma": sigma,
+            "theta": theta, "mu": mu, "sigma": sigma,
             "half_life": np.log(2) / max(theta, 1e-4),
-            "half_life_recent": np.log(2) / max(dynamic_theta, 1e-4),
-            "stationary_std": sigma / np.sqrt(2 * max(theta, 1e-4)),
             "adf_pvalue": adf_pvalue, "kpss_pvalue": kpss_pvalue,
-            "vol_multiplier": vol_multiplier, "theta_std": theta_std,
         }
-
-        current_r = float(oos_r[-1]) if len(oos_r) else 0.0
-        proj_days = np.arange(1, OU_PROJECTION_DAYS + 1)
-        self.ou_projection = mu + (current_r - mu) * np.exp(-theta * proj_days)
-
-        # The band brackets the decay at the speeds the rolling fits have
-        # actually wandered across (±1 sd of the 60-session theta).
-        if theta_std > 0:
-            self.ou_projection_upper = mu + (current_r - mu) * np.exp(-max(theta - theta_std, 1e-4) * proj_days)
-            self.ou_projection_lower = mu + (current_r - mu) * np.exp(-(theta + theta_std) * proj_days)
-        else:
-            self.ou_projection_upper = self.ou_projection.copy()
-            self.ou_projection_lower = self.ou_projection.copy()
 
 
 #: The engine's former name (codename FVO, "fair value oscillator"). Kept so

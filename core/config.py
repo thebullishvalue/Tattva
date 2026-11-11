@@ -70,7 +70,6 @@ FVO_MIN_PRINTS = 250
 # not a long-run relation. Within the slow family the data still selects.
 FVO_VALUATION_DELTAS = (0.999, 0.9995, 0.9999, 1.0)
 
-OU_PROJECTION_DAYS = 90
 #: Reciprocals and re-denominations of an instrument already in the panel are
 #: not listed (INR/USD beside USD/INR, the X/INR crosses, UDN beside UUP): a
 #: duplicated instrument is counted twice by the factor model.
@@ -1019,9 +1018,6 @@ COLOR_PURPLE = _palette_hex("violet")   # #9B8FD4
 # instrument's own causal quantiles. What stays here are properties of a
 # statistic or of the layout, the same for every instrument.
 
-# OOS R² thresholds
-UI_R2_STRONG = 0.7
-UI_R2_ACCEPTABLE = 0.4
 
 # (UI_BAND_NARROW/WIDE were removed: the CI band width is pinned by the DDM's
 # mean-reverting variance — measured degenerate, the tiers could never fire.

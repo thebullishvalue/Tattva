@@ -48,8 +48,6 @@ from ui.components import (
 )
 from core.config import (
     get_instrument_config, InstrumentConfig,
-    UI_R2_STRONG,
-    UI_R2_ACCEPTABLE,
     UI_CHART_HEIGHT_MEDIUM,
     UI_CHART_HEIGHT_XLARGE,
 )
@@ -79,12 +77,6 @@ TOOLTIPS = {
         "The price move the error-correction regression expects over the horizon, given "
         "today's gap and how persistent gaps are, with its one-SD range. A gap that is real "
         "but small relative to normal price noise shows up here as a small expected move."
-    ),
-    "oos_r2": (
-        "Share of log-price variance explained by the fitted level. A level regression on "
-        "integrated factors reads high by construction (both sides trend), so treat this as "
-        "a sanity check that the cross-section tracks the target at all — not as evidence of "
-        "edge. R² vs Trailing Mean and the walk-forward IC are the discriminating numbers."
     ),
     "r2_vs_anchor": (
         "The published fair value versus the honest competing hypothesis: that price simply "
@@ -378,29 +370,20 @@ def _render_model_quality_cards(model_stats, signal):
     """Model Quality — does the cross-section locate this instrument's level?
 
     Read left to right as a chain of increasingly demanding questions. Does the
-    cross-section track this asset at all (OOS R²)? Does it locate the level
-    better than the asset's own trailing mean does (R² vs Trailing Mean)? Do
+    cross-section locate the level better than the asset's own trailing mean
+    does (R² vs Trailing Mean)? Do
     independent slices of the world agree on the mispricing's sign
     (Cross-Section)? Is the gap stationary (Stationarity)? And how precisely
     is the level pinned today (Model Spread)?
 
-    A high R² with a negative R²-vs-anchor is the diagnostic worth knowing: the
-    regression is fitting the trend, not the mispricing.
+    The plain level R² is not shown: a level regression on integrated
+    regressors reads near 1 by construction.
     """
     _t = _active_tiers()
     UI_MODEL_SPREAD_LOW = _series_tier("ModelSpread", _t.ui_model_spread_low / 1e4, 0.10) * 1e4
     UI_MODEL_SPREAD_HIGH = _series_tier("ModelSpread", _t.ui_model_spread_high / 1e4, 0.90) * 1e4
-    q1, q2, q3, q4, q5 = st.columns(5, gap="small")
+    q2, q3, q4, q5 = st.columns(4, gap="small")
 
-    with q1:
-        r2 = float(model_stats.get("r2_oos", np.nan))
-        render_metric_card(
-            "OOS R²", f"{r2:.3f}",
-            "Log-price variance explained by the fitted level. High is expected for a level "
-            "regression — the next card is the discriminating one.",
-            "success" if r2 > UI_R2_STRONG else "warning" if r2 > UI_R2_ACCEPTABLE else "danger",
-            tooltip=TOOLTIPS["oos_r2"],
-        )
     with q2:
         r2_anchor = float(model_stats.get("r2_vs_anchor", 0.0) or 0.0)
         render_metric_card(

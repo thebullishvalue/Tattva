@@ -28,7 +28,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ui.theme import (chart_layout, style_axes,
-                      chart_color, chart_rgba, grid_rgba)
+                      chart_color, grid_rgba)
 from ui.components import (render_metric_card, render_section_header, render_chip,
                            render_empty_state, render_chart_panel, render_table_panel,
                            render_note, edge_tier, edge_periods)
@@ -163,7 +163,6 @@ def render_diagnostics_tab(engine, signal, horizon: int = 10):
     adf = float(signal.get("adf_pvalue", np.nan) if signal.get("adf_pvalue") is not None else np.nan)
     kpss = float(signal.get("kpss_pvalue", np.nan) if signal.get("kpss_pvalue") is not None else np.nan)
     stationary = bool(np.isfinite(adf) and np.isfinite(kpss) and adf < 0.05 and kpss > 0.05)
-    theta_stable = bool(signal.get("theta_stable", True))
     c1, c2, c3 = st.columns(3, gap="small")
     with c1:
         hl = signal.get("ou_half_life")
@@ -186,8 +185,6 @@ def render_diagnostics_tab(engine, signal, horizon: int = 10):
         f'<div class="chip-row">'
         f'<span class="cr-item">Stationarity'
         f'{render_chip("Stationary" if stationary else "Non-stationary", "success" if stationary else "warning", as_html=True)}</span>'
-        f'<span class="cr-item">\u03b8 Stability'
-        f'{render_chip("Stable" if theta_stable else "Unstable", "success" if theta_stable else "warning", as_html=True)}</span>'
         f'</div>',
         unsafe_allow_html=True,
     )

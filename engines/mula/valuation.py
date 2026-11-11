@@ -222,14 +222,6 @@ class MarketValuationEngine:
         # realised global volatility against its own history is graded,
         # distribution-free, and equally causal.
         stress_rank = ExpandingRank()
-        # Cross-sectional dispersion of standardised returns.  A liquidity /
-        # market-quality proxy that needs no volume or spread data: when
-        # liquidity provision withdraws, the cross-section fans out even
-        # after each name has been normalised by its own volatility
-        # (Ang et al. 2006; Herskovic et al. 2016 on common idiosyncratic
-        # volatility as a priced liquidity-linked factor).
-        disp_rank = ExpandingRank()
-
         lat_bank: DynamicModelAverage | None = None
         blk_bank: DynamicModelAverage | None = None
         loo: BatchDLM | None = None
@@ -248,20 +240,14 @@ class MarketValuationEngine:
         # Working miscoverage level for the adaptive-conformal band; starts at
         # the nominal and is driven by realised coverage from there.
         ci_alpha = 1.0 - CI_LEVEL
-        resid_ewma = EWMA(halflife=252.0)
         agree_ew = 0.0
         agree_w = 0.0
 
         # -- output buffers ------------------------------------------------
         out = {k: np.full(T, np.nan) for k in (
             "fair_value", "gap", "pct_mispricing", "fvo", "pred_sd", "fv_sd",
-            "ci_lo", "ci_hi", "resid_rmse", "k_factors", "explained_var",
-            "corr_memory", "t_eff", "xs_consistency", "gap_halflife",
-            "gap_phi", "stress", "regime_stress", "regime_persistence",
-            "switch_prob", "regime_drift", "regime_entropy",
-            "w_latent", "w_block", "gap_percentile", "adapt_memory",
-            "factor_var_share", "loo_dispersion", "xs_dispersion",
-            "xs_dispersion_pct",
+            "ci_lo", "ci_hi", "k_factors", "explained_var", "xs_consistency",
+            "gap_halflife", "gap_phi", "stress", "w_latent", "w_block", "gap_percentile",
         )}
         out["regime_label"] = np.array(["initialising"] * T, dtype=object)
         lat_beta = np.full((T, K_MAX + 1), np.nan)
@@ -322,13 +308,6 @@ class MarketValuationEngine:
             # ---- factors ---------------------------------------------------
             finfo = fac.update(z, avail)
             k = finfo["k"]
-
-            if avail_hist[t] >= 5:
-                xs_disp = float(np.std(z[avail]))
-                xs_disp_pct = disp_rank.cdf(xs_disp)
-                disp_rank.update(xs_disp)
-            else:
-                xs_disp, xs_disp_pct = np.nan, np.nan
 
             # ---- asset-class blocks ---------------------------------------
             cnt = self.block_M @ avail.astype(float)
@@ -443,7 +422,6 @@ class MarketValuationEngine:
 
             gap_ar.update(gap)
             phi, se = gap_ar.solve()
-            resid_ewma.update(gap * gap)
 
             # The gap's own persistence. `phi` is published (GapPhi) because the
             # error-correction layer needs it to project the gap forward over
@@ -475,7 +453,6 @@ class MarketValuationEngine:
             agree_ew = lam_s * agree_ew + (1.0 - lam_s) * agree
             agree_w = lam_s * agree_w + (1.0 - lam_s)
             xs_cons = max(0.0, 2.0 * (agree_ew / max(agree_w, EPS)) - 1.0)
-            loo_disp = float(np.std(loo_gaps) / max(abs(gap), sd))
 
             beta_l = lat_bank.coef
             beta_b = blk_bank.coef
@@ -542,32 +519,16 @@ class MarketValuationEngine:
             out["fv_sd"][t] = fv_sd
             out["ci_lo"][t] = math.exp(fv - zc * sd)
             out["ci_hi"][t] = math.exp(fv + zc * sd)
-            out["resid_rmse"][t] = math.sqrt(max(resid_ewma.mean, 0.0))
             out["k_factors"][t] = k
             out["explained_var"][t] = finfo["explained"]
-            out["corr_memory"][t] = finfo["memory"]
-            out["t_eff"][t] = finfo["t_eff"]
             out["xs_consistency"][t] = xs_cons
-            out["loo_dispersion"][t] = loo_disp
             out["gap_halflife"][t] = hl
             out["gap_phi"][t] = phi
             out["stress"][t] = stress_c
-            out["xs_dispersion"][t] = xs_disp
-            out["xs_dispersion_pct"][t] = xs_disp_pct
-            out["regime_stress"][t] = reg["stress"]
-            out["regime_persistence"][t] = reg["persistence"]
-            out["switch_prob"][t] = reg["switch_prob"]
-            out["regime_drift"][t] = reg["drift"]
-            out["regime_entropy"][t] = reg["entropy"]
             out["regime_label"][t] = reg["label"]
             out["w_latent"][t] = w[0]
             out["w_block"][t] = w[1]
             out["gap_percentile"][t] = gap_pct
-            out["adapt_memory"][t] = (w[0] * lat_bank.effective_memory
-                                      + w[1] * blk_bank.effective_memory)
-            tot_c = float(np.sum(np.abs(contrib_l)) + np.sum(np.abs(contrib_b)))
-            out["factor_var_share"][t] = (
-                float(np.sum(np.abs(contrib_l))) / tot_c if tot_c > EPS else np.nan)
 
             lat_beta[t] = beta_l
             blk_beta[t] = beta_b

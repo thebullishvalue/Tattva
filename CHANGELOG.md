@@ -9,6 +9,16 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.8] — 2026-11-14 — *The sidebar stays open under a calendar*
+### Fixed
+- **The sidebar stays open while you use a pop-up drawn from it on a phone.** Below 768px
+  Streamlit collapses the sidebar on any press outside it, so a tap on the page dismisses the
+  rail. A date picker's calendar is drawn in a pop-up layer outside the sidebar, so on a phone the
+  first tap on a day or a month arrow counted as "outside" and the whole sidebar closed under the
+  finger. Every pop-up now keeps its presses to itself, as dropdown menus always did, and only
+  below 768px; a tap on the page beside the sidebar still dismisses it. The script that does this
+  rides in a zero-height frame lifted out of the layout, so no block on any page moves.
+
 ## [3.1.7] — 2026-11-14 — *One type system, one vertical rhythm*
 ### Fixed
 - **Every label in the system's own faces.** Measured in all eight apps: every button, segmented

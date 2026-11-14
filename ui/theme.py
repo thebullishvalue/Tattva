@@ -138,12 +138,12 @@ LIGHT_TOKENS = """
 
 /* Buttons: Streamlit's dark-base face is a dark pill, which on paper reads
    as an inverted, "pressed" control sitting on a white rail. */
-[data-testid^="stBaseButton"] {
+[data-testid^="stBaseButton"]:not([data-testid^="stBaseButton-primary"]) {
     background: var(--surface-1) !important;
     color: var(--ink-secondary) !important;
     border-color: var(--line-strong) !important;
 }
-[data-testid^="stBaseButton"]:hover {
+[data-testid^="stBaseButton"]:not([data-testid^="stBaseButton-primary"]):hover {
     background: var(--surface-2) !important; color: var(--ink) !important;
 }
 [data-testid="stBaseButton-primary"] {

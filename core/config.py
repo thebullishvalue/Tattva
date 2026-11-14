@@ -12,7 +12,7 @@ asset class's default (`CLASS_CONFIG_DEFAULTS`) plus the few values in
 
 # Single source of truth for the app version — ui/theme.py imports these (do not
 # redefine elsewhere; past drift between config and theme is why this is centralized).
-VERSION = "3.1.4"
+VERSION = "3.1.5"
 PRODUCT_NAME = "Tattva"
 COMPANY = "@thebullishvalue"
 

@@ -266,8 +266,8 @@ def _render_landing_page() -> None:
                     unsafe_allow_html=True,
                 )
 
-    # ── What a run returns ────────────────────────────────────────────────
-    render_section_header("What a run returns", icon="target")
+    # ── What a Run Returns ────────────────────────────────────────────────
+    render_section_header("What a Run Returns", icon="target")
     _out = (
         ("A valuation state", "Cheap, rich or fair against the cross-section, with six "
                               "readings behind it, each shown with its number."),

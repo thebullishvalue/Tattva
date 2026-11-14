@@ -9,6 +9,19 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.6] — 2026-11-14 — *Nothing hidden under the band*
+### Fixed
+- **Nothing hidden under a panel's header band.** Streamlit slides the element after a markdown
+  header 16px up beneath it; once the header took Pragyam's opaque band, that covered the top of
+  charts drawn right under it (subplot titles, the labels of reference lines placed above the
+  plot). A chart under a header now starts below the band, with its own 8px of air.
+- **Column headings sit on the band's rule.** A table under a header row that also holds the
+  window strip started 10px below the band; it now sits directly on the rule, as under every
+  other header.
+- **Values and names at the plot's edge are drawn whole** (they were cut by Plotly's plot-area
+  clip), and **reference-line labels take their tone at full strength** (some reused their line's
+  25% tint).
+
 ## [3.1.5] — 2026-11-14 — *Pragyam's panel chrome across the family*
 ### Changed
 - **Pragyam's panel chrome, across the family.** Every chart, table and readout panel's header

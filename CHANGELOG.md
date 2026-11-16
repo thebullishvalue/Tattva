@@ -9,6 +9,15 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.10] — 2026-11-16 — *The cursor shows on Paper*
+### Fixed
+- **The cursor and typed search text are visible on Paper.** Streamlit's base theme is the dark
+  one, and its inputs carried that theme's near-white text colour into two places the theme never
+  named: the blinking cursor in every text, number and date field, and the characters typed into
+  a dropdown to filter it ("Select transaction", "Select security"). On Paper's white fields both
+  measured 1.2:1, all but invisible. Both now take the page's ink: 17.7:1 on Paper, unchanged on
+  Slate. A dropdown keeps its hidden cursor; the letters you type are their own feedback.
+
 ## [3.1.9] — 2026-11-14 — *Rail buttons sized for the button*
 ### Fixed
 - **A rail button's label is sized for the button.** Every button in the sidebar is a full-width

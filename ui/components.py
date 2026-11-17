@@ -312,10 +312,11 @@ def render_chart_panel(
     drawn on, so that is what the panel header carries — supplied
     automatically from session state, with ``units`` appended.
     """
-    from ui.theme import PLOTLY_CONFIG   # local: avoids a circular import
+    from ui.theme import PLOTLY_CONFIG, fix_hover_formats   # local: avoids a circular import
     ctx = default_chart_context(units, windowed) if context is None else context
     with panel(key, title, context=ctx, meta=meta, chip=chip, footer=footer,
                window=window):
+        fix_hover_formats(fig)
         st.plotly_chart(fig, width="stretch", key=f"chart-{key}", config=PLOTLY_CONFIG)
 
 

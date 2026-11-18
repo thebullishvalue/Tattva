@@ -9,6 +9,16 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.13] — 2026-11-18 — *Numbers written as text read as numbers*
+### Fixed
+- **Numbers written as text read as numbers.** A table column whose numbers arrive already
+  formatted ("1,901.70", "+3.4%", "₹25,575", "12.4×", "1,625.48 (−14.5%)") was read by its type,
+  text, so it sat left-aligned in the tertiary ink like a column of labels, beside the right-aligned
+  numbers of the same table. A column whose every value is a written number (a dash for a missing
+  one allowed) is now a numeric column: right-aligned, tabular, in the primary ink, and one the
+  table colours by sign takes its colour from the written sign. The label column stays a label,
+  whatever it holds. Brought from VAAYDO, where it was built.
+
 ## [3.1.12] — 2026-11-18 — *The appearance switch reaches the rail's foot*
 ### Fixed
 - **The appearance switch reaches the rail's foot.** The rail is meant to read identity →

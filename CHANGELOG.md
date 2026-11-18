@@ -9,6 +9,31 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.15] — 2026-11-18 — *The family console*
+### Changed
+- **One console, shared by the family.** `core/logger_config.py` is now the family console, the same file
+  in all nine apps, as the fidelity block of `theme.css` is for the page. Seven consoles had grown
+  from one design (five copies of the same module, two more embedded in Samhita and Swing) and
+  drifted: rules 60 and 70 wide, phases written three ways, timers rounded to whole seconds
+  ("[0s]"), colour codes written into captured logs, a second run id printed under the first.
+- **One grammar.** The product's banner once per process; a run's masthead (title, version, one
+  run id, its start); its inputs in a labelled block; numbered phases with their time; numbered
+  steps that close with what they produced and how long they took; labels in one column, long
+  values wrapping under it at 72 columns; ✓ ⚠ ✗ ℹ in their colours; result cards; and a closing
+  line, RUN COMPLETE or RUN FAILED, with the run's time and its warning and error counts.
+- **Library output joins the run.** yfinance's HTTP errors (`HTTP Error 401: Unauthorized{"finance":
+  …}`), its "possibly delisted" notices and Python warnings (a pandas RuntimeWarning with its full
+  site-packages path) printed raw into the middle of a run. Each now arrives as one dimmed ⚠ line
+  naming its source, once per run, counted as a warning.
+- **Colour only on a terminal**, so a captured log is plain text (`NO_COLOR` / `FORCE_COLOR` honoured).
+- Data preparation is phase 1 of 5 (it was an unnumbered block above "Phase 2/5"); the run's
+  configuration names its span and horizon, and the panel's eight count rows read as four.
+- The Precedent phase reports its read (analogs, base rate, the matcher's skill); it printed nothing.
+- Tattva's own module logs (fetch fallbacks, the circuit breaker) join the trace; they printed to
+  stderr unformatted.
+
+---
+
 ## [3.1.14] — 2026-11-18 — *Contribution over time, by date*
 
 ### Fixed

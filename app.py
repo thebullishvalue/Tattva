@@ -108,7 +108,7 @@ from pipeline.run import run_prepared
 from core.trust import class_record
 
 # ── Logger & Config ──────────────────────────────────────────────────────────
-from core.logger_config import console, generate_run_id
+from core.logger_config import console, capture_library_output, route_logging
 from core.config import (ALL_TARGETS, TARGET_CATEGORIES, is_stock_target, DIV_LOOKBACK,
                          TIMEFRAME_TRADING_DAYS, FREEFORM_STOCK_CATEGORIES,
                          register_stock_target)
@@ -435,6 +435,10 @@ def main():
     # CSS, charts and tables agree on one value for the whole run.
     st.session_state["theme"] = "light" if theme_choice() == "Paper" else "dark"
     inject_css(theme=st.session_state["theme"])
+    # The terminal's masthead, once per process; library output joins the run trace.
+    capture_library_output()
+    route_logging(console, names=("data", "engines", "convergence", "pipeline"))
+    console.banner(PRODUCT_NAME, VERSION, "Cross-Asset Fair Value · Self-Referential Breadth · A Graded Record")
 
     # Replay stock-target registration: it mutates module-level config, which
     # survives reruns within a process but is rebuilt on restart. Idempotent.
@@ -676,12 +680,15 @@ def main():
             st.rerun()
         st.session_state.pop("engine", None)
 
-        console.header("TATTVA — Analysis", f"v{VERSION}")
-        console.main_header("ANALYSIS CONFIGURATION", {
-            "Run ID": generate_run_id(), "Target": active_target,
+        console.header(f"{PRODUCT_NAME} · Analysis", VERSION)
+        console.main_header("Analysis configuration", {
+            "Target": active_target,
             "Predictors": f"{len(prep.features)} columns",
-            "Date Range": f"{len(prep.price)} observations",
+            "Date range": f"{len(prep.price)} observations · "
+                          f"{prep.calendar[0]:%Y-%m-%d} → {prep.calendar[-1]:%Y-%m-%d}",
+            "Horizon": f"{FWD_HORIZON} sessions",
         })
+        console.start_phase("Data preparation", 1, 5)
         log_report(prep.report)
 
         # The target's own OHLCV — Swayam's input. A sheet-sourced target has
@@ -696,21 +703,31 @@ def main():
                 force=bool(st.session_state.pop("_force_ohlcv", False))).get(_tkr)
         if target_ohlcv is None or target_ohlcv.empty:
             console.warning(f"No OHLCV for {active_target} ({_tkr}) — Swayam unavailable")
+        else:
+            console.item("Target OHLCV", f"{_tkr} · {len(target_ohlcv):,} bars · "
+                                         f"{target_ohlcv.index[0]:%Y-%m-%d} → {target_ohlcv.index[-1]:%Y-%m-%d}")
+        console.end_phase("Data preparation")
 
-        result = run_prepared(
-            prep, df, ohlcv=target_ohlcv,
-            progress=lambda pct, title, detail="": progress_bar(progress_container, pct, title, detail))
+        try:
+            result = run_prepared(
+                prep, df, ohlcv=target_ohlcv,
+                progress=lambda pct, title, detail="": progress_bar(progress_container, pct, title, detail))
+        except Exception as _run_exc:
+            console.error(f"Analysis failed: {type(_run_exc).__name__}: {_run_exc}")
+            console.end_run("FAILED")
+            raise
 
         for _bk in _BUNDLE_KEYS:
             st.session_state[_bk] = getattr(result, _bk)
         st.session_state["engine_cache"] = cache_key
-        console.summary("RUN SUMMARY", {
+        console.summary("Run summary", {
             "Mūla Rows": len(result.engine.ts_data),
             "Swayam Views": len(result.swayam_view_dfs),
             "Scored Sessions": len(result.convergence_df),
             "Divergence Events": len(result.divergence_events),
             "Status": "SUCCESS",
         })
+        console.end_run()
         _rcache = st.session_state.setdefault("results_cache", {})
         _rcache.pop(cache_key, None)
         _rcache[cache_key] = {bk: st.session_state.get(bk) for bk in _BUNDLE_KEYS}

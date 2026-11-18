@@ -194,22 +194,20 @@ def _print_mask(df: pd.DataFrame, cal: pd.DatetimeIndex, features: list[str]) ->
 def log_report(report: dict, stage: str = "complete") -> None:
     """Print the data-preparation trace to the run console."""
     dropped = report.get("feats_dropped", [])
-    console.section("DATA PREPARATION")
-    console.item("Target", f"{report.get('target')}  (ticker={report.get('ticker') or 'n/a'}, "
-                           f"exch={report.get('exchange')})")
-    console.item("Scoring Horizon", f"{report.get('fwd_h', '?')}d")
-    console.item("Rows · fetched", report.get("rows_initial", "?"))
-    console.item("Rows · after session spine",
-                 f"{report.get('rows_session', '?')}  ({report.get('sessions_dropped', '?')} non-session rows removed)")
-    console.item("Instruments · requested", report.get("feats_requested", "?"))
-    console.item("Instruments · dropped (too few prints to ever join)",
-                 f"{len(dropped)}" + (f" → {', '.join(dropped[:6])}{'…' if len(dropped) > 6 else ''}"
-                                      if dropped else ""))
+    console.section("Panel")
+    console.item("Target", f"{report.get('target')} · {report.get('ticker') or 'n/a'} · {report.get('exchange')}")
+    console.item("Scoring horizon", f"{report.get('fwd_h', '?')}d")
+    console.item("Rows", f"{report.get('rows_initial', '?')} fetched · {report.get('rows_session', '?')} on the "
+                         f"session spine ({report.get('sessions_dropped', '?')} non-session removed) · "
+                         f"{report.get('rows_final', '?')} final")
+    console.item("Instruments", f"{report.get('feats_requested', '?')} requested · "
+                                f"{report.get('feats_kept', '?')} in the valuation panel")
+    if dropped:
+        console.item("Dropped · too few prints",
+                     f"{len(dropped)} → {', '.join(dropped[:6])}{'…' if len(dropped) > 6 else ''}")
     if report.get("yield_cols_dropped"):
-        console.item("Instruments · dropped (raw yield levels)", report["yield_cols_dropped"])
-    console.item("Instruments · in valuation panel", report.get("feats_kept", "?"))
+        console.item("Dropped · yields", f"{report['yield_cols_dropped']} raw yield levels")
     if report.get("fingerprint"):
         console.item("Panel fingerprint", report["fingerprint"])
-    console.item("Rows · final spine", report.get("rows_final", "?"))
     if stage == "complete":
         console.checkpoint(f"Data spine ≥ {report.get('min_required')}", "OK")

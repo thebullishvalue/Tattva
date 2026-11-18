@@ -254,7 +254,7 @@ def run_convergence(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.
                         str(pd.Timestamp(row.Index).date()))
     events = detector.get_events()
     both = j["agree"].dropna()
-    console.item("Sessions with both engines", f"{len(j)} ({int(j['swayam_native'].sum())} with a native Swayam row)")
+    console.item("Both engines", f"{len(j)} sessions ({int(j['swayam_native'].sum())} with a native Swayam row)")
     if len(both):
         console.item("Sign agreement", f"{both.mean():.0%} of the {len(both)} sessions on which both lean")
     console.item("Divergence events", len(events))
@@ -276,7 +276,7 @@ def grade(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame)
         edges["call"] = intelligence.call_record(fvo, price, h)
         c = edges["call"]
         if c["n_claims"]:
-            console.item("call as issued", f"{c['n_claims']} claims · hit {c['hit']:.1f}% vs base "
+            console.item("Call as issued", f"{c['n_claims']} claims · hit {c['hit']:.1f}% vs base "
                          f"{c['base']:.1f}% · excess {c['excess_bps']:+.0f} ± {c['se_bps']:.0f} bps per claim")
         if not swayam_daily.empty:
             sw = (swayam_daily[swayam_daily["_Native"].astype(bool)]
@@ -287,7 +287,7 @@ def grade(prep: PreparedPanel, fvo_ts: pd.DataFrame, swayam_daily: pd.DataFrame)
         for k, e in edges.items():
             if k == "call":
                 continue
-            console.item(f"{k} edge", (f"IC {e['ic']:+.3f} ± {e['se']:.3f} · {e['n']} calls · "
+            console.item(f"{'Mūla' if k == 'mula' else k.capitalize()} edge", (f"IC {e['ic']:+.3f} ± {e['se']:.3f} · {e['n']} calls · "
                                        f"{e['positive_blocks']}/{e['scored_blocks']} periods +")
                          if e and e.get("ic") is not None and np.isfinite(e["ic"]) else "not graded")
     except Exception as e:                           # noqa: BLE001 - a diagnostic, not the run
@@ -325,6 +325,15 @@ def precedent(prep: PreparedPanel, engine: MulaEngine) -> tuple[dict | None, lis
             if sk:
                 skill = {k: (float(sk[k]) if np.isfinite(sk[k]) else None)
                          for k in ("hit", "base", "edge", "ic")} | {"n": int(sk["n"]), "horizon": int(hp)}
+        console.item("Analogs", f"{len(analogs)} similar periods · horizons "
+                                 f"{', '.join(f'{x}d' for x in hold)}")
+        if summary:
+            console.item(f"Base rate · {summary['horizon']}d",
+                         f"median {summary['median']:+.2f}% · {summary['positive_pct']:.0f}% positive · "
+                         f"n {summary['n']} (≈{summary['n_eff']:.0f} effective)")
+        if skill and skill.get("hit") is not None:
+            console.item("Matcher skill", f"hit {skill['hit']:.1f}% vs base {skill['base']:.1f}% · "
+                                          f"{skill['n']} walk-forward calls")
     except Exception as e:                           # noqa: BLE001 - evidence, not the run
         console.warning(f"Precedent read skipped: {type(e).__name__}: {e}")
     return summary, analogs, skill

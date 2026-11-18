@@ -466,7 +466,16 @@ def _render_drivers(engine) -> None:
     hist = engine.get_feature_impact_history() if hasattr(engine, "get_feature_impact_history") else None
     if hist is not None and not hist.empty:
         render_sub_header("Contribution over time")
-        render_table_panel(hist.tail(10), "mula-drivers-history", units="latest sessions",
+        # Rows are samples, one every `step` sessions; each is labelled by its session's date
+        # (it was labelled by its position in the series, "2,851.00"), newest first.
+        tail = hist.tail(10)
+        step = int(tail["index"].diff().median()) if "index" in tail and len(tail) > 1 else 1
+        view = tail.drop(columns=["index"], errors="ignore")
+        if "date" in view:
+            view = view.set_index("date")
+        view = view.iloc[::-1]
+        render_table_panel(view, "mula-drivers-history", index_label="Date",
+                           units="% contribution to fair value" + (f" · every {step} sessions" if step > 1 else ""),
                            windowed=False, max_rows=10, max_height=240)
 
 

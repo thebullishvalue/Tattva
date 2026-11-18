@@ -9,6 +9,18 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.14] — 2026-11-18 — *Contribution over time, by date*
+
+### Fixed
+- **Mūla's "Contribution over time" table is labelled by session date.** Each row was labelled
+  by its position in the engine's series ("2,851.00", "2,874.00"), a number that meant nothing
+  on the page. Rows now lead with the session's date, newest first, and the band says what the
+  rows are: "% contribution to fair value · every 25 sessions" (the history is a sample, one row
+  every few sessions, not the latest sessions it claimed to be). The engine's history carries
+  the date beside the position it already kept.
+
+---
+
 ## [3.1.13] — 2026-11-18 — *Numbers written as text read as numbers*
 ### Fixed
 - **Numbers written as text read as numbers.** A table column whose numbers arrive already

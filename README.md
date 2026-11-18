@@ -1,6 +1,6 @@
 # TATTVA — तत्त्व
 
-**Cross-asset valuation, with a call only where its record supports one** · v3.1.13 · *@thebullishvalue*
+**Cross-asset valuation, with a call only where its record supports one** · v3.1.14 · *@thebullishvalue*
 
 > *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality".
 

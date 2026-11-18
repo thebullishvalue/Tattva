@@ -998,8 +998,8 @@ class MulaEngine:
         step = max(1, len(rows) // 120)
         pos = {ts: i for i, ts in enumerate(pct.index)}
         self.feature_impact_history = [
-            {"index": pos[ts], **{str(k): float(v) for k, v in row.items()
-                                  if np.isfinite(v)}}
+            {"index": pos[ts], "date": ts, **{str(k): float(v) for k, v in row.items()
+                                              if np.isfinite(v)}}
             for ts, row in rows.iloc[::step].iterrows()
         ]
 

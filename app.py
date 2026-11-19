@@ -80,6 +80,8 @@ from ui.components import (
     render_ticker,
     render_section_header,
     render_kpi_strip,
+    render_outcome_grid,
+    render_system_grid,
     panel,
     render_nav_brand,
     render_warning_box,
@@ -185,40 +187,52 @@ def _render_header(frame=None) -> None:
         render_ticker(frame)
 
 
-#: The three systems as the landing page describes them: data, rendered
-#: through one template.
-_SYSTEM_PANELS = (
-    ("mula", "System 01", "Mūla", "The world's valuation",
-     "Prices the target against the whole traded macro cross-section with a dynamic "
-     "cointegrating regression on log price, then asks the question a trade depends on: "
-     "does price, not just fair value, close the gap? Its valuation is the one claim Tattva makes.",
-     (("Estimator", "Recursive discounted DLM"),
-      ("Equilibrium", "MP factors + asset blocks"),
-      ("Reversion", "Price-side error correction"))),
-    ("swayam", "System 02", "Swayam", "The instrument's own read",
-     "Reads the instrument's own price through a bank of views spanning timescale, "
-     "information set and mechanism, and weights each view by its own realised skill. "
-     "It confirms or contradicts the call from the inside.",
-     (("Signal", "MSF + MMR oscillator"),
-      ("Breadth", "Net oversold share of views"),
-      ("Regime", "HMM \u00b7 GARCH \u00b7 CUSUM"))),
-    ("convergence", "System 03", "Convergence", "Agreement, measured",
-     "Sets the two readings side by side, session by session: whether they lean the same "
-     "way, the consensus of the two on a common scale, and the sessions on which they "
-     "part company.",
-     (("Compared", "Mūla \u00d7 Swayam leans"),
-      ("Consensus", "Zero-anchored, causal"),
-      ("Divergences", "Named, per session"))),
+#: The landing page's three segments, as data: Engines, Inputs & Scope, Run Outputs, in the
+#: order Arthagati reads them. Plain words first; a method's name only where it helps.
+_ENGINES = (
+    ("Mūla", "The valuation · against the world",
+     "Works out where the target should trade given everything else that trades — rates, "
+     "currencies, commodities, equities and credit, about two hundred instruments in all — and "
+     "measures how far today's price sits from that level. It then checks what a trade depends "
+     "on: whether the price, not the estimate, has tended to close the gap.",
+     (("Compared with", "≈ 200 market instruments"),
+      ("Reads", "Cheap · fair · rich"),
+      ("Checks", "Does price close the gap?"))),
+    ("Swayam", "The confirmation · its own price",
+     "Reads the target's own price through fifteen different views — short and long, price "
+     "alone and price in its macro setting — and weights each by how well it has actually "
+     "done. It says whether the target looks stretched down or up on its own terms, "
+     "independently of the valuation.",
+     (("Views", "15, weighted by their record"),
+      ("Spans", "Days to months"),
+      ("Reads", "Oversold against overbought"))),
+    ("Convergence", "The agreement · side by side",
+     "Lines the two readings up, session by session: how often they lean the same way, one "
+     "combined reading on a common scale, and the days they part company. Agreement is shown, "
+     "never assumed.",
+     (("Compares", "Mūla and Swayam"),
+      ("Combined", "One scale, centred on zero"),
+      ("Flags", "The days they disagree"))),
+)
+
+_OUTPUTS = (
+    ("A valuation", "Cheap, fair or rich against the rest of the market, with the six readings "
+                    "behind it shown one by one, never blended into a single score."),
+    ("The call's track record", "Every past cheap-or-rich call, graded the way it would have been "
+                                "traded. Tattva prints BUY or SELL only where that record "
+                                "supports one."),
+    ("A historical base rate", "What happened next in the most similar past situations, matched "
+                               "on the engines' own readings rather than on a model fitted to "
+                               "returns."),
+    ("The full record", "Every series behind the reading, joined by date, ready to explore or "
+                        "export."),
 )
 
 
 def _render_landing_page() -> None:
-    """Cold start: what the product is, built from the components the pages use."""
+    """Cold start: the claim, then Engines, Inputs & Scope and Run Outputs (Arthagati's three)."""
     from core.config import TARGET_CATEGORIES, CATALOGUE_TARGETS
 
-    _n_cat, _n_tgt = len(TARGET_CATEGORIES), len(CATALOGUE_TARGETS)
-
-    # ── The proposition ───────────────────────────────────────────────────
     st.markdown(
         """<div class="lede">
   <div class="lede-claim">One engine values the instrument against the world, a second
@@ -230,67 +244,41 @@ def _render_landing_page() -> None:
         unsafe_allow_html=True,
     )
 
-    # ── Coverage — the app's own KPI grammar, not a bespoke number row ─────
-    render_section_header("Coverage", icon="layers")
+    render_section_header(
+        "Engines",
+        "Three readings of one instrument: one values it against the rest of the market, one "
+        "reads its own price, and one sets the two side by side.",
+        icon="cpu",
+    )
+    render_system_grid(_ENGINES)
+
+    render_section_header(
+        "Inputs & Scope",
+        "What Tattva can be pointed at, and how much history stands behind each reading.",
+        icon="database",
+    )
     render_kpi_strip(
         [
-            {"label": "Asset Classes", "value": str(_n_cat),
-             "subtext": "Commodities, FX, crypto, India and US indices, and any listed "
-                        "stock by symbol"},
-            {"label": "Catalogue Targets", "value": str(_n_tgt),
-             "subtext": "Every one runnable on free data; each carries its own "
-                        "configuration, defaulting to its asset class's"},
+            {"label": "Asset Classes", "value": str(len(TARGET_CATEGORIES)),
+             "subtext": "Commodities, currencies, crypto, Indian and US indices, and any listed "
+                        "stock by its symbol"},
+            {"label": "Ready-Made Targets", "value": str(len(CATALOGUE_TARGETS)),
+             "subtext": "Each runs on free market data with settings suited to its asset "
+                        "class; nothing to configure"},
             {"label": "Daily History", "value": f"Since {EPOCH[:4]}",
-             "subtext": "Every published value uses only data available on its own "
-                        "date, so re-running extends the record instead of rewriting it"},
+             "subtext": "Every value uses only what was known on its own date, so a later run "
+                        "adds to the record without rewriting it"},
         ],
         max_cols=3,
         key="landing-coverage",
     )
 
-    # ── The three systems, as panels ──────────────────────────────────────
-    render_section_header("Systems", icon="cpu")
-    cols = st.columns(3, gap="small")
-    for col, (cls, eyebrow, name, kicker, body, specs) in zip(cols, _SYSTEM_PANELS):
-        with col:
-            with panel(f"landing-{cls}", name, context=kicker):
-                st.markdown(
-                    f'<div class="panel-copy">{body}</div>'
-                    '<div class="panel-specs">'
-                    + "".join(
-                        f'<div class="lookback-row"><span class="lbl">{k}</span>'
-                        f'<span class="val">{v}</span></div>'
-                        for k, v in specs
-                    )
-                    + "</div>",
-                    unsafe_allow_html=True,
-                )
-
-    # ── What a Run Returns ────────────────────────────────────────────────
-    render_section_header("What a Run Returns", icon="target")
-    _out = (
-        ("A valuation state", "Cheap, rich or fair against the cross-section, with six "
-                              "readings behind it, each shown with its number."),
-        ("The call's record", "Every claim graded as issued — entered at the next close, "
-                              "against what the same direction earned on any day — pooled "
-                              "by asset class. A call is printed only where that record "
-                              "supports it."),
-        ("A base rate", "What followed the most similar past states of the system — no "
-                        "model fitted to returns, matched on the engines' own reading."),
-        ("The record", "Every series behind the call, joined by date and exportable."),
+    render_section_header(
+        "Run Outputs",
+        "Four things land on screen when a run finishes, each with the evidence behind it.",
+        icon="target",
     )
-    # One grid of plain divs: static text gains nothing from a Streamlit
-    # container, and its markdown wrapper clips copy taller than one line.
-    st.markdown(
-        '<div class="outcome-grid">'
-        + "".join(
-            f'<div class="outcome"><div class="o-t">{html.escape(t)}</div>'
-            f'<div class="o-d">{html.escape(d)}</div></div>'
-            for t, d in _out
-        )
-        + "</div>",
-        unsafe_allow_html=True,
-    )
+    render_outcome_grid(_OUTPUTS)
 
 
 def _recent_divergences(window: int) -> int:

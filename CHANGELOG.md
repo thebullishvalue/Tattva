@@ -9,6 +9,24 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.16] — 2026-11-19 — *The landing page in three segments*
+### Changed
+- **The landing page reads as Arthagati's.** Below the masthead and the claim, three segments in
+  one order: **Engines** (the three parts of the system, each a plain paragraph on what it does
+  and why it matters, then three short facts), **Inputs & Scope** (what it can be pointed at and
+  the history behind it) and **Run Outputs** (the four things a run puts on screen). It ran
+  Coverage, Systems, What a Run Returns: scope before the system it bounds. Each section now opens
+  with one sentence saying what it holds.
+- **Plain words.** The copy says what each part does and why it matters, without the internal
+  shorthand it carried ("Recursive discounted DLM", "MP factors + asset blocks", "MSF + MMR
+  oscillator", "HMM · GARCH · CUSUM"). A method's name stays only where it helps the reader.
+- **One height, one row.** The three panels are one grid, so they stand at one height with their
+  facts on one baseline (as Streamlit containers each sized to its own copy, the longest panel
+  stood taller); the four output cards sit in one row, then two by two, then one per row on a
+  phone (they wrapped three and one, the fourth alone on its row).
+
+---
+
 ## [3.1.15] — 2026-11-18 — *The family console*
 ### Changed
 - **One console, shared by the family.** `core/logger_config.py` is now the family console, the same file

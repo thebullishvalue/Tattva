@@ -87,7 +87,6 @@ from ui.components import (
     render_warning_box,
     render_top_bar,
     render_notice_rail,
-    render_rail_readout,
     window_cutoff,
 )
 from ui.tabs.tab_mula import render_mula_tab
@@ -331,27 +330,6 @@ def _compute_hero_verdict(signal: dict, target: str, horizon: int) -> dict:
     )
 
 
-def _render_model_passport_sidebar() -> None:
-    """Rail readout — what the run measured, not a control."""
-    st.markdown('<div class="sidebar-title">Record</div>', unsafe_allow_html=True)
-    edges = st.session_state.get("edges") or {}
-    call, lean = edges.get("call") or {}, edges.get("mula") or {}
-    if not call and not lean:
-        render_control_hint("Run an analysis to populate.")
-        return
-    rows = []
-    if call.get("n_claims"):
-        rows.append(("Claims graded", f"{call['n_claims']:,}", ""))
-        rows.append(("Hit rate", f"{call['hit']:.1f}%", "accent"))
-        rows.append(("Any-day base", f"{call['base']:.1f}%", ""))
-        if np.isfinite(call.get("t", np.nan)):
-            rows.append(("Excess t", f"{call['t']:+.2f}", "long" if call["t"] > 0 else "short"))
-    ic = lean.get("ic")
-    if ic is not None and np.isfinite(ic):
-        rows.append(("Lean IC", f"{ic:+.3f}", ""))
-    render_rail_readout(rows)
-
-
 #: The durable record of the appearance choice — a plain session key, never a
 #: widget key. Streamlit discards the state of a widget that a run does not
 #: reach, and the appearance control sits at the foot of the rail, below
@@ -580,8 +558,6 @@ def main():
     df = _ensure_stock_target_column(df, active_target)
 
     with st.sidebar:
-        _render_model_passport_sidebar()
-
         if st.session_state.get("run_analysis"):
             st.markdown('<div class="sidebar-title">Session</div>', unsafe_allow_html=True)
             # One per row, each stretched to the rail width — the same shape as

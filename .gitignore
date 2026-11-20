@@ -1,12 +1,36 @@
+# ── Python ─────────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
 .venv/
 venv/
 .env
+
+# ── Tooling caches ─────────────────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.cache/
+
+# ── Streamlit ──────────────────────────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ── Logs ───────────────────────────────────────────────────────────────────────
+*.log
+
+# ── Editors and operating systems ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
 .DS_Store
+Thumbs.db
+__MACOSX/
+
+# ── This repository ──────────────────────────────────────────────────────────────
 research/.tune_cache/
 research/reports/
-.cache/
-*.log
-.pytest_cache/

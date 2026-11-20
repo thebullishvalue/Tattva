@@ -1,8 +1,20 @@
-# TATTVA — तत्त्व
+<div align="center">
 
-**Cross-asset valuation, with a call only where its record supports one** · v3.1.17 · *@thebullishvalue*
+# TATTVA
 
-> *Tattva (तत्त्व)* — Sanskrit for "principle / essence / reality".
+**तत्त्व** · *principle, essence, reality*
+
+Cross-Asset Fair Value · Self-Referential Breadth · A Graded Record
+
+[![Version](https://img.shields.io/badge/version-3.1.17-2B5FD9)](CHANGELOG.md) [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)](requirements.txt) [![Streamlit](https://img.shields.io/badge/streamlit-1.52.2-FF4B4B)](requirements.txt) [![License](https://img.shields.io/badge/license-proprietary-6B7280)](LICENSE) [![Pragyam Family](https://img.shields.io/badge/pragyam-family-0F1217)](#the-pragyam-family)
+
+</div>
+
+> One engine values the instrument against the world, a second reads its own price from a bank
+> of views, and Tattva says where it stands (cheap, fair or rich) and issues a call only where
+> that call's own record supports one.
+
+## Overview
 
 Tattva is a research terminal. For a target — a commodity, a currency, a crypto
 asset, an equity index or any listed stock — it says where the price stands
@@ -18,9 +30,7 @@ trust.
 
 It runs on free **yfinance** data. No API keys, no secrets, no database.
 
----
-
-## What it does
+## What It Does
 
 | Part | Question | How |
 |---|---|---|
@@ -43,9 +53,7 @@ reversion, cross-section agreement, Swayam's breadth, the record, and
 precedent. **They are shown, not multiplied into a score.** Graded on past
 claims, their product did not separate good calls from bad.
 
----
-
-## Quickstart
+## Quick Start
 
 ```bash
 pip install -r requirements.txt          # Python 3.10+; Streamlit is pinned exactly
@@ -61,69 +69,7 @@ values every catalogue target, about ten seconds each.
 
 Nothing about the model is user-configurable, by design.
 
----
-
-## How it works
-
-**Valuation, in levels.** Mūla regresses log price on the integrated common
-factors of the macro cross-section with time-varying coefficients:
-
-```
-p_t = alpha_t + sum_j beta_{j,t} F_{j,t} + e_t ,   F_{j,t} = sum_{s<=t} f_{j,s}
-```
-
-`e` is the gap. Two views — latent principal factors and named asset-class
-blocks — are averaged by their own out-of-sample predictive evidence.
-Leave-one-block-out refits give driver importance and the cross-section read.
-
-**The gap is not a z-score.** It is divided by its own predictive SD, but its
-tails are fat: |gap| ≥ 2 occurs about one day in ten. The pages print the gap's
-percentile of its own history beside it.
-
-**A stationary gap is not yet a trade.** A gap closes when either side moves,
-and most of the closing is fair value moving to price. The reversion reading is
-therefore the price-side error-correction coefficient: each session's price
-change regressed on the previous gap.
-
-**The panel is ragged on purpose.** A predictor that lists later keeps its
-leading gaps and joins the cross-section when its own print count allows. No
-predictor's listing date shortens the target's history, and a new predictor
-does not change any row before its first print.
-
-**The call is graded as it is issued.** A claim is a session where the gap is
-at least half its typical size. It is entered at the **next** close — the panel
-row for a date holds closes from markets that shut after the target did — and
-held ten sessions. Each claim is scored **in excess of always holding its
-direction on that target**: on an asset that drifts up, a buy claim wins more
-than half the time whatever it is conditioned on, so a raw hit rate grades the
-drift. Dividend-paying targets are graded on a total-return level built forward
-from the close.
-
-**One target cannot license a call.** A single target has a few hundred
-independent claims at most, which cannot tell an edge from noise. Claims are
-pooled within the asset class (`studies/pooled_record.py` →
-`data/priors/call_record.json`), and a side is licensed when its pooled excess
-is at least one standard error above zero **and** its hit rate beats the
-any-day base (`core/trust.py`).
-
-**Nothing looks ahead, and it is asserted.** Every published value is a
-function of data available at its own date. `tests/test_causality.py` and
-`tests/test_panel.py` fit Mūla on `data[:T]` and `data[:T-200]` and require
-exact agreement on every shared date, on rectangular and ragged panels;
-`tests/test_swayam.py` requires the same of Swayam's views, skill weights and
-aggregate.
-
-**What can still move a past reading.** The newest bar is still forming until
-its session closes; it is published flagged `Provisional` and excluded from
-everything that learns. And the panel's composition can differ between fetches
-(a rate-limited ticker): the panel fingerprint in the run console says when it
-has, and a predictor refilled from a cached snapshot is named in a warning.
-The fetch always starts on the same date (`core.config.EPOCH`), so the
-estimators' origin does not move from day to day.
-
----
-
-## The record
+## The Record
 
 <!-- record:start -->
 Generated 2026-11-11 by `studies/pooled_record.py` from a panel through 2026-11-11 (fingerprint `439877db9eb4`). 27 targets, 10 sessions, entered 1 session after the claim. *Hit vs base* is the share of claims that made money against the share the same direction made on any day; *t* is the mean return in excess of always holding that direction, over its standard error.
@@ -163,62 +109,7 @@ candidate clears the bar** on the development sample, so the holdout has not
 been read. Adding a candidate means a new dated section in the pre-registration
 and a higher bar.
 
----
-
-## Reading the pages
-
-- **Overview** — the read, the class record and this target's own, then the
-  six readings.
-- **Universe** — every catalogue target's state, gap, percentile and own
-  record; open any of them.
-- **Mūla** — price against fair value with the oscillator and its no-claim
-  band; the error-correction read; model quality; drivers; how broad the
-  mispricing is across 1-month / 1-quarter / 1-year windows.
-- **Swayam** — net breadth, the effective number of independent views, which
-  views carry weight, the regime underneath.
-- **Convergence** — sign agreement, the consensus, lean against lean, the
-  divergences table.
-- **Precedent** — the base rate with its distinct-episode count, the matcher's
-  skill at every horizon, the closest analogs.
-- **System** — each engine's lean IC, the call's record by side for this target
-  and its class, the gap's stationarity statistics, data-layer health.
-  **Data** — the joined record, exportable.
-
----
-
-## Data
-
-- **Predictors:** `GLOBAL_MACRO_MAP` (bond, rates, credit, equity, sector,
-  style, volatility, real-asset ETFs and indices) and `MACRO_SYMBOLS_YF`
-  (commodities, FX) in `core/config.py`. Reciprocals and re-denominations of an
-  instrument already present are not listed. Each target excludes its own
-  near-replicas.
-- **Swayam input:** the target's own OHLCV; its macro driver pool is the same
-  panel, minus the target and its near-replicas.
-- **Sheet-sourced targets** (Jeera, Nifty 50 - PE) come from published Google
-  Sheets, have no OHLCV and run without Swayam. A valuation ratio is not graded
-  as a call.
-
-Every external call goes through a two-tier cache, a consecutive-failure
-circuit breaker, retry with backoff and a stale-snapshot fallback. A target
-whose own price changed on fewer than half of its last 252 sessions is refused
-as not live.
-
-**Limits worth knowing.**
-
-- Prices are the traded close, not dividend-adjusted: an adjusted history is
-  rewritten backwards on every distribution, which would repaint. Only the
-  *grading* of dividend-paying targets uses total return.
-- Continuous futures (`=F`) carry contract rolls as returns.
-- Crypto is read on a five-day week, by both engines.
-- The disk cache (`~/.cache/tattva`) is unpickled as found. Use it on a host
-  you control.
-- The record covers one decade that was a bull market for most of the
-  catalogue — the regime in which a contrarian call does worst.
-
----
-
-## Configuration and structure
+## Project Structure
 
 | What | Where |
 |---|---|
@@ -244,15 +135,46 @@ tests/              offline: causality, the panel, grading, the verdict, the pip
 docs/               the audit and directive this release implements
 ```
 
----
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [Guide](docs/GUIDE.md) | How it works, reading each page, the data and its limits |
+| [Pre-registration](studies/PREREGISTRATION.md) | The candidate study, fixed before it was run |
+| [Resolution directive](docs/RESOLUTION_DIRECTIVE.md) | The audit the current release implements |
+| [Implementation notes](docs/IMPLEMENTATION_NOTES.md) | Where the build departed from the directive, and what is left |
+| [Changelog](CHANGELOG.md) | Every release, newest first |
+
+## The Pragyam Family
+
+Nine Streamlit applications built on one design system and one set of components, so a
+panel, a table, a chart or a number reads the same in each.
+
+| Product | What it is |
+|---|---|
+| **Tattva** · *this repository* | Cross-asset fair value, with a call only where its own record supports one |
+| [**Nishkarsh**](https://github.com/thebullishvalue/Nishkarsh) | Nifty 50 inference: a top-down forecast and bottom-up breadth, read as one |
+| [**Arthagati**](https://github.com/thebullishvalue/Arthagati) | Valuation-anchored market sentiment, tested on data it never saw |
+| [**Pragyam**](https://github.com/thebullishvalue/Pragyam) | Portfolio curation that spreads risk rather than predicting returns |
+| [**Sanket**](https://github.com/thebullishvalue/Sanket) | A market signal screener: what fired, what is about to, and whether it has paid |
+| [**Vaaydo**](https://github.com/thebullishvalue/Vaaydo) | An F&O trade screener on option positioning, with futures tickets |
+| [**Nivesa**](https://github.com/thebullishvalue/Nivesa) | A bond portfolio ledger: cost, yield, duration and cashflows across accounts |
+| [**Samhita**](https://github.com/thebullishvalue/Samhita) | A portfolio tracker: live prices, performance and risk against the benchmark |
+| [**Swing**](https://github.com/thebullishvalue/Swing) | A portfolio tracker for the swing book, on the same engine as Samhita |
+
+## License
+
+Proprietary. © 2026 @thebullishvalue. All rights reserved. The source is visible here
+for reference only: viewing it grants no right to use, copy, modify or distribute it.
+See [LICENSE](LICENSE).
 
 ## Disclaimer
 
-Tattva is a **research and educational tool**, not investment advice. Its own
-record shows no edge in the call it grades. Do not make trading or investment
-decisions on this software's output. See [LICENSE.md](LICENSE.md).
+Tattva is a research and decision-support tool, not investment advice. Nothing it shows is
+a recommendation to buy or sell any security, and past or measured results do not guarantee
+future ones. Every decision made with it is your own. Its own record shows no edge in the call
+it grades.
 
 ---
 
-*© 2026 @thebullishvalue. All rights reserved. See [LICENSE.md](LICENSE.md) and
-[CHANGELOG.md](CHANGELOG.md).*
+<div align="center"><sub>© 2026 @thebullishvalue · Part of the Pragyam product family</sub></div>

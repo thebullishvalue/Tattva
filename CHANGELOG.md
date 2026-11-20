@@ -9,6 +9,17 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.18] — 2026-11-20 — *One box per tooltip*
+### Fixed
+- **A tooltip is one box, in the family's note type.** Every `help=` tip, the rail's refresh hint
+  among them, drew a box inside a box: the tooltip rule styled the tip and the wrapper Streamlit
+  nests in it alike, so it had two borders, two shadows and its padding twice. Its words kept
+  Streamlit's own markdown type (Source Sans, 14px), so a two-sentence hint stood 250px tall in a
+  narrow column. The wrapper is plain again and the words take the 10px mono note tier the rule
+  always asked for: the same hint is one box, about half as tall, with every line inside it.
+
+---
+
 ## [3.1.17] — 2026-11-19 — *The rail holds controls*
 ### Changed
 - **The rail holds controls only.** The Record readout under the controls is gone (claims graded,

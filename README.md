@@ -147,7 +147,7 @@ docs/               the audit and directive this release implements
 
 ## The Pragyam Family
 
-Nine Streamlit applications built on one design system and one set of components, so a
+Ten Streamlit applications built on one design system and one set of components, so a
 panel, a table, a chart or a number reads the same in each.
 
 | Product | What it is |
@@ -155,6 +155,7 @@ panel, a table, a chart or a number reads the same in each.
 | **Tattva** · *this repository* | Cross-asset fair value, with a call only where its own record supports one |
 | [**Nishkarsh**](https://github.com/thebullishvalue/Nishkarsh) | Nifty 50 inference: a top-down forecast and bottom-up breadth, read as one |
 | [**Arthagati**](https://github.com/thebullishvalue/Arthagati) | Valuation-anchored market sentiment, tested on data it never saw |
+| [**Vyapti**](https://github.com/thebullishvalue/Vyapti) | Market breadth: where participation stands, which way it moves, and what that has meant |
 | [**Pragyam**](https://github.com/thebullishvalue/Pragyam) | Portfolio curation that spreads risk rather than predicting returns |
 | [**Sanket**](https://github.com/thebullishvalue/Sanket) | A market signal screener: what fired, what is about to, and whether it has paid |
 | [**Vaaydo**](https://github.com/thebullishvalue/Vaaydo) | An F&O trade screener on option positioning, with futures tickets |

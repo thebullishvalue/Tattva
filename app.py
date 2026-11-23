@@ -391,6 +391,38 @@ def _render_footer() -> None:
 # MAIN APPLICATION
 # ══════════════════════════════════════════════════════════════════════════════
 
+#: Every page: (group, title, icon, url path). One table for both navigations: the app
+#: registers its pages on every run, hidden before a run, so the same addresses always resolve.
+PAGES = (
+    ("", "Overview", ":material/dashboard:", "_page_overview"),
+    ("Engines", "Universe", ":material/grid_view:", "_page_universe"),
+    ("Engines", "Mūla", ":material/monitoring:", "_page_mula"),
+    ("Engines", "Swayam", ":material/hub:", "_page_swayam"),
+    ("Engines", "Convergence", ":material/merge_type:", "_page_convergence"),
+    ("Engines", "Precedent", ":material/history:", "_page_precedent"),
+    ("System", "System", ":material/monitor_heart:", "_page_system"),
+    ("System", "Data", ":material/table_chart:", "_page_data"),
+)
+
+
+def _hidden_pages(render) -> None:
+    """Register every page, hidden, each drawing ``render`` (the landing page, or a failure).
+
+    Before a run there is nothing for the pages to show, and the app used to return before
+    registering them at all. A session that starts on a page's address, or restarts under an
+    open one (Streamlit Cloud reboots the app on every push to main, and wakes a sleeping one
+    the same way), then held links to pages it had never registered: the landing page showed,
+    and every link in the rail did nothing until the next run. Registered and hidden, every
+    address resolves, the stale links go, and the page the reader was on comes back after Run.
+    """
+    def page() -> None:
+        render()
+        _render_footer()
+
+    st.navigation([st.Page(page, title=title, icon=icon, url_path=path, default=(i == 0))
+                   for i, (_, title, icon, path) in enumerate(PAGES)], position="hidden").run()
+
+
 def main():
     st.set_page_config(
         page_title="TATTVA | Cross-Asset Valuation",
@@ -534,23 +566,28 @@ def main():
     if df is None:
         with st.sidebar:
             _render_appearance_control()
-        _render_header()
         # A session that had a run and lost its data (the host reclaims memory)
         # is not a cold start: say so, and clear the flag that drew the rail as live.
-        if st.session_state.get("run_analysis") and "data" not in st.session_state:
-            render_warning_box(
-                title="Session data expired",
-                content=("This session had a completed run, but its fetched data is no "
-                         "longer in memory — the server dropped it, which happens on "
-                         "hosted deployments when memory is reclaimed. Nothing is lost "
-                         "except the cached frames. Run the analysis again to rebuild "
-                         "them."),
-            )
+        expired = bool(st.session_state.get("run_analysis") and "data" not in st.session_state)
+        if expired:
             # Drop the stale flag so the rail stops advertising a live session.
             for _k in ("run_analysis", "engine_cache", "results_cache"):
                 st.session_state.pop(_k, None)
-        _render_landing_page()
-        _render_footer()
+
+        def _cold_start() -> None:
+            _render_header()
+            if expired:
+                render_warning_box(
+                    title="Session data expired",
+                    content=("This session had a completed run, but its fetched data is no "
+                             "longer in memory — the server dropped it, which happens on "
+                             "hosted deployments when memory is reclaimed. Nothing is lost "
+                             "except the cached frames. Run the analysis again to rebuild "
+                             "them."),
+                )
+            _render_landing_page()
+
+        _hidden_pages(_cold_start)
         return
 
     active_target = st.session_state.get("active_target", "")
@@ -627,7 +664,8 @@ def main():
     except PrepError as e:
         log_report(e.report, stage="fail")
         console.failure(e.title, e.detail)
-        st.error(e.user_message)
+        message = e.user_message
+        _hidden_pages(lambda: st.error(message))
         return
     data = df  # the tape reads the fetched panel
 
@@ -865,23 +903,15 @@ def main():
         _top_bar(windowed=True)
         _safe_render("Data", lambda: render_data_tab(ts_filtered, ts, active_target))
 
-    pages = {
-        "": [st.Page(_page_overview, title="Overview", icon=":material/dashboard:", default=True)],
-        # In the order the evidence reads them: the claim (Mūla), the
-        # instrument's own confirmation (Swayam), their agreement
-        # (Convergence), and the base rate (Precedent).
-        "Engines": [
-            st.Page(_page_universe, title="Universe", icon=":material/grid_view:"),
-            st.Page(_page_mula, title="Mūla", icon=":material/monitoring:"),
-            st.Page(_page_swayam, title="Swayam", icon=":material/hub:"),
-            st.Page(_page_convergence, title="Convergence", icon=":material/merge_type:"),
-            st.Page(_page_precedent, title="Precedent", icon=":material/history:"),
-        ],
-        "System": [
-            st.Page(_page_system, title="System", icon=":material/monitor_heart:"),
-            st.Page(_page_data, title="Data", icon=":material/table_chart:"),
-        ],
-    }
+    # In the order the evidence reads them (see PAGES): the claim (Mūla), the instrument's own
+    # confirmation (Swayam), their agreement (Convergence), and the base rate (Precedent).
+    render_page = {"Overview": _page_overview, "Universe": _page_universe, "Mūla": _page_mula,
+                   "Swayam": _page_swayam, "Convergence": _page_convergence, "Precedent": _page_precedent,
+                   "System": _page_system, "Data": _page_data}
+    pages: dict = {}
+    for i, (group, title, icon, path) in enumerate(PAGES):
+        pages.setdefault(group, []).append(
+            st.Page(render_page[title], title=title, icon=icon, url_path=path, default=(i == 0)))
     st.session_state.pop("_pending_notices", None)     # shown on this render
     st.navigation(pages, position="sidebar").run()
 

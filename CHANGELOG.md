@@ -9,6 +9,20 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.20] — 2026-11-23 — *The pages survive a restart*
+### Fixed
+- **A page link never goes dead.** Before a run there is nothing for the pages to show, and the
+  app returned before registering them without registering them at all. A session that started on
+  a page's address, or restarted under an open one (Streamlit Cloud reboots the app on every push
+  to main, and wakes a sleeping app the same way), kept the old page links on screen for pages it
+  had never registered: the next click showed the landing page, the address stayed where it was,
+  and every link in the rail did nothing until the next run. The pages are now registered on every
+  run, hidden before an analysis and each showing the landing page (or a failed preparation's
+  message), so every address resolves, the stale links go, and a new run brings the pages back.
+  Found in Vyāpti, reproduced here the same way.
+
+---
+
 ## [3.1.19] — 2026-11-23 — *The window holds*
 ### Fixed
 - **The chart window keeps its choice across pages.** The window control held the choice in its

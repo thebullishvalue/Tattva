@@ -9,6 +9,15 @@ Sections used: **Added · Changed · Deprecated · Removed · Fixed · Security 
 
 ---
 
+## [3.1.22] — 2026-11-25 — *Text keeps its size on an iPhone*
+### Fixed
+- **Text keeps its size on an iPhone.** iOS Safari enlarges the text of a block it judges too wide to read
+  ("text autosizing"): a table that scrolls sideways with long lines in it was drawn with its prose
+  columns, and their headers, at twice the size of the rest (found on Nivesa's Audit Trail). The page and
+  every table's own iframe now keep the type scale as written (the shared fidelity block, and the table iframe's stylesheet).
+
+---
+
 ## [3.1.21] — 2026-11-24 — *The help icon, in step*
 ### Changed
 - **The family's fidelity block, in step.** It gains the rule that makes a help icon's (?) follow its colour:
